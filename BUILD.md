@@ -1,6 +1,6 @@
 # BUILD.md
 
-Active build plan for SealPort and its `sealport` command.
+Active build plan for FileFerry and its `ferry` command.
 
 `README.md` explains the product. `AGENTS.md` holds durable repo operating
 rules. This file tracks current state, implementation phases, release scope,
@@ -18,39 +18,39 @@ Last reviewed: 2026-05-18.
 - Repository exists with MIT license.
 - `origin` fetches from and pushes to
   `https://github.com/dunamismax/sealport.git`.
-- Rust workspace exists with the target crate boundaries, `sealport-cli`
-  binary, `sealport-web` homepage binary, `just` verification recipes, and
+- Rust workspace exists with the target crate boundaries, `fileferry-cli`
+  binary, `fileferry-web` homepage binary, `just` verification recipes, and
   GitHub Actions CI.
-- `sealport version` supports human, JSON, and JSONL output.
-- `sealport completion <SHELL>` generates shell completion scripts.
+- `ferry version` supports human, JSON, and JSONL output.
+- `ferry completion <SHELL>` generates shell completion scripts.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
 - Format v0 security and repository-format design docs exist.
-- `sealport-crypto` has initial tested primitives for master-key creation,
+- `fileferry-crypto` has initial tested primitives for master-key creation,
   passphrase key-slot unlock, HKDF subkeys, and XChaCha20-Poly1305 object
   envelopes.
-- `sealport-storage` has a tested object-store trait, capability model,
+- `fileferry-storage` has a tested object-store trait, capability model,
   validated object keys, local filesystem backend, and S3-compatible backend.
-- `sealport-policy` has a tested parser for count-based and tag-based
+- `fileferry-policy` has a tested parser for count-based and tag-based
   retention keep rules.
 - `docs/platform-metadata.md` defines the v1 metadata capture target and
   restore reporting behavior for unrepresentable metadata.
-- `sealport-testkit` has a tested in-memory fake object store for future
+- `fileferry-testkit` has a tested in-memory fake object store for future
   repository and pipeline tests.
-- `sealport-web` serves the public `sealport.cc` homepage with Axum,
+- `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
   `BUILD.md`, and `AGENTS.md`.
 - The product target is an all-Rust, cross-platform, encrypted backup CLI
-  named `sealport`.
+  named `ferry`.
 
 The repo is still pre-backup-engine. Do not describe backup, restore,
 repository, storage, crypto, or platform behavior as working until code,
 tests, and platform evidence exist.
 
-The `sealport-web` crate is public marketing infrastructure only. It does not
-turn SealPort into a backup server, hosted product, daemon, scheduler, or web
+The `fileferry-web` crate is public marketing infrastructure only. It does not
+turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
 application.
 
 ---
@@ -97,7 +97,7 @@ target support, or release tooling.
 - Client-side encryption is mandatory for repository contents and metadata.
 - No plaintext file names, directory structure, indexes, snapshot metadata, or
   sensitive policy/config shape in repositories.
-- The repository format is original to SealPort.
+- The repository format is original to FileFerry.
 - No restic, rustic, Borg, Kopia, or rclone repository compatibility in v1.
 - Local filesystem and S3-compatible object storage are the v1 storage
   targets.
@@ -184,14 +184,14 @@ Cargo.toml
 rust-toolchain.toml
 justfile
 crates/
-  sealport-cli/       command parsing, output formats, config loading
-  sealport-core/      snapshots, repository format, backup/restore engine
-  sealport-storage/   local and object storage abstraction
-  sealport-crypto/    key derivation, encryption, authenticated metadata
-  sealport-platform/  filesystem metadata across Windows/macOS/Linux/BSD
-  sealport-policy/    retention, pruning, lifecycle rules
-  sealport-testkit/   fake stores, corruption tests, fixtures, helpers
-  sealport-web/       Axum + Leptos public homepage for sealport.cc
+  fileferry-cli/       command parsing, output formats, config loading
+  fileferry-core/      snapshots, repository format, backup/restore engine
+  fileferry-storage/   local and object storage abstraction
+  fileferry-crypto/    key derivation, encryption, authenticated metadata
+  fileferry-platform/  filesystem metadata across Windows/macOS/Linux/BSD
+  fileferry-policy/    retention, pruning, lifecycle rules
+  fileferry-testkit/   fake stores, corruption tests, fixtures, helpers
+  fileferry-web/       Axum + Leptos public homepage for fileferry.app
 xtask/
 docs/
   architecture.md
@@ -209,7 +209,7 @@ tests/
   integration/
 ```
 
-Keep command presentation in `sealport-cli`. Library crates should return typed
+Keep command presentation in `fileferry-cli`. Library crates should return typed
 errors and structured events; the CLI decides human text, JSON, JSONL, and exit
 codes.
 
@@ -233,29 +233,29 @@ Global flags:
 Required v1 commands:
 
 ```text
-sealport init
-sealport backup
-sealport restore
-sealport snapshots
-sealport ls
-sealport check
-sealport forget
-sealport prune
-sealport key
-sealport completion
-sealport version
+ferry init
+ferry backup
+ferry restore
+ferry snapshots
+ferry ls
+ferry check
+ferry forget
+ferry prune
+ferry key
+ferry completion
+ferry version
 ```
 
 High-value commands that should land before or shortly after v1 if the core is
 stable:
 
 ```text
-sealport find
-sealport diff
-sealport copy
-sealport repo
-sealport policy
-sealport doctor
+ferry find
+ferry diff
+ferry copy
+ferry repo
+ferry policy
+ferry doctor
 ```
 
 CLI work:
@@ -303,19 +303,19 @@ Platform work:
 
 ## V1 Release Definition
 
-SealPort is ready for v1 only when it is boring to initialize, back up, verify,
+FileFerry is ready for v1 only when it is boring to initialize, back up, verify,
 restore, automate, and install across the supported platform list.
 
 Minimum v1 bar:
 
 - [x] Rust workspace exists with the target crate boundaries.
-- [ ] `sealport init` creates encrypted local and S3-compatible repositories.
-- [ ] `sealport backup` creates encrypted, compressed, deduplicated snapshots.
-- [ ] `sealport restore` restores by snapshot id, tag, path, and `latest`.
-- [ ] `sealport snapshots` and `sealport ls` have human, JSON, and JSONL-safe
+- [ ] `ferry init` creates encrypted local and S3-compatible repositories.
+- [ ] `ferry backup` creates encrypted, compressed, deduplicated snapshots.
+- [ ] `ferry restore` restores by snapshot id, tag, path, and `latest`.
+- [ ] `ferry snapshots` and `ferry ls` have human, JSON, and JSONL-safe
       behavior where appropriate.
-- [ ] `sealport check` verifies metadata and configurable data subsets.
-- [ ] `sealport forget` and `sealport prune` implement retention and two-phase
+- [ ] `ferry check` verifies metadata and configurable data subsets.
+- [ ] `ferry forget` and `ferry prune` implement retention and two-phase
       deletion safely.
 - [ ] Key add/remove/rotate/export-recovery paths exist and are tested.
 - [ ] Local backend passes interruption and corruption tests.
@@ -328,7 +328,7 @@ Minimum v1 bar:
 - [ ] Release artifacts include archives, checksums, signatures, SBOM, and
       `cargo-auditable` metadata.
 - [ ] Install scripts for Unix shells and PowerShell are tested.
-- [ ] At least one restore drill is documented from a real SealPort snapshot.
+- [ ] At least one restore drill is documented from a real FileFerry snapshot.
 
 V1 must not include GUI, TUI, FUSE mount, daemon mode, server mode, magic
 scheduling, mobile apps, or compatibility with restic/rustic repositories.
@@ -350,14 +350,14 @@ where documented verification passes on a clean checkout.
 
 - [x] Add `rust-toolchain.toml`.
 - [x] Add Cargo workspace with Rust 2024 edition.
-- [x] Add crates: `sealport-cli`, `sealport-core`, `sealport-storage`,
-      `sealport-crypto`, `sealport-platform`, `sealport-policy`, and
-      `sealport-testkit`.
+- [x] Add crates: `fileferry-cli`, `fileferry-core`, `fileferry-storage`,
+      `fileferry-crypto`, `fileferry-platform`, `fileferry-policy`, and
+      `fileferry-testkit`.
 - [x] Add workspace dependency policy.
-- [x] Add `sealport-cli` binary with `clap`.
+- [x] Add `fileferry-cli` binary with `clap`.
 - [x] Add `just fmt`, `just check`, `just test`, and `just build`.
 - [x] Add GitHub Actions for formatting, clippy, tests, and build.
-- [x] Add basic `sealport version`.
+- [x] Add basic `ferry version`.
 
 ### Phase 2 - CLI, Config, And Output Contract
 
@@ -367,7 +367,7 @@ where documented verification passes on a clean checkout.
 - [x] Define stable event model for command progress.
 - [x] Implement human, JSON, and JSONL output surfaces.
 - [x] Add CLI golden tests.
-- [x] Add `sealport completion`.
+- [x] Add `ferry completion`.
 
 ### Phase 3 - Crypto And Format Design
 
@@ -386,16 +386,16 @@ where documented verification passes on a clean checkout.
       lower-level choice.
 - [x] Add storage capability model.
 - [ ] Add retry, timeout, concurrency, and backoff behavior.
-- [x] Add fake object store in `sealport-testkit`.
+- [x] Add fake object store in `fileferry-testkit`.
 - [x] Add interruption and idempotency tests.
 
-### Public Homepage - sealport.cc
+### Public Homepage - fileferry.app
 
-- [x] Add a separate `sealport-web` workspace crate so homepage dependencies
+- [x] Add a separate `fileferry-web` workspace crate so homepage dependencies
       stay out of the backup CLI/runtime crates.
 - [x] Build the public homepage with Axum and server-rendered Leptos views.
 - [x] Serve static CSS and a reverse-proxy-friendly `/healthz` endpoint.
-- [x] Document Ubuntu self-hosting shape for `sealport.cc`.
+- [x] Document Ubuntu self-hosting shape for `fileferry.app`.
 - [x] Add route and render tests for the homepage.
 
 ### Phase 5 - Backup Pipeline
@@ -551,28 +551,28 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
-- 2026-05-18 - Added the `sealport-web` public homepage crate for
-  `sealport.cc`: Axum server, Leptos SSR marketing page, embedded CSS,
+- 2026-05-18 - Added the `fileferry-web` public homepage crate for
+  `fileferry.app`: Axum server, Leptos SSR marketing page, embedded CSS,
   `/healthz`, Ubuntu deployment notes, and route/render tests. Verified with
-  `cargo test -p sealport-web`; full gate recorded with this change.
-- 2026-05-18 - Added the first `sealport-policy` retention policy parser for
+  `cargo test -p fileferry-web`; full gate recorded with this change.
+- 2026-05-18 - Added the first `fileferry-policy` retention policy parser for
   count-based keep rules and repeated tag keep rules, documented current CLI
   JSON/JSONL schemas and data-mode progress behavior, and added
   `docs/platform-metadata.md` for v1 metadata capture and cross-platform
   restore reporting decisions. Verified initially with `cargo test -p
-  sealport-policy -p sealport-cli`; full gate recorded with this change.
+  fileferry-policy -p fileferry-cli`; full gate recorded with this change.
 - 2026-05-18 - Completed the first Phase 3 slice: documented format v0
   security choices and repository-format structure, selected Argon2id,
   HKDF-SHA-256, and XChaCha20-Poly1305, implemented tested master-key
   creation/unlock, passphrase key slots, subkey derivation, and authenticated
-  object envelopes in `sealport-crypto`. Verified with `cargo test -p
-  sealport-crypto`.
+  object envelopes in `fileferry-crypto`. Verified with `cargo test -p
+  fileferry-crypto`.
 - 2026-05-18 - Completed the first Phase 4 storage slice: added validated
   object keys, the object-store trait, storage capability reporting, a local
   filesystem backend with idempotent immutable writes, leftover temp-object
   listing protection, and an in-memory fake object store in
-  `sealport-testkit`. Added `docs/storage.md`. Verified with `cargo test -p
-  sealport-storage -p sealport-testkit`.
+  `fileferry-testkit`. Added `docs/storage.md`. Verified with `cargo test -p
+  fileferry-storage -p fileferry-testkit`.
 - 2026-05-18 - Added the first real S3-compatible storage groundwork: an
   `object_store`-backed `S3Store`, HTTPS-only explicit S3 config, redacted
   credential handling, configurable conditional create support,
@@ -584,9 +584,9 @@ Trust current primary docs and observed behavior over this file.
   diagnostics, JSON and JSONL envelopes, event names, shell completions, and
   CLI golden tests. Added `docs/cli-contract.md`. Verified with `just check`.
 - 2026-05-17 - Bootstrapped the Rust workspace with the planned crate
-  boundaries, workspace dependency policy, `sealport-cli` binary, basic
-  `sealport version`, `just` recipes, and GitHub Actions CI. Verified with
+  boundaries, workspace dependency policy, `fileferry-cli` binary, basic
+  `ferry version`, `just` recipes, and GitHub Actions CI. Verified with
   `just check`, individual `just fmt`/`just test`/`just build` recipes,
-  direct `sealport version` smoke checks, and workflow YAML parsing.
-- 2026-05-17 - Created the initial SealPort planning docs:
+  direct `ferry version` smoke checks, and workflow YAML parsing.
+- 2026-05-17 - Created the initial FileFerry planning docs:
   `README.md`, `BUILD.md`, and `AGENTS.md`.

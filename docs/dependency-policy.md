@@ -1,6 +1,6 @@
 # Dependency Policy
 
-SealPort keeps dependency decisions explicit because backup, storage, and
+FileFerry keeps dependency decisions explicit because backup, storage, and
 cryptography code must stay inspectable.
 
 ## Workspace Dependencies

@@ -1,6 +1,6 @@
 # Storage
 
-SealPort storage is object-oriented. Backends store immutable byte objects by
+FileFerry storage is object-oriented. Backends store immutable byte objects by
 validated repository object keys; higher layers decide what those bytes mean.
 
 This document describes the current storage contract. It is not the complete
@@ -67,7 +67,7 @@ codes.
 Writes use this flow:
 
 1. Create parent directories for the final object path.
-2. Write bytes to a unique file under `.sealport-tmp/`.
+2. Write bytes to a unique file under `.fileferry-tmp/`.
 3. Sync the temporary file.
 4. Publish by hard-linking the temporary file to the final object path.
 5. Remove the temporary file.
@@ -76,12 +76,12 @@ If the final object already exists, the local backend removes the temporary
 file and compares existing bytes. Identical bytes make the operation
 idempotent; different bytes fail as an immutable write conflict.
 
-Leftover `.sealport-tmp/` files are ignored by prefix listing so interrupted
+Leftover `.fileferry-tmp/` files are ignored by prefix listing so interrupted
 writes do not appear as repository objects.
 
 ## Fake Store
 
-`sealport-testkit` provides `FakeObjectStore`, an in-memory implementation of
+`fileferry-testkit` provides `FakeObjectStore`, an in-memory implementation of
 the same object-store contract. It is for repository, corruption, and pipeline
 tests that need deterministic storage behavior without touching a real backend.
 
@@ -95,9 +95,9 @@ same bytes are idempotent, different bytes are rejected.
 bucket, region, endpoint URL, access key ID, secret access key, and repository
 root prefix.
 
-The backend maps validated SealPort object keys under the configured root
+The backend maps validated FileFerry object keys under the configured root
 prefix. For example, a repository key `chunks/aa/blob` with root prefix
-`sealport/dev` is stored at `sealport/dev/chunks/aa/blob` in the bucket.
+`fileferry/dev` is stored at `fileferry/dev/chunks/aa/blob` in the bucket.
 Prefix-scoping is mandatory for shared development buckets so tests never need
 to list or delete the whole bucket.
 
@@ -124,18 +124,18 @@ Current S3 capability assumptions:
   headers.
 
 The implementation has a gated live integration test. It runs only when
-`SEALPORT_S3_INTEGRATION=1` and all required S3 environment variables are set:
+`FILEFERRY_S3_INTEGRATION=1` and all required S3 environment variables are set:
 
 ```sh
-export SEALPORT_S3_INTEGRATION=1
-export SEALPORT_S3_BUCKET=dunamismax-b2
-export SEALPORT_S3_REGION=<region>
-export SEALPORT_S3_ENDPOINT=https://s3.<region>.backblazeb2.com
-export SEALPORT_S3_ACCESS_KEY_ID=<application-key-id>
-export SEALPORT_S3_SECRET_ACCESS_KEY=<application-key>
-export SEALPORT_S3_TEST_PREFIX=sealport/dev
+export FILEFERRY_S3_INTEGRATION=1
+export FILEFERRY_S3_BUCKET=dunamismax-b2
+export FILEFERRY_S3_REGION=<region>
+export FILEFERRY_S3_ENDPOINT=https://s3.<region>.backblazeb2.com
+export FILEFERRY_S3_ACCESS_KEY_ID=<application-key-id>
+export FILEFERRY_S3_SECRET_ACCESS_KEY=<application-key>
+export FILEFERRY_S3_TEST_PREFIX=fileferry/dev
 
-cargo test -p sealport-storage s3_store_round_trip_when_integration_env_is_enabled
+cargo test -p fileferry-storage s3_store_round_trip_when_integration_env_is_enabled
 ```
 
 For Backblaze B2, the S3 endpoint has the form

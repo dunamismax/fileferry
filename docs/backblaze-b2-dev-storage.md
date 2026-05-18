@@ -1,6 +1,6 @@
 # Backblaze B2 Development Storage
 
-SealPort has a private Backblaze B2 development bucket for live S3-compatible
+FileFerry has a private Backblaze B2 development bucket for live S3-compatible
 storage testing:
 
 ```text
@@ -14,27 +14,27 @@ or future secret-provider plumbing only. Local `.env` files are ignored by git.
 
 ## Environment
 
-The S3 integration test in `sealport-storage` is opt-in. Export these values
+The S3 integration test in `fileferry-storage` is opt-in. Export these values
 locally before running it:
 
 ```sh
-export SEALPORT_S3_INTEGRATION=1
-export SEALPORT_S3_BUCKET=dunamismax-b2
-export SEALPORT_S3_REGION=<region>
-export SEALPORT_S3_ENDPOINT=https://s3.<region>.backblazeb2.com
-export SEALPORT_S3_ACCESS_KEY_ID=<application-key-id>
-export SEALPORT_S3_SECRET_ACCESS_KEY=<application-key>
-export SEALPORT_S3_TEST_PREFIX=sealport/dev
+export FILEFERRY_S3_INTEGRATION=1
+export FILEFERRY_S3_BUCKET=dunamismax-b2
+export FILEFERRY_S3_REGION=<region>
+export FILEFERRY_S3_ENDPOINT=https://s3.<region>.backblazeb2.com
+export FILEFERRY_S3_ACCESS_KEY_ID=<application-key-id>
+export FILEFERRY_S3_SECRET_ACCESS_KEY=<application-key>
+export FILEFERRY_S3_TEST_PREFIX=fileferry/dev
 ```
 
-Do not include leading or trailing slashes in `SEALPORT_S3_TEST_PREFIX`.
+Do not include leading or trailing slashes in `FILEFERRY_S3_TEST_PREFIX`.
 The test appends a unique `run-...` suffix below that prefix, writes only test
 objects inside it, and cleans up the objects it creates.
 
 Run the live test with:
 
 ```sh
-cargo test -p sealport-storage s3_store_round_trip_when_integration_env_is_enabled
+cargo test -p fileferry-storage s3_store_round_trip_when_integration_env_is_enabled
 ```
 
 or:
@@ -44,7 +44,7 @@ just test-s3
 ```
 
 The normal workspace test suite does not contact Backblaze unless
-`SEALPORT_S3_INTEGRATION=1` is present.
+`FILEFERRY_S3_INTEGRATION=1` is present.
 
 ## Backblaze S3 Notes
 
@@ -66,12 +66,12 @@ Backblaze S3-compatible authentication uses:
 
 The current live test disables S3 conditional create for Backblaze B2 because
 Backblaze rejects the `If-None-Match` create-only `PutObject` header with
-`501 NotImplemented`. SealPort reports that weaker capability instead of
+`501 NotImplemented`. FileFerry reports that weaker capability instead of
 pretending the backend has race-safe conditional writes.
 
 Bucket-restricted application keys may need `listAllBucketNames` for some SDKs
-or integrations. SealPort's live test should still be scoped by
-`SEALPORT_S3_TEST_PREFIX` and must never operate on unrelated bucket objects.
+or integrations. FileFerry's live test should still be scoped by
+`FILEFERRY_S3_TEST_PREFIX` and must never operate on unrelated bucket objects.
 
 Primary references:
 

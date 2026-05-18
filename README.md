@@ -1,25 +1,24 @@
-# SealPort
+# FileFerry
 
 Encrypted backups. Same everywhere.
 
-SealPort is a planned all-Rust backup CLI for operators, IT directors,
+FileFerry is a planned all-Rust backup CLI for operators, IT directors,
 developers, and teams that need reliable encrypted backups without platform
-drama. The command will be `sealport`; the short alias `sp` may be added after
-the primary command is stable.
+drama. The command will be `ferry`.
 
-SealPort is starting from an empty implementation. The active build plan lives
+FileFerry is in early implementation. The active build plan lives
 in [`BUILD.md`](BUILD.md). This README describes the target product and the
 contracts the implementation must satisfy before release.
 
-Future homepage: [sealport.cc](https://sealport.cc/).
+Homepage: [fileferry.app](https://fileferry.app/).
 
 The public homepage is implemented as a separate lightweight Rust binary,
-`sealport-web`, using Axum and server-rendered Leptos views. It is marketing
-infrastructure for `sealport.cc`, not a SealPort backup server mode.
+`fileferry-web`, using Axum and server-rendered Leptos views. It is marketing
+infrastructure for `fileferry.app`, not a FileFerry backup server mode.
 
 ## Product Promise
 
-SealPort gives operators a secure, scriptable backup tool that behaves
+FileFerry gives operators a secure, scriptable backup tool that behaves
 predictably on every machine they manage.
 
 It is for people who want:
@@ -37,33 +36,33 @@ mobile app, or compatibility layer for an existing backup repository format.
 ## Target Command Shape
 
 ```sh
-sealport init s3://company-backups/laptops
-sealport backup ~/Documents --tag laptop --jsonl
-sealport snapshots --json
-sealport restore latest ~/restore-test
-sealport check --read-data-subset 5%
-sealport forget --keep-daily 14 --keep-weekly 8 --prune
+ferry init s3://company-backups/laptops
+ferry backup ~/Documents --tag laptop --jsonl
+ferry snapshots --json
+ferry restore latest ~/restore-test
+ferry check --read-data-subset 5%
+ferry forget --keep-daily 14 --keep-weekly 8 --prune
 ```
 
 Core command surface under design:
 
 ```text
-sealport init
-sealport backup
-sealport restore
-sealport snapshots
-sealport ls
-sealport find
-sealport diff
-sealport check
-sealport forget
-sealport prune
-sealport key
-sealport repo
-sealport policy
-sealport doctor
-sealport completion
-sealport version
+ferry init
+ferry backup
+ferry restore
+ferry snapshots
+ferry ls
+ferry find
+ferry diff
+ferry check
+ferry forget
+ferry prune
+ferry key
+ferry repo
+ferry policy
+ferry doctor
+ferry completion
+ferry version
 ```
 
 Global flags:
@@ -81,7 +80,7 @@ Global flags:
 
 ## Scripting Contract
 
-SealPort is automation-first:
+FileFerry is automation-first:
 
 - Stdout is data.
 - Stderr is logs, progress, and diagnostics.
@@ -113,7 +112,7 @@ not change without a compatibility plan.
 
 ## Security Model
 
-SealPort repositories are encrypted client-side before anything leaves the
+FileFerry repositories are encrypted client-side before anything leaves the
 machine.
 
 The repository format must protect:
@@ -136,12 +135,12 @@ The target model is envelope encryption:
 Security-facing commands:
 
 ```sh
-sealport key add
-sealport key remove
-sealport key rotate
-sealport key export-recovery
-sealport repo verify
-sealport repo inspect --json
+ferry key add
+ferry key remove
+ferry key rotate
+ferry key export-recovery
+ferry repo verify
+ferry repo inspect --json
 ```
 
 Only non-sensitive bootstrap fields, such as format version and key derivation
@@ -150,7 +149,7 @@ in the security design before the format freezes.
 
 ## Repository Model
 
-SealPort uses an original repository format. It does not read or write restic,
+FileFerry uses an original repository format. It does not read or write restic,
 rustic, Borg, Kopia, or rclone-native repository formats.
 
 Core object groups:
@@ -182,14 +181,14 @@ Target Rust workspace:
 
 ```text
 crates/
-  sealport-cli/       clap commands, output formats, config loading
-  sealport-core/      snapshots, repository format, backup/restore engine
-  sealport-storage/   local and object storage abstraction
-  sealport-crypto/    key derivation, encryption, authenticated metadata
-  sealport-platform/  filesystem metadata across supported platforms
-  sealport-policy/    retention, pruning, lifecycle rules
-  sealport-testkit/   fake stores, corruption fixtures, platform helpers
-  sealport-web/       Axum + Leptos public homepage for sealport.cc
+  fileferry-cli/       clap commands, output formats, config loading
+  fileferry-core/      snapshots, repository format, backup/restore engine
+  fileferry-storage/   local and object storage abstraction
+  fileferry-crypto/    key derivation, encryption, authenticated metadata
+  fileferry-platform/  filesystem metadata across supported platforms
+  fileferry-policy/    retention, pruning, lifecycle rules
+  fileferry-testkit/   fake stores, corruption fixtures, platform helpers
+  fileferry-web/       Axum + Leptos public homepage for fileferry.app
 xtask/                release, fixtures, and repo automation when useful
 docs/                 durable architecture, security, operations, release docs
 ```
@@ -211,7 +210,7 @@ Expected Rust stack:
 - `zeroize` and `secrecy` for secret handling.
 
 The homepage stack is intentionally separate from the CLI/runtime stack:
-`sealport-web` uses `axum`, `tokio`, and Leptos SSR to serve static marketing
+`fileferry-web` uses `axum`, `tokio`, and Leptos SSR to serve static marketing
 content, `/assets/site.css`, and `/healthz`.
 
 ## Public Homepage
@@ -219,14 +218,14 @@ content, `/assets/site.css`, and `/healthz`.
 Run the current homepage locally:
 
 ```sh
-cargo run -p sealport-web
+cargo run -p fileferry-web
 ```
 
-By default it binds `0.0.0.0:8080`. Set `SEALPORT_WEB_ADDR` to override the
+By default it binds `0.0.0.0:8080`. Set `FILEFERRY_WEB_ADDR` to override the
 listener, for example:
 
 ```sh
-SEALPORT_WEB_ADDR=127.0.0.1:8080 cargo run -p sealport-web
+FILEFERRY_WEB_ADDR=127.0.0.1:8080 cargo run -p fileferry-web
 ```
 
 Ubuntu self-hosting notes live in
@@ -238,7 +237,7 @@ Target config example:
 
 ```toml
 [repository]
-url = "s3://company-backups/sealport/laptops"
+url = "s3://company-backups/fileferry/laptops"
 profile = "default"
 
 [backup]
@@ -272,12 +271,12 @@ log_level = "info"
 Environment variables:
 
 ```text
-SEALPORT_REPOSITORY
-SEALPORT_PASSWORD
-SEALPORT_PASSWORD_FILE
-SEALPORT_CONFIG
-SEALPORT_PROFILE
-SEALPORT_LOG
+FILEFERRY_REPOSITORY
+FILEFERRY_PASSWORD
+FILEFERRY_PASSWORD_FILE
+FILEFERRY_CONFIG
+FILEFERRY_PROFILE
+FILEFERRY_LOG
 ```
 
 Secrets must be redacted from logs, diagnostics, JSON, crash output, and test
@@ -299,12 +298,12 @@ Later candidates:
 - Optional OpenDAL extra backends.
 - Optional rclone bridge.
 
-rclone must not be a core dependency. SealPort's default identity is a
+rclone must not be a core dependency. FileFerry's default identity is a
 Rust-native backup tool.
 
 ## Platform Support
 
-SealPort is cross-platform first, but support is earned by CI and releases.
+FileFerry is cross-platform first, but support is earned by CI and releases.
 
 Target v1 release artifacts:
 

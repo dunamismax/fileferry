@@ -1,20 +1,20 @@
 # Homepage Deployment
 
-`sealport.cc` is served by `sealport-web`, a lightweight Rust binary that uses
+`fileferry.app` is served by `fileferry-web`, a lightweight Rust binary that uses
 Axum and server-rendered Leptos views. This binary is public marketing
-infrastructure only; it is not a SealPort backup server, daemon, scheduler, or
+infrastructure only; it is not a FileFerry backup server, daemon, scheduler, or
 hosted product.
 
 ## Local Run
 
 ```sh
-cargo run -p sealport-web
+cargo run -p fileferry-web
 ```
 
 The default listener is `0.0.0.0:8080`. Override it with:
 
 ```sh
-SEALPORT_WEB_ADDR=127.0.0.1:8096 cargo run -p sealport-web
+FILEFERRY_WEB_ADDR=127.0.0.1:8096 cargo run -p fileferry-web
 ```
 
 `GET /healthz` returns `ok` for reverse-proxy and process supervision checks.
@@ -25,8 +25,8 @@ Build the binary on the server or copy a release artifact once release
 packaging exists:
 
 ```sh
-cargo build --release -p sealport-web
-sudo install -m 0755 target/release/sealport-web /usr/local/bin/sealport-web
+cargo build --release -p fileferry-web
+sudo install -m 0755 target/release/fileferry-web /usr/local/bin/fileferry-web
 ```
 
 The production host uses the repo-owned templates under `deploy/` and binds
@@ -36,29 +36,29 @@ sites.
 Create a dedicated unprivileged user:
 
 ```sh
-sudo useradd --system --home /opt/sealport-web --shell /usr/sbin/nologin sealport-web
+sudo useradd --system --home /opt/fileferry-web --shell /usr/sbin/nologin fileferry-web
 ```
 
 Example systemd unit:
 
 ```ini
 [Unit]
-Description=SealPort public homepage
+Description=FileFerry public homepage
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=sealport-web
-Group=sealport-web
-Environment=SEALPORT_WEB_ADDR=127.0.0.1:8096
-ExecStart=/opt/sealport-web/sealport-web
+User=fileferry-web
+Group=fileferry-web
+Environment=FILEFERRY_WEB_ADDR=127.0.0.1:8096
+ExecStart=/opt/fileferry-web/fileferry-web
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/sealport-web
+ReadWritePaths=/opt/fileferry-web
 
 [Install]
 WantedBy=multi-user.target
@@ -67,9 +67,9 @@ WantedBy=multi-user.target
 Install and start it:
 
 ```sh
-sudo install -m 0644 deploy/systemd/sealport-web.service /etc/systemd/system/sealport-web.service
+sudo install -m 0644 deploy/systemd/fileferry-web.service /etc/systemd/system/fileferry-web.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now sealport-web
+sudo systemctl enable --now fileferry-web
 curl -fsS http://127.0.0.1:8096/healthz
 ```
 
@@ -80,7 +80,7 @@ Terminate TLS at the reverse proxy and forward to the local listener.
 Example Caddy site:
 
 ```caddyfile
-sealport.cc {
+fileferry.app {
 	reverse_proxy 127.0.0.1:8096
 }
 ```
@@ -90,7 +90,7 @@ Example nginx server:
 ```nginx
 server {
     listen 80;
-    server_name sealport.cc www.sealport.cc;
+    server_name fileferry.app www.fileferry.app;
 
     location / {
         proxy_pass http://127.0.0.1:8096;

@@ -1,6 +1,6 @@
 # Platform Metadata
 
-SealPort captures platform metadata so restores can be honest and repeatable
+FileFerry captures platform metadata so restores can be honest and repeatable
 across Windows, macOS, Linux, FreeBSD, and NetBSD. Metadata records are stored
 inside encrypted snapshot manifests or encrypted metadata objects; source paths,
 file names, ownership, attributes, xattrs, ACLs, and platform-specific details
@@ -58,7 +58,7 @@ events. A strict mode may promote those warnings to failure.
 Restore applies content first, then portable metadata, then platform-specific
 metadata that the destination can represent.
 
-When metadata cannot be represented on the destination platform, SealPort must:
+When metadata cannot be represented on the destination platform, FileFerry must:
 
 - Restore file content and directory structure whenever doing so is safe.
 - Skip the unrepresentable metadata field without silently pretending success.
@@ -69,7 +69,7 @@ When metadata cannot be represented on the destination platform, SealPort must:
 - Return partial-success exit code `10` when the restore otherwise succeeds but
   one or more requested metadata fields could not be applied.
 
-When metadata application is denied by destination permissions, SealPort must
+When metadata application is denied by destination permissions, FileFerry must
 report a permission failure for that field. Strict restore mode may fail the
 whole restore; default restore records partial success when file content was
 restored correctly.

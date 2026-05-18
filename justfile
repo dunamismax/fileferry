@@ -13,10 +13,10 @@ test:
     cargo test --workspace --all-features
 
 test-s3:
-    cargo test -p sealport-storage s3_store_round_trip_when_integration_env_is_enabled
+    cargo test -p fileferry-storage s3_store_round_trip_when_integration_env_is_enabled
 
 build:
     cargo build --workspace
 
 web:
-    cargo run -p sealport-web
+    cargo run -p fileferry-web

@@ -1,6 +1,6 @@
 # CLI Contract
 
-SealPort's command-line interface is intended for scripts first. Human output
+FileFerry's command-line interface is intended for scripts first. Human output
 may improve while the project is pre-v1, but stdout/stderr separation, exit
 code families, and machine-output envelopes are treated as compatibility
 surfaces once marked stable.
@@ -45,14 +45,14 @@ CLI flags > environment variables > selected config profile > root config > defa
 Implemented environment variables:
 
 ```text
-SEALPORT_CONFIG
-SEALPORT_PROFILE
-SEALPORT_REPOSITORY
-SEALPORT_LOG
+FILEFERRY_CONFIG
+FILEFERRY_PROFILE
+FILEFERRY_REPOSITORY
+FILEFERRY_LOG
 ```
 
-When no config path is supplied by `--config` or `SEALPORT_CONFIG`, SealPort
-looks for `sealport.toml` and then `.sealport.toml` in the current working
+When no config path is supplied by `--config` or `FILEFERRY_CONFIG`, FileFerry
+looks for `fileferry.toml` and then `.fileferry.toml` in the current working
 directory.
 
 ## JSON Document Envelope
@@ -65,7 +65,7 @@ directory.
   "command": "version",
   "status": "success",
   "data": {
-    "command": "sealport",
+    "command": "ferry",
     "version": "0.0.0"
   }
 }
@@ -88,7 +88,7 @@ Implemented command documents:
 
 ```text
 version
-  data.command: "sealport"
+  data.command: "ferry"
   data.version: semantic-version string from the package version
 ```
 
@@ -101,7 +101,7 @@ does not support JSON wrapping because the completion script itself is the data.
 
 ```json
 {"schema_version":1,"event":"command_started","command":"version","status":"started","data":null}
-{"schema_version":1,"event":"command_completed","command":"version","status":"success","data":{"command":"sealport","version":"0.0.0"}}
+{"schema_version":1,"event":"command_completed","command":"version","status":"success","data":{"command":"ferry","version":"0.0.0"}}
 ```
 
 Reserved event names:
@@ -137,7 +137,7 @@ version command_started
 
 version command_completed
   status: "success"
-  data.command: "sealport"
+  data.command: "ferry"
   data.version: semantic-version string from the package version
 ```
 
@@ -146,7 +146,7 @@ and JSONL modes. Machine progress belongs in JSONL `progress` events.
 
 ## Current Commands
 
-`sealport version` supports human, JSON, and JSONL output.
+`ferry version` supports human, JSON, and JSONL output.
 
-`sealport completion <SHELL>` writes shell completion data for Bash, Elvish,
+`ferry completion <SHELL>` writes shell completion data for Bash, Elvish,
 Fish, PowerShell, and Zsh.

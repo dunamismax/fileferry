@@ -1,13 +1,13 @@
 [workspace]
 members = [
-    "crates/sealport-cli",
-    "crates/sealport-core",
-    "crates/sealport-storage",
-    "crates/sealport-crypto",
-    "crates/sealport-platform",
-    "crates/sealport-policy",
-    "crates/sealport-testkit",
-    "crates/sealport-web",
+    "crates/fileferry-cli",
+    "crates/fileferry-core",
+    "crates/fileferry-storage",
+    "crates/fileferry-crypto",
+    "crates/fileferry-platform",
+    "crates/fileferry-policy",
+    "crates/fileferry-testkit",
+    "crates/fileferry-web",
 ]
 resolver = "3"
 

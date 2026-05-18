@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repo-local operating manual for SealPort and its `sealport` command. Reading
+Repo-local operating manual for FileFerry and its `ferry` command. Reading
 this file plus `README.md` and `BUILD.md` is sufficient context to begin work.
 
 `README.md` explains the product. `BUILD.md` is the active build plan. This
@@ -45,22 +45,20 @@ benchmarks, overstate platform support, or bury the lede.
 
 ## Product Boundaries
 
-- SealPort is an all-Rust encrypted backup CLI.
-- The primary binary is named `sealport`.
-- A short alias named `sp` may be added later, but the stable command is
-  `sealport`.
-- SealPort creates encrypted, compressed, deduplicated snapshots.
+- FileFerry is an all-Rust encrypted backup CLI.
+- The primary binary is named `ferry`.
+- FileFerry creates encrypted, compressed, deduplicated snapshots.
 - Local filesystem and S3-compatible object storage are the v1 backend targets.
 - Windows, macOS, Linux, FreeBSD, and NetBSD are first-class targets only after
   CI, tests, and release artifacts exist.
 - OpenBSD is best-effort until release and CI support are real.
-- `sealport.cc` is the future public homepage.
-- SealPort is CLI-only by design.
-- SealPort is not a GUI, TUI, daemon, server, FUSE mount, scheduler, mobile
+- `fileferry.app` is the public homepage.
+- FileFerry is CLI-only by design.
+- FileFerry is not a GUI, TUI, daemon, server, FUSE mount, scheduler, mobile
   app, SaaS dashboard, or hosted backup product.
-- The public `sealport.cc` homepage may live in a separate `sealport-web`
-  crate; this is marketing infrastructure, not a SealPort backup server mode.
-- SealPort is not a restic, rustic, Borg, Kopia, or rclone repository
+- The public `fileferry.app` homepage may live in a separate `fileferry-web`
+  crate; this is marketing infrastructure, not a FileFerry backup server mode.
+- FileFerry is not a restic, rustic, Borg, Kopia, or rclone repository
   compatibility project.
 - rclone may become an optional bridge later, but it must not be a core
   runtime dependency.
@@ -80,18 +78,18 @@ Default against:
 ## Stack Rules
 
 - Rust workspace with crates under `crates/`.
-- `sealport-cli` owns command parsing, config loading, human output, JSON,
+- `fileferry-cli` owns command parsing, config loading, human output, JSON,
   JSONL, progress rendering, and exit codes.
-- `sealport-core` owns snapshots, manifests, repository format, indexing,
+- `fileferry-core` owns snapshots, manifests, repository format, indexing,
   backup engine, restore engine, and check orchestration.
-- `sealport-storage` owns local and object storage traits, capability
+- `fileferry-storage` owns local and object storage traits, capability
   detection, retries, timeouts, idempotency, and backend implementations.
-- `sealport-crypto` owns key derivation, envelope encryption, authenticated
+- `fileferry-crypto` owns key derivation, envelope encryption, authenticated
   object handling, redaction helpers, and secret types.
-- `sealport-platform` owns path handling and filesystem metadata across
+- `fileferry-platform` owns path handling and filesystem metadata across
   Windows, macOS, Linux, and BSD.
-- `sealport-policy` owns retention, forget, prune, and lifecycle policy logic.
-- `sealport-testkit` owns fake stores, corruption fixtures, platform fixtures,
+- `fileferry-policy` owns retention, forget, prune, and lifecycle policy logic.
+- `fileferry-testkit` owns fake stores, corruption fixtures, platform fixtures,
   and shared integration-test helpers.
 - Use `clap` for CLI parsing.
 - Use `tokio` for async storage and network work unless a documented spike
@@ -124,7 +122,7 @@ platform-specific backup utilities for core behavior.
 - Only non-sensitive bootstrap metadata may be plaintext.
 - Every plaintext repository field needs a written reason in
   `docs/security.md` or `docs/repository-format.md`.
-- Never log `SEALPORT_PASSWORD`, key material, recovery exports, cloud
+- Never log `FILEFERRY_PASSWORD`, key material, recovery exports, cloud
   credentials, signed URLs, bearer tokens, session tokens, or full environment
   dumps.
 - Redact secrets in human output, JSON, JSONL, debug logs, errors, tests, and
@@ -140,7 +138,7 @@ cannot be automated, document the manual evidence required before release.
 
 ## Repository Format Rules
 
-- SealPort uses an original repository format.
+- FileFerry uses an original repository format.
 - Do not copy code, byte layouts, test vectors, repository object layouts, or
   documentation text from restic, rustic, Borg, Kopia, or any other backup
   project.
@@ -221,7 +219,7 @@ parser proves they contain no credential material.
   release artifacts exist.
 - Windows is not experimental.
 - BSD is not an afterthought.
-- Cross-platform behavior belongs in `sealport-platform`, not scattered through
+- Cross-platform behavior belongs in `fileferry-platform`, not scattered through
   command code.
 - Handle Windows reserved names, long paths, drive prefixes, alternate data
   streams where relevant, case behavior, and symlink permissions deliberately.

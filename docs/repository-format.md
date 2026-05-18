@@ -1,6 +1,6 @@
 # Repository Format
 
-SealPort's repository format is original to SealPort. Format v0 is not frozen
+FileFerry's repository format is original to FileFerry. Format v0 is not frozen
 and has no compatibility fixtures yet. This document defines the initial shape
 needed for implementation work; byte-level fixtures become the compatibility
 contract only after the first intentional freeze.
@@ -21,7 +21,7 @@ contract only after the first intentional freeze.
 
 Only the following fields may be plaintext in format v0:
 
-- Repository magic: identifies a SealPort repository.
+- Repository magic: identifies a FileFerry repository.
 - Repository format version.
 - Repository id: random public identifier used for key context binding.
 - Supported algorithm ids for KDF and AEAD.
@@ -80,7 +80,7 @@ Every encrypted object uses AEAD associated data. Format v0 object associated
 data is:
 
 ```text
-"sealport\0format-v0\0object\0"
+"fileferry\0format-v0\0object\0"
 || format_version
 || len(object_kind)
 || object_kind

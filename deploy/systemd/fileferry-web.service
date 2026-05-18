@@ -1,0 +1,25 @@
+[Unit]
+Description=FileFerry public homepage
+Documentation=https://fileferry.app/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fileferry-web
+Group=fileferry-web
+WorkingDirectory=/opt/fileferry-web
+EnvironmentFile=-/etc/fileferry-web/fileferry-web.env
+ExecStart=/opt/fileferry-web/fileferry-web
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/fileferry-web
+
+[Install]
+WantedBy=multi-user.target

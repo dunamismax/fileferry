@@ -714,6 +714,91 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
+name = "fileferry-cli"
+version = "0.0.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "clap_complete",
+ "predicates",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "fileferry-core"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "fileferry-crypto"
+version = "0.0.0"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "hkdf",
+ "secrecy",
+ "sha2",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
+name = "fileferry-platform"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "fileferry-policy"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "fileferry-storage"
+version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "object_store",
+ "secrecy",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fileferry-testkit"
+version = "0.0.0"
+dependencies = [
+ "fileferry-storage",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "fileferry-web"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "leptos",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2324,91 +2409,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "sealport-cli"
-version = "0.0.0"
-dependencies = [
- "assert_cmd",
- "clap",
- "clap_complete",
- "predicates",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "sealport-core"
-version = "0.0.0"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "sealport-crypto"
-version = "0.0.0"
-dependencies = [
- "argon2",
- "chacha20poly1305",
- "hkdf",
- "secrecy",
- "sha2",
- "thiserror 2.0.18",
- "zeroize",
-]
-
-[[package]]
-name = "sealport-platform"
-version = "0.0.0"
-dependencies = [
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "sealport-policy"
-version = "0.0.0"
-dependencies = [
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "sealport-storage"
-version = "0.0.0"
-dependencies = [
- "futures-util",
- "object_store",
- "secrecy",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "sealport-testkit"
-version = "0.0.0"
-dependencies = [
- "sealport-storage",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "sealport-web"
-version = "0.0.0"
-dependencies = [
- "axum",
- "leptos",
- "tokio",
- "tower",
- "tracing",
-]
 
 [[package]]
 name = "secrecy"

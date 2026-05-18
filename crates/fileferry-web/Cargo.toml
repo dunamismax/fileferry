@@ -1,0 +1,20 @@
+[package]
+name = "fileferry-web"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fileferry-web"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+leptos.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }

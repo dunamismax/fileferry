@@ -1,6 +1,6 @@
 # Security Design
 
-SealPort is pre-v1 and the repository format is not frozen. This document
+FileFerry is pre-v1 and the repository format is not frozen. This document
 records the security decisions that format v0 implementation work must follow.
 Changing these decisions requires updating this document, repository-format
 fixtures when they exist, and the focused crypto tests.
@@ -62,8 +62,8 @@ repository objects.
 Format v0 derives subkeys from the master key with HKDF-SHA-256:
 
 ```text
-HKDF salt = "sealport\0format-v0\0hkdf\0"
-info      = "sealport\0subkey\0" || purpose || len(context) || context
+HKDF salt = "fileferry\0format-v0\0hkdf\0"
+info      = "fileferry\0subkey\0" || purpose || len(context) || context
 output    = 32 bytes
 ```
 
@@ -120,7 +120,7 @@ A key slot contains:
 The key-slot AEAD associated data is:
 
 ```text
-"sealport\0format-v0\0key-slot-wrap\0"
+"fileferry\0format-v0\0key-slot-wrap\0"
 || kdf_algorithm
 || memory_cost
 || time_cost
@@ -209,7 +209,7 @@ Sensitive plaintext metadata must not be placed in any error field.
 
 ## Implemented Evidence
 
-The `sealport-crypto` crate currently includes focused tests for:
+The `fileferry-crypto` crate currently includes focused tests for:
 
 - Master key creation and passphrase unlock.
 - Wrong passphrase failure.
