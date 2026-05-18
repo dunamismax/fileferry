@@ -3,7 +3,12 @@
 use fastcdc::v2020::{
     AVERAGE_MAX, AVERAGE_MIN, FastCDC, MAXIMUM_MAX, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN,
 };
+use fileferry_crypto::{
+    AeadAlgorithm, CryptoError, EncryptedObject, KeyPurpose, MasterKey, ObjectContext, ObjectKind,
+    encrypt_object, keyed_content_id,
+};
 use fileferry_platform::{EntryKind, EntryMetadata, PlatformError, capture_metadata};
+use fileferry_storage::{ObjectKey, ObjectStore, PutStatus, StorageError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -46,6 +51,50 @@ pub enum CoreError {
 
     #[error("chunking configuration is invalid: {reason}")]
     InvalidChunkingConfig { reason: &'static str },
+
+    #[error("backup pipeline configuration is invalid: {reason}")]
+    InvalidBackupPipelineConfig { reason: &'static str },
+
+    #[error("file {path} could not be read")]
+    FileRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("chunk range for {path} is invalid")]
+    InvalidChunkRange { path: PathBuf },
+
+    #[error("chunk for {path} could not be compressed")]
+    Compression {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("repository object could not be encrypted")]
+    Encryption {
+        #[source]
+        source: CryptoError,
+    },
+
+    #[error("repository metadata could not be serialized")]
+    Serialization {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("repository object key could not be created")]
+    ObjectKey {
+        #[source]
+        source: StorageError,
+    },
+
+    #[error("repository object write failed")]
+    Storage {
+        #[source]
+        source: StorageError,
+    },
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;
@@ -254,6 +303,391 @@ impl ContentChunker {
         })
         .collect()
     }
+}
+
+pub const DEFAULT_ZSTD_COMPRESSION_LEVEL: i32 = 3;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct BackupPipelineConfig {
+    pub chunking: ChunkingConfig,
+    pub compression_level: i32,
+    pub repository_id: String,
+}
+
+impl BackupPipelineConfig {
+    pub fn new(repository_id: impl Into<String>) -> Self {
+        Self {
+            chunking: ChunkingConfig::default(),
+            compression_level: DEFAULT_ZSTD_COMPRESSION_LEVEL,
+            repository_id: repository_id.into(),
+        }
+    }
+
+    pub fn validate(&self) -> CoreResult<()> {
+        self.chunking.validate()?;
+        if self.repository_id.is_empty() {
+            return Err(CoreError::InvalidBackupPipelineConfig {
+                reason: "repository id must not be empty",
+            });
+        }
+        if self.repository_id.as_bytes().contains(&0) {
+            return Err(CoreError::InvalidBackupPipelineConfig {
+                reason: "repository id must not contain NUL",
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BackupRequest {
+    pub roots: Vec<PathBuf>,
+    pub exclusion_rules: Vec<ExclusionRule>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BackupPipeline {
+    config: BackupPipelineConfig,
+    chunker: ContentChunker,
+}
+
+impl BackupPipeline {
+    pub fn new(config: BackupPipelineConfig) -> CoreResult<Self> {
+        config.validate()?;
+        let chunker = ContentChunker::new(config.chunking)?;
+        Ok(Self { config, chunker })
+    }
+
+    pub fn config(&self) -> &BackupPipelineConfig {
+        &self.config
+    }
+
+    pub async fn write_snapshot(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        request: BackupRequest,
+    ) -> CoreResult<SnapshotWriteResult> {
+        let entries = SourceWalker::new(request.exclusion_rules)
+            .walk(&request.roots)?
+            .into_iter()
+            .map(ManifestEntry::from_source_entry)
+            .collect::<Vec<_>>();
+
+        let repository_context = self.config.repository_id.as_bytes();
+        let chunk_key = master_key
+            .derive_subkey(KeyPurpose::ChunkData, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let index_key = master_key
+            .derive_subkey(KeyPurpose::Index, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let manifest_key = master_key
+            .derive_subkey(KeyPurpose::SnapshotMetadata, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+
+        let mut manifest_entries = Vec::with_capacity(entries.len());
+        let mut index_entries = Vec::new();
+        let mut chunk_objects_written = 0_usize;
+
+        for mut entry in entries {
+            if entry.metadata.kind == EntryKind::RegularFile {
+                let file_bytes = fs::read(&entry.path).map_err(|source| CoreError::FileRead {
+                    path: entry.path.clone(),
+                    source,
+                })?;
+                for chunk in self.chunker.chunk_bytes(&file_bytes) {
+                    let start = usize::try_from(chunk.offset).map_err(|_| {
+                        CoreError::InvalidChunkRange {
+                            path: entry.path.clone(),
+                        }
+                    })?;
+                    let length = usize::try_from(chunk.length).map_err(|_| {
+                        CoreError::InvalidChunkRange {
+                            path: entry.path.clone(),
+                        }
+                    })?;
+                    let end = start
+                        .checked_add(length)
+                        .filter(|end| *end <= file_bytes.len())
+                        .ok_or_else(|| CoreError::InvalidChunkRange {
+                            path: entry.path.clone(),
+                        })?;
+                    let plaintext = &file_bytes[start..end];
+                    let chunk_id = hex_bytes(
+                        &keyed_content_id(
+                            master_key,
+                            KeyPurpose::ChunkIdentity,
+                            repository_context,
+                            plaintext,
+                        )
+                        .map_err(|source| CoreError::Encryption { source })?,
+                    );
+                    let object_key = object_key_for_id("objects/chunk", &chunk_id)?;
+                    let compressed = zstd::bulk::compress(plaintext, self.config.compression_level)
+                        .map_err(|source| CoreError::Compression {
+                            path: entry.path.clone(),
+                            source,
+                        })?;
+                    let encrypted = encrypt_repository_object(
+                        &chunk_key,
+                        ObjectKind::Chunk,
+                        &object_key,
+                        &compressed,
+                    )?;
+
+                    if !store
+                        .exists(&object_key)
+                        .await
+                        .map_err(|source| CoreError::Storage { source })?
+                    {
+                        match store
+                            .put_if_absent(&object_key, &encrypted)
+                            .await
+                            .map_err(|source| CoreError::Storage { source })?
+                        {
+                            PutStatus::Created => chunk_objects_written += 1,
+                            PutStatus::AlreadyPresent => {}
+                        }
+                    }
+
+                    let chunk_ref = ManifestChunkRef {
+                        chunk_id: chunk_id.clone(),
+                        object_key: object_key.as_str().to_owned(),
+                        offset: chunk.offset,
+                        length: chunk.length,
+                    };
+                    entry.chunks.push(chunk_ref.clone());
+                    index_entries.push(ChunkIndexEntry {
+                        chunk_id,
+                        object_key: object_key.as_str().to_owned(),
+                        plaintext_length: chunk.length,
+                        compressed_length: compressed.len() as u64,
+                        stored_length: encrypted.len() as u64,
+                        compression: CompressionAlgorithm::Zstd,
+                        aead: RepositoryAeadAlgorithm::XChaCha20Poly1305,
+                    });
+                }
+            }
+            manifest_entries.push(entry);
+        }
+
+        index_entries.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+        index_entries.dedup_by(|left, right| left.chunk_id == right.chunk_id);
+
+        let index_id = content_id_for_metadata(
+            master_key,
+            KeyPurpose::Index,
+            repository_context,
+            &index_entries,
+        )?;
+        let index = ChunkIndex {
+            schema_version: 0,
+            index_id: index_id.clone(),
+            chunks: index_entries,
+        };
+        let index_object = object_key_for_id("objects/index", &index_id)?;
+        write_encrypted_json_object(store, &index_key, ObjectKind::Index, &index_object, &index)
+            .await?;
+
+        let manifest_body = SnapshotManifestBody {
+            tags: request.tags,
+            entries: manifest_entries,
+            index_ids: vec![index_id.clone()],
+        };
+        let snapshot_id = content_id_for_metadata(
+            master_key,
+            KeyPurpose::SnapshotMetadata,
+            repository_context,
+            &manifest_body,
+        )?;
+        let manifest = SnapshotManifest {
+            schema_version: 0,
+            snapshot_id: snapshot_id.clone(),
+            body: manifest_body,
+        };
+        let manifest_object = object_key_for_id("objects/manifest", &snapshot_id)?;
+        write_encrypted_json_object(
+            store,
+            &manifest_key,
+            ObjectKind::SnapshotManifest,
+            &manifest_object,
+            &manifest,
+        )
+        .await?;
+
+        Ok(SnapshotWriteResult {
+            snapshot_id,
+            manifest_object,
+            index_object,
+            chunk_objects_written,
+            entries: manifest.body.entries.len(),
+            chunks: index.chunks.len(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotWriteResult {
+    pub snapshot_id: String,
+    pub manifest_object: ObjectKey,
+    pub index_object: ObjectKey,
+    pub chunk_objects_written: usize,
+    pub entries: usize,
+    pub chunks: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct SnapshotManifest {
+    pub schema_version: u16,
+    pub snapshot_id: String,
+    pub body: SnapshotManifestBody,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct SnapshotManifestBody {
+    pub tags: Vec<String>,
+    pub entries: Vec<ManifestEntry>,
+    pub index_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ManifestEntry {
+    pub root: PathBuf,
+    pub path: PathBuf,
+    pub relative_path: PathBuf,
+    pub metadata: EntryMetadata,
+    pub chunks: Vec<ManifestChunkRef>,
+}
+
+impl ManifestEntry {
+    fn from_source_entry(entry: SourceEntry) -> Self {
+        Self {
+            root: entry.root,
+            path: entry.path,
+            relative_path: entry.relative_path,
+            metadata: entry.metadata,
+            chunks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ManifestChunkRef {
+    pub chunk_id: String,
+    pub object_key: String,
+    pub offset: u64,
+    pub length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ChunkIndex {
+    pub schema_version: u16,
+    pub index_id: String,
+    pub chunks: Vec<ChunkIndexEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ChunkIndexEntry {
+    pub chunk_id: String,
+    pub object_key: String,
+    pub plaintext_length: u64,
+    pub compressed_length: u64,
+    pub stored_length: u64,
+    pub compression: CompressionAlgorithm,
+    pub aead: RepositoryAeadAlgorithm,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionAlgorithm {
+    Zstd,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryAeadAlgorithm {
+    XChaCha20Poly1305,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct StoredEncryptedObject {
+    algorithm: RepositoryAeadAlgorithm,
+    nonce: [u8; fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN],
+    ciphertext: Vec<u8>,
+}
+
+fn encrypt_repository_object(
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+    plaintext: &[u8],
+) -> CoreResult<Vec<u8>> {
+    let context = ObjectContext::new(kind, object_key.as_str())
+        .map_err(|source| CoreError::Encryption { source })?;
+    let encrypted = encrypt_object(key, &context, plaintext)
+        .map_err(|source| CoreError::Encryption { source })?;
+    encode_encrypted_object(encrypted)
+}
+
+async fn write_encrypted_json_object<T: Serialize>(
+    store: &dyn ObjectStore,
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+    value: &T,
+) -> CoreResult<()> {
+    let plaintext =
+        serde_json::to_vec(value).map_err(|source| CoreError::Serialization { source })?;
+    let encrypted = encrypt_repository_object(key, kind, object_key, &plaintext)?;
+    store
+        .put_if_absent(object_key, &encrypted)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    Ok(())
+}
+
+fn encode_encrypted_object(encrypted: EncryptedObject) -> CoreResult<Vec<u8>> {
+    let algorithm = match encrypted.algorithm {
+        AeadAlgorithm::XChaCha20Poly1305 => RepositoryAeadAlgorithm::XChaCha20Poly1305,
+    };
+    serde_json::to_vec(&StoredEncryptedObject {
+        algorithm,
+        nonce: encrypted.nonce,
+        ciphertext: encrypted.ciphertext,
+    })
+    .map_err(|source| CoreError::Serialization { source })
+}
+
+fn content_id_for_metadata<T: Serialize>(
+    master_key: &MasterKey,
+    purpose: KeyPurpose,
+    context: &[u8],
+    value: &T,
+) -> CoreResult<String> {
+    let bytes = serde_json::to_vec(value).map_err(|source| CoreError::Serialization { source })?;
+    keyed_content_id(master_key, purpose, context, &bytes)
+        .map(|id| hex_bytes(&id))
+        .map_err(|source| CoreError::Encryption { source })
+}
+
+fn object_key_for_id(group: &str, id: &str) -> CoreResult<ObjectKey> {
+    let prefix = id.get(..2).ok_or(CoreError::InvalidBackupPipelineConfig {
+        reason: "object id must be at least two characters",
+    })?;
+    ObjectKey::new(format!("{group}/{prefix}/{id}"))
+        .map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -545,5 +979,78 @@ mod tests {
                 gear_hash: 0,
             }]
         );
+    }
+
+    #[test]
+    fn backup_pipeline_rejects_empty_repository_context() {
+        let error = BackupPipeline::new(BackupPipelineConfig {
+            chunking: ChunkingConfig::new(64, 256, 1024),
+            compression_level: DEFAULT_ZSTD_COMPRESSION_LEVEL,
+            repository_id: String::new(),
+        })
+        .expect_err("empty repository id");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidBackupPipelineConfig { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn backup_pipeline_writes_encrypted_chunks_index_and_manifest() {
+        use fileferry_storage::ObjectKeyPrefix;
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("one.txt"), b"same content").expect("write one");
+        fs::write(temp.path().join("two.txt"), b"same content").expect("write two");
+
+        let config = BackupPipelineConfig {
+            chunking: ChunkingConfig::new(64, 256, 1024),
+            compression_level: DEFAULT_ZSTD_COMPRESSION_LEVEL,
+            repository_id: "repo-test-id".to_owned(),
+        };
+        let pipeline = BackupPipeline::new(config).expect("pipeline");
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: vec!["laptop".to_owned()],
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        assert_eq!(result.entries, 3);
+        assert_eq!(result.chunks, 1);
+        assert_eq!(result.chunk_objects_written, 1);
+        assert_eq!(store.object_count().await, 3);
+
+        let keys = store
+            .list_prefix(&ObjectKeyPrefix::root())
+            .await
+            .expect("list objects");
+        let rendered_keys = keys
+            .iter()
+            .map(|key| key.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered_keys.contains("objects/chunk/"));
+        assert!(rendered_keys.contains("objects/index/"));
+        assert!(rendered_keys.contains("objects/manifest/"));
+        assert!(!rendered_keys.contains("one.txt"));
+        assert!(!rendered_keys.contains("two.txt"));
+
+        let manifest_bytes = store.get(&result.manifest_object).await.expect("manifest");
+        let rendered_manifest = String::from_utf8_lossy(&manifest_bytes);
+        assert!(!rendered_manifest.contains("one.txt"));
+        assert!(!rendered_manifest.contains("two.txt"));
+        assert!(!rendered_manifest.contains("laptop"));
     }
 }

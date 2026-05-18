@@ -8,10 +8,16 @@ repository.workspace = true
 
 [dependencies]
 fastcdc.workspace = true
+fileferry-crypto = { path = "../fileferry-crypto" }
 fileferry-platform = { path = "../fileferry-platform" }
+fileferry-storage = { path = "../fileferry-storage" }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
+fileferry-testkit = { path = "../fileferry-testkit" }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -45,6 +45,10 @@ Last reviewed: 2026-05-18.
 - `fileferry-core` has a tested deterministic source walker with wildcard
   exclusion rules, symlink-aware metadata capture, and validated FastCDC
   content-defined chunk planning.
+- `fileferry-core` has an initial tested backup pipeline that compresses
+  planned chunks with zstd, encrypts chunk/index/manifest objects, writes them
+  through the object-store trait, deduplicates same-content chunks by keyed
+  chunk identity, and creates an encrypted snapshot manifest.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
@@ -416,9 +420,9 @@ where documented verification passes on a clean checkout.
 - [x] Implement source walking and exclusion rules.
 - [x] Implement platform metadata capture.
 - [x] Implement content-defined chunking.
-- [ ] Implement compression and encryption pipeline.
-- [ ] Implement chunk/index writes.
-- [ ] Implement snapshot manifest creation.
+- [x] Implement compression and encryption pipeline.
+- [x] Implement chunk/index writes.
+- [x] Implement snapshot manifest creation.
 - [ ] Add resumable backup state.
 - [ ] Add tests for sparse trees, symlinks, permissions, large files, many
       small files, and excluded paths.
@@ -566,6 +570,13 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added the first core backup pipeline slice: source entries are
+  chunked, zstd-compressed, encrypted through the existing authenticated object
+  envelope, written as immutable chunk objects, indexed in an encrypted chunk
+  index, and recorded in an encrypted snapshot manifest. Chunk object names use
+  keyed content identities so duplicate chunk content is represented once
+  without leaking source paths in object names. Verified with `cargo test -p
+  fileferry-core`.
 - 2026-05-18 - Added validated FastCDC content-defined chunk planning in
   `fileferry-core`, including default v0 chunk-size targets, bounds checking
   against the FastCDC implementation, deterministic chunk-range tests, and

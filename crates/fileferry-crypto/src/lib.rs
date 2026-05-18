@@ -187,6 +187,7 @@ impl std::fmt::Debug for Subkey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyPurpose {
+    ChunkIdentity,
     ChunkData,
     SnapshotMetadata,
     Index,
@@ -198,6 +199,7 @@ pub enum KeyPurpose {
 impl KeyPurpose {
     fn label(self) -> &'static [u8] {
         match self {
+            Self::ChunkIdentity => b"chunk-identity",
             Self::ChunkData => b"chunk-data",
             Self::SnapshotMetadata => b"snapshot-metadata",
             Self::Index => b"index",
@@ -206,6 +208,16 @@ impl KeyPurpose {
             Self::PruneMark => b"prune-mark",
         }
     }
+}
+
+pub fn keyed_content_id(
+    master_key: &MasterKey,
+    purpose: KeyPurpose,
+    context: &[u8],
+    bytes: &[u8],
+) -> Result<[u8; 32], CryptoError> {
+    let key = master_key.derive_subkey(purpose, context)?;
+    Ok(*blake3::keyed_hash(key.expose(), bytes).as_bytes())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

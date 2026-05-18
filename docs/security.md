@@ -69,6 +69,7 @@ output    = 32 bytes
 
 Initial subkey purposes:
 
+- `chunk-identity`
 - `chunk-data`
 - `snapshot-metadata`
 - `index`
@@ -218,6 +219,9 @@ The `fileferry-crypto` crate currently includes focused tests for:
 - Wrong subkey failure.
 - Bit-flipped ciphertext failure.
 - Truncated ciphertext failure.
+- Core backup pipeline chunk/index/manifest writes that keep source paths,
+  tags, and directory shape inside encrypted metadata objects and use keyed
+  chunk identities for object placement.
 - Wrong authenticated object context failure.
 - Redacted `Debug` output for master keys.
 

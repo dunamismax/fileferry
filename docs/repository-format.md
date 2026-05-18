@@ -145,6 +145,16 @@ Required index fields before format freeze:
 Indexes are sensitive because they reveal deduplication and backup shape. They
 remain encrypted and authenticated.
 
+Current implementation status:
+
+- The first core pipeline writes one encrypted index object per snapshot write.
+- Chunk identities are keyed BLAKE3 values derived from the repository master
+  key context, not raw plaintext hashes.
+- Index object names are derived from keyed metadata identities and do not
+  include source paths, tags, hostnames, or profile names.
+- The index schema is still v0 implementation scaffolding and is not a frozen
+  compatibility contract.
+
 ## Commit Markers And Upload State
 
 Backups publish a snapshot only after all referenced chunks, indexes, and the
