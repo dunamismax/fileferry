@@ -8,6 +8,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use futures_util::TryStreamExt;
@@ -20,6 +21,8 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::{
     fs::{self, OpenOptions},
     io::AsyncWriteExt,
+    sync::Semaphore,
+    time::{sleep, timeout},
 };
 
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -73,6 +76,15 @@ pub enum StorageError {
         #[source]
         source: ObjectStoreError,
     },
+
+    #[error("{operation} timed out after {after:?}")]
+    Timeout {
+        operation: &'static str,
+        after: Duration,
+    },
+
+    #[error("storage policy configuration failed: {reason}")]
+    PolicyConfig { reason: &'static str },
 }
 
 impl StorageError {
@@ -90,6 +102,17 @@ impl StorageError {
                 source,
             }
         }
+    }
+
+    fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Io { .. }
+                | Self::ObjectIo { .. }
+                | Self::BackendObject { .. }
+                | Self::Backend { .. }
+                | Self::Timeout { .. }
+        )
     }
 }
 
@@ -180,6 +203,262 @@ pub trait ObjectStore: Send + Sync {
     fn delete<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, ()>;
 
     fn list_prefix<'a>(&'a self, prefix: &'a ObjectKeyPrefix) -> StorageFuture<'a, Vec<ObjectKey>>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoragePolicy {
+    max_attempts: usize,
+    operation_timeout: Duration,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    max_concurrency: usize,
+}
+
+impl StoragePolicy {
+    pub fn new(
+        max_attempts: usize,
+        operation_timeout: Duration,
+        initial_backoff: Duration,
+        max_backoff: Duration,
+        max_concurrency: usize,
+    ) -> StorageResult<Self> {
+        if max_attempts == 0 {
+            return Err(StorageError::PolicyConfig {
+                reason: "max attempts must be greater than zero",
+            });
+        }
+        if operation_timeout.is_zero() {
+            return Err(StorageError::PolicyConfig {
+                reason: "operation timeout must be greater than zero",
+            });
+        }
+        if initial_backoff.is_zero() {
+            return Err(StorageError::PolicyConfig {
+                reason: "initial backoff must be greater than zero",
+            });
+        }
+        if max_backoff < initial_backoff {
+            return Err(StorageError::PolicyConfig {
+                reason: "max backoff must be greater than or equal to initial backoff",
+            });
+        }
+        if max_concurrency == 0 {
+            return Err(StorageError::PolicyConfig {
+                reason: "max concurrency must be greater than zero",
+            });
+        }
+
+        Ok(Self {
+            max_attempts,
+            operation_timeout,
+            initial_backoff,
+            max_backoff,
+            max_concurrency,
+        })
+    }
+
+    pub fn max_attempts(&self) -> usize {
+        self.max_attempts
+    }
+
+    pub fn operation_timeout(&self) -> Duration {
+        self.operation_timeout
+    }
+
+    pub fn initial_backoff(&self) -> Duration {
+        self.initial_backoff
+    }
+
+    pub fn max_backoff(&self) -> Duration {
+        self.max_backoff
+    }
+
+    pub fn max_concurrency(&self) -> usize {
+        self.max_concurrency
+    }
+}
+
+impl Default for StoragePolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 4,
+            operation_timeout: Duration::from_secs(60),
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(2),
+            max_concurrency: 16,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StorageOperation {
+    PutIfAbsent,
+    Get,
+    Exists,
+    Delete,
+    ListPrefix,
+}
+
+impl StorageOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::PutIfAbsent => "put object",
+            Self::Get => "read object",
+            Self::Exists => "stat object",
+            Self::Delete => "delete object",
+            Self::ListPrefix => "list objects",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PolicyObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    policy: StoragePolicy,
+    semaphore: Arc<Semaphore>,
+}
+
+impl fmt::Debug for PolicyObjectStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PolicyObjectStore")
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PolicyObjectStore {
+    pub fn new(inner: Arc<dyn ObjectStore>, policy: StoragePolicy) -> Self {
+        let semaphore = Arc::new(Semaphore::new(policy.max_concurrency()));
+        Self {
+            inner,
+            policy,
+            semaphore,
+        }
+    }
+
+    pub fn from_store(store: impl ObjectStore + 'static, policy: StoragePolicy) -> Self {
+        Self::new(Arc::new(store), policy)
+    }
+
+    pub fn policy(&self) -> &StoragePolicy {
+        &self.policy
+    }
+
+    fn run<'a, T, F, Fut>(
+        &'a self,
+        operation: StorageOperation,
+        mut attempt: F,
+    ) -> StorageFuture<'a, T>
+    where
+        T: Send + 'a,
+        F: FnMut() -> Fut + Send + 'a,
+        Fut: Future<Output = StorageResult<T>> + Send + 'a,
+    {
+        Box::pin(async move {
+            let _permit = self.semaphore.clone().acquire_owned().await.map_err(|_| {
+                StorageError::PolicyConfig {
+                    reason: "concurrency limiter closed",
+                }
+            })?;
+            let mut backoff = self.policy.initial_backoff();
+
+            for attempt_number in 1..=self.policy.max_attempts() {
+                let result = timeout(self.policy.operation_timeout(), attempt())
+                    .await
+                    .map_err(|_| StorageError::Timeout {
+                        operation: operation.label(),
+                        after: self.policy.operation_timeout(),
+                    })
+                    .and_then(|result| result);
+
+                match result {
+                    Ok(value) => return Ok(value),
+                    Err(error)
+                        if attempt_number < self.policy.max_attempts() && error.is_retryable() =>
+                    {
+                        sleep(backoff).await;
+                        backoff = next_backoff(backoff, self.policy.max_backoff());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            unreachable!("storage policy validates at least one attempt")
+        })
+    }
+}
+
+impl ObjectStore for PolicyObjectStore {
+    fn capabilities(&self) -> StorageCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn put_if_absent<'a>(
+        &'a self,
+        key: &'a ObjectKey,
+        bytes: &'a [u8],
+    ) -> StorageFuture<'a, PutStatus> {
+        let inner = self.inner.clone();
+        let key = key.clone();
+        let bytes = bytes.to_vec();
+
+        self.run(StorageOperation::PutIfAbsent, move || {
+            let inner = inner.clone();
+            let key = key.clone();
+            let bytes = bytes.clone();
+            async move { inner.put_if_absent(&key, &bytes).await }
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+        let inner = self.inner.clone();
+        let key = key.clone();
+
+        self.run(StorageOperation::Get, move || {
+            let inner = inner.clone();
+            let key = key.clone();
+            async move { inner.get(&key).await }
+        })
+    }
+
+    fn exists<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+        let inner = self.inner.clone();
+        let key = key.clone();
+
+        self.run(StorageOperation::Exists, move || {
+            let inner = inner.clone();
+            let key = key.clone();
+            async move { inner.exists(&key).await }
+        })
+    }
+
+    fn delete<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+        let inner = self.inner.clone();
+        let key = key.clone();
+
+        self.run(StorageOperation::Delete, move || {
+            let inner = inner.clone();
+            let key = key.clone();
+            async move { inner.delete(&key).await }
+        })
+    }
+
+    fn list_prefix<'a>(&'a self, prefix: &'a ObjectKeyPrefix) -> StorageFuture<'a, Vec<ObjectKey>> {
+        let inner = self.inner.clone();
+        let prefix = prefix.clone();
+
+        self.run(StorageOperation::ListPrefix, move || {
+            let inner = inner.clone();
+            let prefix = prefix.clone();
+            async move { inner.list_prefix(&prefix).await }
+        })
+    }
+}
+
+fn next_backoff(current: Duration, max: Duration) -> Duration {
+    let doubled = current.saturating_mul(2);
+    if doubled > max { max } else { doubled }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -830,9 +1109,33 @@ fn push_object_path(root: &Path, path: &Path, output: &mut Vec<ObjectKey>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        },
+    };
 
     fn key(value: &str) -> ObjectKey {
         ObjectKey::new(value).expect("valid object key")
+    }
+
+    fn test_policy(
+        max_attempts: usize,
+        operation_timeout: Duration,
+        initial_backoff: Duration,
+        max_backoff: Duration,
+        max_concurrency: usize,
+    ) -> StoragePolicy {
+        StoragePolicy::new(
+            max_attempts,
+            operation_timeout,
+            initial_backoff,
+            max_backoff,
+            max_concurrency,
+        )
+        .expect("valid policy")
     }
 
     #[test]
@@ -889,6 +1192,83 @@ mod tests {
         .expect_err("http endpoint");
 
         assert!(matches!(error, StorageError::BackendConfig { .. }));
+    }
+
+    #[test]
+    fn storage_policy_validates_bounds() {
+        assert_eq!(
+            StoragePolicy::default(),
+            test_policy(
+                4,
+                Duration::from_secs(60),
+                Duration::from_millis(100),
+                Duration::from_secs(2),
+                16,
+            )
+        );
+
+        assert!(
+            StoragePolicy::new(
+                0,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            StoragePolicy::new(
+                1,
+                Duration::ZERO,
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            StoragePolicy::new(
+                1,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                Duration::from_millis(1),
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            StoragePolicy::new(
+                1,
+                Duration::from_secs(1),
+                Duration::from_millis(2),
+                Duration::from_millis(1),
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            StoragePolicy::new(
+                1,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retry_backoff_doubles_until_the_configured_cap() {
+        assert_eq!(
+            next_backoff(Duration::from_millis(10), Duration::from_millis(100)),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_millis(80), Duration::from_millis(100)),
+            Duration::from_millis(100)
+        );
     }
 
     #[tokio::test]
@@ -985,6 +1365,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_store_retries_retryable_errors() {
+        let inner = TransientPutStore::new(2);
+        let attempts = inner.attempts.clone();
+        let store = PolicyObjectStore::from_store(
+            inner,
+            test_policy(
+                3,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                1,
+            ),
+        );
+
+        assert_eq!(
+            store
+                .put_if_absent(&key("chunks/retry/blob"), b"bytes")
+                .await
+                .expect("retry succeeds"),
+            PutStatus::Created
+        );
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn policy_store_does_not_retry_permanent_conflicts() {
+        let store = PolicyObjectStore::from_store(
+            ConflictStore,
+            test_policy(
+                3,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                1,
+            ),
+        );
+
+        let error = store
+            .put_if_absent(&key("chunks/conflict/blob"), b"bytes")
+            .await
+            .expect_err("permanent conflict");
+
+        assert!(matches!(error, StorageError::ObjectAlreadyExists { .. }));
+    }
+
+    #[tokio::test]
+    async fn policy_store_times_out_slow_operations() {
+        let store = PolicyObjectStore::from_store(
+            SlowReadStore::default(),
+            test_policy(
+                1,
+                Duration::from_millis(5),
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                1,
+            ),
+        );
+
+        let error = store
+            .get(&key("chunks/slow/blob"))
+            .await
+            .expect_err("slow read times out");
+
+        assert!(matches!(error, StorageError::Timeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn policy_store_limits_concurrent_operations() {
+        let inner = SlowReadStore::default();
+        let max_active = inner.max_active.clone();
+        let store = PolicyObjectStore::from_store(
+            inner,
+            test_policy(
+                1,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                1,
+            ),
+        );
+        let first = key("chunks/slow/one");
+        let second = key("chunks/slow/two");
+
+        let (first_result, second_result) = tokio::join!(store.get(&first), store.get(&second));
+
+        assert_eq!(first_result.expect("first read"), b"slow");
+        assert_eq!(second_result.expect("second read"), b"slow");
+        assert_eq!(max_active.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn s3_store_round_trip_when_integration_env_is_enabled() {
         let Some(config) = s3_integration_config() else {
             return;
@@ -1073,5 +1544,170 @@ mod tests {
             .expect("time")
             .as_nanos();
         format!("{}-{nanos}", std::process::id())
+    }
+
+    #[derive(Debug)]
+    struct TransientPutStore {
+        remaining_failures: AtomicUsize,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl TransientPutStore {
+        fn new(remaining_failures: usize) -> Self {
+            Self {
+                remaining_failures: AtomicUsize::new(remaining_failures),
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl ObjectStore for TransientPutStore {
+        fn capabilities(&self) -> StorageCapabilities {
+            StorageCapabilities::in_memory_fake()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> StorageFuture<'a, PutStatus> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                if self
+                    .remaining_failures
+                    .fetch_update(
+                        AtomicOrdering::SeqCst,
+                        AtomicOrdering::SeqCst,
+                        |remaining| remaining.checked_sub(1),
+                    )
+                    .is_ok()
+                {
+                    return Err(StorageError::ObjectIo {
+                        operation: "test transient put",
+                        key: key.clone(),
+                        source: io::Error::new(io::ErrorKind::TimedOut, "temporary failure"),
+                    });
+                }
+
+                Ok(PutStatus::Created)
+            })
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move { Err(StorageError::ObjectNotFound { key: key.clone() }) })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(false) })
+        }
+
+        fn delete<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ConflictStore;
+
+    impl ObjectStore for ConflictStore {
+        fn capabilities(&self) -> StorageCapabilities {
+            StorageCapabilities::in_memory_fake()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> StorageFuture<'a, PutStatus> {
+            Box::pin(async move { Err(StorageError::ObjectAlreadyExists { key: key.clone() }) })
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move { Err(StorageError::ObjectNotFound { key: key.clone() }) })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(false) })
+        }
+
+        fn delete<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct SlowReadStore {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    impl SlowReadStore {
+        fn observe_start(&self) {
+            let active = self.active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            let mut current_max = self.max_active.load(AtomicOrdering::SeqCst);
+            while active > current_max {
+                match self.max_active.compare_exchange(
+                    current_max,
+                    active,
+                    AtomicOrdering::SeqCst,
+                    AtomicOrdering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => current_max = observed,
+                }
+            }
+        }
+    }
+
+    impl ObjectStore for SlowReadStore {
+        fn capabilities(&self) -> StorageCapabilities {
+            StorageCapabilities::in_memory_fake()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            _key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> StorageFuture<'a, PutStatus> {
+            Box::pin(async move { Ok(PutStatus::Created) })
+        }
+
+        fn get<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move {
+                self.observe_start();
+                sleep(Duration::from_millis(25)).await;
+                self.active.fetch_sub(1, AtomicOrdering::SeqCst);
+                Ok(b"slow".to_vec())
+            })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(true) })
+        }
+
+        fn delete<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
     }
 }

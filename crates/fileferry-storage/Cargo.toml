@@ -10,10 +10,10 @@ repository.workspace = true
 futures-util.workspace = true
 object_store.workspace = true
 secrecy.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "time"] }
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

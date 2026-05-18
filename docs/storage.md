@@ -60,6 +60,25 @@ The model intentionally separates capability reporting from command output.
 CLI code can later map capability failures into stable diagnostics and exit
 codes.
 
+## Reliability Policy
+
+`PolicyObjectStore` wraps any `ObjectStore` with the common operational policy
+that repository code needs before trusting a backend for long operations:
+
+- Maximum attempts for retryable failures.
+- Per-operation timeout.
+- Exponential backoff with a configured cap.
+- Maximum concurrent object operations.
+
+The default policy is four attempts, a 60-second operation timeout, 100 ms
+initial backoff, 2-second maximum backoff, and 16 concurrent operations.
+
+The policy retries transient I/O, backend, and timeout errors. It does not
+retry permanent storage-contract failures such as invalid object keys, missing
+objects, or immutable-write conflicts. Backends still report their native
+capabilities; the policy wrapper changes execution behavior, not backend
+identity.
+
 ## Local Filesystem Backend
 
 `LocalStore` maps validated object keys under a configured root directory.
@@ -147,8 +166,9 @@ conditional create because Backblaze returns `501 NotImplemented` for the
 ## Not Implemented Yet
 
 S3-compatible storage now has the initial object-store adapter and a live
-round-trip test gate. Before it is marked complete it still needs explicit
-capability checks, retry policy, timeout policy, concurrency controls,
-stale-or-surprising listing tests, missing-object tests, partial upload
-behavior, permission-error tests, multipart cleanup guidance, and provider
-evidence beyond the initial Backblaze-compatible round trip.
+round-trip test gate. Common retry, timeout, backoff, and concurrency behavior
+exists in the policy wrapper. Before S3 storage is marked complete it still
+needs explicit provider capability checks, stale-or-surprising listing tests,
+missing-object tests, partial upload behavior, permission-error tests,
+multipart cleanup guidance, and provider evidence beyond the initial
+Backblaze-compatible round trip.

@@ -31,7 +31,8 @@ Last reviewed: 2026-05-18.
   passphrase key-slot unlock, HKDF subkeys, and XChaCha20-Poly1305 object
   envelopes.
 - `fileferry-storage` has a tested object-store trait, capability model,
-  validated object keys, local filesystem backend, and S3-compatible backend.
+  validated object keys, local filesystem backend, S3-compatible backend, and
+  reusable retry/timeout/backoff/concurrency policy wrapper.
 - `fileferry-policy` has a tested parser for count-based and tag-based
   retention keep rules.
 - `docs/platform-metadata.md` defines the v1 metadata capture target and
@@ -391,7 +392,7 @@ where documented verification passes on a clean checkout.
 - [x] Implement S3-compatible backend through `object_store` or a documented
       lower-level choice.
 - [x] Add storage capability model.
-- [ ] Add retry, timeout, concurrency, and backoff behavior.
+- [x] Add retry, timeout, concurrency, and backoff behavior.
 - [x] Add fake object store in `fileferry-testkit`.
 - [x] Add interruption and idempotency tests.
 
@@ -559,6 +560,11 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added `PolicyObjectStore` and `StoragePolicy` so storage
+  operations can be bounded by retry count, per-operation timeout,
+  exponential backoff, and max concurrency. Added tests for policy validation,
+  retryable failures, permanent conflict handling, timeouts, backoff capping,
+  and concurrency limiting. Verified with `cargo test -p fileferry-storage`.
 - 2026-05-18 - Added the `fileferry-web` public homepage crate for
   `fileferry.app`: Axum server, Leptos SSR marketing page, embedded CSS,
   `/healthz`, Ubuntu deployment notes, and route/render tests. Verified with
