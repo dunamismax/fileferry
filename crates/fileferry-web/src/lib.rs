@@ -54,7 +54,7 @@ fn Homepage() -> impl IntoView {
                 <a class="skip-link" href="#main">"Skip to content"</a>
                 <header class="site-header">
                     <a class="brand" href="/" aria-label="FileFerry home">
-                        <span class="brand-mark" aria-hidden="true">"S"</span>
+                        <span class="brand-mark" aria-hidden="true">"F"</span>
                         <span>"FileFerry"</span>
                     </a>
                     <nav aria-label="Primary navigation">
