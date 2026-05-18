@@ -19,7 +19,8 @@ Last reviewed: 2026-05-18.
 - `origin` fetches from and pushes to
   `https://github.com/dunamismax/sealport.git`.
 - Rust workspace exists with the target crate boundaries, `sealport-cli`
-  binary, `just` verification recipes, and GitHub Actions CI.
+  binary, `sealport-web` homepage binary, `just` verification recipes, and
+  GitHub Actions CI.
 - `sealport version` supports human, JSON, and JSONL output.
 - `sealport completion <SHELL>` generates shell completion scripts.
 - CLI config discovery, profiles, environment precedence, redacted
@@ -37,6 +38,8 @@ Last reviewed: 2026-05-18.
   restore reporting behavior for unrepresentable metadata.
 - `sealport-testkit` has a tested in-memory fake object store for future
   repository and pipeline tests.
+- `sealport-web` serves the public `sealport.cc` homepage with Axum,
+  server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
   `BUILD.md`, and `AGENTS.md`.
 - The product target is an all-Rust, cross-platform, encrypted backup CLI
@@ -45,6 +48,10 @@ Last reviewed: 2026-05-18.
 The repo is still pre-backup-engine. Do not describe backup, restore,
 repository, storage, crypto, or platform behavior as working until code,
 tests, and platform evidence exist.
+
+The `sealport-web` crate is public marketing infrastructure only. It does not
+turn SealPort into a backup server, hosted product, daemon, scheduler, or web
+application.
 
 ---
 
@@ -72,6 +79,8 @@ tests, and platform evidence exist.
 - **zeroize** and **secrecy** for secret handling.
 - **xtask** only when build, fixture, compatibility, or release automation
   becomes too large for `just` and Cargo commands.
+- **Axum** plus server-rendered **Leptos** for the separate public homepage
+  binary.
 
 Use current primary docs before locking crate versions, crypto primitives,
 target support, or release tooling.
@@ -182,11 +191,13 @@ crates/
   sealport-platform/  filesystem metadata across Windows/macOS/Linux/BSD
   sealport-policy/    retention, pruning, lifecycle rules
   sealport-testkit/   fake stores, corruption tests, fixtures, helpers
+  sealport-web/       Axum + Leptos public homepage for sealport.cc
 xtask/
 docs/
   architecture.md
   cli-contract.md
   config.md
+  homepage-deployment.md
   repository-format.md
   security.md
   storage.md
@@ -378,6 +389,15 @@ where documented verification passes on a clean checkout.
 - [x] Add fake object store in `sealport-testkit`.
 - [x] Add interruption and idempotency tests.
 
+### Public Homepage - sealport.cc
+
+- [x] Add a separate `sealport-web` workspace crate so homepage dependencies
+      stay out of the backup CLI/runtime crates.
+- [x] Build the public homepage with Axum and server-rendered Leptos views.
+- [x] Serve static CSS and a reverse-proxy-friendly `/healthz` endpoint.
+- [x] Document Ubuntu self-hosting shape for `sealport.cc`.
+- [x] Add route and render tests for the homepage.
+
 ### Phase 5 - Backup Pipeline
 
 - [ ] Implement source walking and exclusion rules.
@@ -531,6 +551,10 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added the `sealport-web` public homepage crate for
+  `sealport.cc`: Axum server, Leptos SSR marketing page, embedded CSS,
+  `/healthz`, Ubuntu deployment notes, and route/render tests. Verified with
+  `cargo test -p sealport-web`; full gate recorded with this change.
 - 2026-05-18 - Added the first `sealport-policy` retention policy parser for
   count-based keep rules and repeated tag keep rules, documented current CLI
   JSON/JSONL schemas and data-mode progress behavior, and added

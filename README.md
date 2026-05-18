@@ -13,6 +13,10 @@ contracts the implementation must satisfy before release.
 
 Future homepage: [sealport.cc](https://sealport.cc/).
 
+The public homepage is implemented as a separate lightweight Rust binary,
+`sealport-web`, using Axum and server-rendered Leptos views. It is marketing
+infrastructure for `sealport.cc`, not a SealPort backup server mode.
+
 ## Product Promise
 
 SealPort gives operators a secure, scriptable backup tool that behaves
@@ -185,6 +189,7 @@ crates/
   sealport-platform/  filesystem metadata across supported platforms
   sealport-policy/    retention, pruning, lifecycle rules
   sealport-testkit/   fake stores, corruption fixtures, platform helpers
+  sealport-web/       Axum + Leptos public homepage for sealport.cc
 xtask/                release, fixtures, and repo automation when useful
 docs/                 durable architecture, security, operations, release docs
 ```
@@ -204,6 +209,28 @@ Expected Rust stack:
 - `zstd` for compression.
 - Argon2id for passphrase key derivation.
 - `zeroize` and `secrecy` for secret handling.
+
+The homepage stack is intentionally separate from the CLI/runtime stack:
+`sealport-web` uses `axum`, `tokio`, and Leptos SSR to serve static marketing
+content, `/assets/site.css`, and `/healthz`.
+
+## Public Homepage
+
+Run the current homepage locally:
+
+```sh
+cargo run -p sealport-web
+```
+
+By default it binds `0.0.0.0:8080`. Set `SEALPORT_WEB_ADDR` to override the
+listener, for example:
+
+```sh
+SEALPORT_WEB_ADDR=127.0.0.1:8080 cargo run -p sealport-web
+```
+
+Ubuntu self-hosting notes live in
+[`docs/homepage-deployment.md`](docs/homepage-deployment.md).
 
 ## Config
 

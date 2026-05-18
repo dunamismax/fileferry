@@ -58,6 +58,8 @@ benchmarks, overstate platform support, or bury the lede.
 - SealPort is CLI-only by design.
 - SealPort is not a GUI, TUI, daemon, server, FUSE mount, scheduler, mobile
   app, SaaS dashboard, or hosted backup product.
+- The public `sealport.cc` homepage may live in a separate `sealport-web`
+  crate; this is marketing infrastructure, not a SealPort backup server mode.
 - SealPort is not a restic, rustic, Borg, Kopia, or rclone repository
   compatibility project.
 - rclone may become an optional bridge later, but it must not be a core

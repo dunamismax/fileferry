@@ -17,3 +17,6 @@ test-s3:
 
 build:
     cargo build --workspace
+
+web:
+    cargo run -p sealport-web
