@@ -284,8 +284,8 @@ ferry doctor
 CLI work:
 
 - [x] Define stable exit codes in `docs/cli-contract.md`.
-- [ ] Define JSON document schemas for every command.
-- [ ] Define JSONL event schemas for long operations.
+- [x] Define JSON document schemas for every command.
+- [x] Define JSONL event schemas for long operations.
 - [x] Add golden tests for help text, JSON output, JSONL event order, and exit
       codes.
 - [ ] Ensure progress bars never appear in stdout data modes.
@@ -578,6 +578,11 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Expanded `docs/cli-contract.md` with required v1 JSON document
+  data schemas for `init`, `backup`, `restore`, `snapshots`, `ls`, `check`,
+  `forget`, `prune`, `key` subcommands, and `version`, plus JSONL event data
+  schemas and required long-operation phase names. Verified with `git diff
+  --check` and `just check`.
 - 2026-05-18 - Added destination restore primitives in `fileferry-core`:
   regular-file content can now be restored under an absolute destination root
   with path containment checks, symlinked-destination rejection, explicit

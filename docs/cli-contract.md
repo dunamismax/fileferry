@@ -84,12 +84,162 @@ CommandDocument<T>
   data: T
 ```
 
-Implemented command documents:
+Required v1 command document data schemas:
 
 ```text
+init
+  data.repository_id: string
+  data.repository_url: redacted string
+  data.format_version: integer
+  data.backend: "local" | "s3"
+  data.created: boolean
+  data.key_slots: integer
+
+backup
+  data.snapshot_id: string
+  data.repository_id: string
+  data.started_at_unix_seconds: integer
+  data.completed_at_unix_seconds: integer
+  data.sources: array of redacted strings
+  data.tags: array of strings
+  data.entries_scanned: integer
+  data.files_backed_up: integer
+  data.directories_backed_up: integer
+  data.symlinks_backed_up: integer
+  data.special_entries_seen: integer
+  data.bytes_scanned: integer
+  data.bytes_uploaded: integer
+  data.chunks_seen: integer
+  data.chunks_written: integer
+  data.chunks_reused: integer
+  data.index_ids: array of strings
+  data.manifest_id: string
+
+restore
+  data.snapshot_id: string
+  data.destination: redacted string
+  data.paths: array of snapshot-relative strings
+  data.dry_run: boolean
+  data.overwrite: "fail_if_exists" | "overwrite_files"
+  data.entries_selected: integer
+  data.files_written: integer
+  data.directories_written: integer
+  data.symlinks_written: integer
+  data.metadata_applied: integer
+  data.metadata_warnings: array of RestoreMetadataWarning
+  data.bytes_written: integer
+  data.verified_files: integer
+
+snapshots
+  data.snapshots: array of SnapshotSummary
+
+ls
+  data.snapshot_id: string
+  data.path: snapshot-relative string
+  data.entries: array of SnapshotEntry
+
+check
+  data.repository_id: string
+  data.checked_at_unix_seconds: integer
+  data.metadata_objects_checked: integer
+  data.chunk_objects_checked: integer
+  data.bytes_read: integer
+  data.read_data_mode: "metadata_only" | "subset" | "full"
+  data.read_data_subset: string | null
+  data.errors: array of CheckFinding
+  data.warnings: array of CheckFinding
+
+forget
+  data.dry_run: boolean
+  data.snapshots_matched: integer
+  data.snapshots_forgotten: integer
+  data.retained_snapshots: integer
+  data.removed_snapshot_ids: array of strings
+  data.policy_summary: RetentionPolicySummary
+
+prune
+  data.dry_run: boolean
+  data.plan_id: string | null
+  data.objects_candidates: integer
+  data.objects_deleted: integer
+  data.objects_retained: integer
+  data.bytes_candidates: integer
+  data.bytes_deleted: integer
+  data.bytes_retained: integer
+  data.recovery_state: "none" | "mark_written" | "sweep_completed"
+
+key add
+  data.key_slot_id: string
+  data.key_slots: integer
+  data.kdf: KdfSummary
+
+key remove
+  data.removed_key_slot_id: string
+  data.key_slots: integer
+
+key rotate
+  data.added_key_slot_id: string
+  data.removed_key_slot_ids: array of strings
+  data.key_slots: integer
+  data.reencrypted_master_key_only: boolean
+
+key export-recovery
+  data.export_id: string
+  data.warning_acknowledged: boolean
+  data.destination: redacted string | null
+
 version
   data.command: "ferry"
   data.version: semantic-version string from the package version
+```
+
+Shared data records:
+
+```text
+SnapshotSummary
+  snapshot_id: string
+  created_at_unix_seconds: integer
+  tags: array of strings
+  source_count: integer
+  entry_count: integer
+
+SnapshotEntry
+  path: snapshot-relative string
+  kind: "regular_file" | "directory" | "symlink" | "other"
+  size_bytes: integer | null
+  modified: TimestampValue
+  metadata_status: "complete" | "partial" | "unsupported"
+
+TimestampValue
+  seconds: integer
+  nanoseconds: integer
+  status: "captured" | "unsupported" | "denied"
+
+RestoreMetadataWarning
+  path: snapshot-relative string
+  field: string
+  reason: string
+
+CheckFinding
+  code: stable string
+  severity: "warning" | "error"
+  object_key: string | null
+  snapshot_id: string | null
+  path: snapshot-relative string | null
+  message: string
+
+RetentionPolicySummary
+  keep_daily: integer | null
+  keep_weekly: integer | null
+  keep_monthly: integer | null
+  keep_yearly: integer | null
+  keep_tags: array of strings
+
+KdfSummary
+  algorithm: "argon2id_v19"
+  memory_cost_kib: integer
+  time_cost: integer
+  parallelism: integer
 ```
 
 `completion <SHELL>` writes the requested shell script directly to stdout. It
@@ -126,6 +276,59 @@ CommandEvent<T>
   command: string
   status: "started" | "success" | "failure"
   data: T | null
+```
+
+Long-operation JSONL event data schemas:
+
+```text
+command_started
+  data.request_id: string
+  data.repository_url: redacted string | null
+  data.profile: string
+  data.dry_run: boolean
+
+progress
+  data.phase: stable string
+  data.message: string
+  data.items_done: integer | null
+  data.items_total: integer | null
+  data.bytes_done: integer | null
+  data.bytes_total: integer | null
+  data.snapshot_id: string | null
+  data.object_key: string | null
+
+warning
+  data.code: stable string
+  data.message: string
+  data.path: redacted string | snapshot-relative string | null
+  data.object_key: string | null
+
+command_completed
+  data: same command-specific data as the matching JSON document
+
+command_failed
+  data.code: stable string
+  data.message: string
+  data.exit_code: integer
+  data.retryable: boolean
+  data.path: redacted string | snapshot-relative string | null
+  data.object_key: string | null
+```
+
+Required long-running commands must emit at least these phase names when the
+phase applies:
+
+```text
+init: validate_repository, create_bootstrap, write_key_slot, complete
+backup: walk_sources, plan_chunks, write_chunks, write_index, write_manifest, write_commit, complete
+restore: load_manifest, read_chunks, write_entries, apply_metadata, verify, complete
+check: load_commits, verify_metadata, verify_indexes, read_data, complete
+forget: load_snapshots, evaluate_policy, write_forget_state, complete
+prune: plan, mark, sweep, verify_reachability, complete
+key add: load_bootstrap, derive_key, write_key_slot, complete
+key remove: load_bootstrap, verify_remaining_unlock, remove_key_slot, complete
+key rotate: load_bootstrap, derive_key, write_key_slot, retire_old_slots, complete
+key export-recovery: load_bootstrap, create_export, complete
 ```
 
 Implemented command events:
