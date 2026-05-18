@@ -43,8 +43,10 @@ Last reviewed: 2026-05-18.
 - `ferry check` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
   manifests and chunk indexes, reads/decompresses every referenced chunk, and
-  verifies keyed chunk identities. Configurable subset checks are not
-  implemented yet.
+  verifies keyed chunk identities. Runtime check failures in JSON and JSONL
+  modes emit stable machine-readable failure envelopes with object keys and
+  `CheckFinding`-shaped integrity details where the failing core error carries
+  enough context. Configurable subset checks are not implemented yet.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -490,7 +492,7 @@ where documented verification passes on a clean checkout.
 - [x] Implement repository metadata check.
 - [ ] Implement configurable data subset checks.
 - [x] Implement full read-data check.
-- [ ] Add deterministic corruption reports.
+- [x] Add deterministic corruption reports.
 - [ ] Add `doctor` for environment, config, backend, and permission issues.
 - [ ] Document repair guidance without promising unsafe automatic repair.
 
@@ -608,6 +610,17 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Improved `ferry check` corruption diagnostics and
+  machine-readable failure behavior without adding repair or subset-check
+  claims. Authenticated-object decode and metadata decode errors now retain the
+  repository object key, and check reads map missing manifest/index objects
+  referenced by repository metadata to integrity exit code `6` instead of a
+  repository-not-found class. Runtime failures in `--json` and `--jsonl` modes
+  now emit stable failure envelopes on stdout with `code`, `exit_code`,
+  `retryable`, optional `path`, optional `object_key`, and `finding` details
+  for check integrity failures; human mode still writes diagnostics to stderr.
+  Added CLI integration tests for missing-chunk JSON failure and tampered-chunk
+  JSONL failure with empty stderr, plus targeted core/CLI checks.
 - 2026-05-18 - Expanded local restore and added the first `ferry check`
   implementation. Restore now writes explicit directory entries, regular-file
   contents, and Unix symlinks from initialized local repositories; it keeps

@@ -76,6 +76,9 @@ directory.
 
 `status` is `success` for completed commands. Future commands may add
 command-specific fields under `data` without changing the envelope.
+Runtime failures after CLI parsing use `status: "failure"` and the
+`command_failed` data schema documented below. Argument parsing errors from
+`clap` are still emitted as normal usage diagnostics.
 
 Current schema:
 
@@ -419,6 +422,12 @@ check command_completed
   status: "success"
   data: Check data schema above
 
+check command_failed
+  status: "failure"
+  data: command_failed data schema above
+  data.finding: CheckFinding, present when the check failure maps to a
+    repository integrity finding
+
 version command_started
   status: "started"
   data: null
@@ -469,7 +478,11 @@ or `FILEFERRY_PASSWORD_FILE`, authenticates committed snapshot manifests,
 authenticates chunk indexes, reads every referenced chunk object, decompresses
 chunk payloads, and verifies keyed chunk identities. JSON output follows the
 Check data schema above with `read_data_mode: "full"` and
-`read_data_subset: null`. Configurable subset checks are not implemented yet.
+`read_data_subset: null`. Check failures still fail closed. In JSON and JSONL
+modes, runtime check failures emit a machine-readable failure envelope with a
+stable `code`, `exit_code`, optional `object_key`, and, for repository
+integrity failures, a `finding` object shaped like `CheckFinding`.
+Configurable subset checks are not implemented yet.
 
 `ferry snapshots` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

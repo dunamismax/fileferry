@@ -106,14 +106,16 @@ pub enum CoreError {
         source: serde_json::Error,
     },
 
-    #[error("repository object framing could not be decoded")]
+    #[error("repository object {key} framing could not be decoded")]
     ObjectDecode {
+        key: ObjectKey,
         #[source]
         source: serde_json::Error,
     },
 
-    #[error("repository metadata could not be decoded")]
+    #[error("repository metadata object {key} could not be decoded")]
     MetadataDecode {
+        key: ObjectKey,
         #[source]
         source: serde_json::Error,
     },
@@ -1172,15 +1174,18 @@ impl BackupPipeline {
 
             let (manifest, manifest_bytes) = self
                 .read_snapshot_manifest_with_bytes(store, master_key, &commit.snapshot_id)
-                .await?;
+                .await
+                .map_err(|error| check_read_error(error, expected_manifest_object.clone()))?;
             bytes_read += manifest_bytes;
             metadata_objects_checked += 1;
 
             let mut index_entries = BTreeMap::new();
             for index_id in &manifest.body.index_ids {
+                let expected_index_object = object_key_for_id("objects/index", index_id)?;
                 let (index, index_bytes) = self
                     .read_chunk_index_with_bytes(store, master_key, index_id)
-                    .await?;
+                    .await
+                    .map_err(|error| check_read_error(error, expected_index_object.clone()))?;
                 bytes_read += index_bytes;
                 metadata_objects_checked += 1;
                 for entry in index.chunks {
@@ -2110,8 +2115,10 @@ async fn read_encrypted_json_object_with_bytes<T: for<'de> Deserialize<'de>>(
         .map_err(|source| CoreError::Storage { source })?;
     let bytes_read = encrypted.len() as u64;
     let plaintext = decrypt_repository_object(key, kind, object_key, &encrypted)?;
-    let value = serde_json::from_slice(&plaintext)
-        .map_err(|source| CoreError::MetadataDecode { source })?;
+    let value = serde_json::from_slice(&plaintext).map_err(|source| CoreError::MetadataDecode {
+        key: object_key.clone(),
+        source,
+    })?;
     Ok((value, bytes_read))
 }
 
@@ -2122,7 +2129,10 @@ fn decrypt_repository_object(
     bytes: &[u8],
 ) -> CoreResult<Vec<u8>> {
     let stored: StoredEncryptedObject =
-        serde_json::from_slice(bytes).map_err(|source| CoreError::ObjectDecode { source })?;
+        serde_json::from_slice(bytes).map_err(|source| CoreError::ObjectDecode {
+            key: object_key.clone(),
+            source,
+        })?;
     let algorithm = match stored.algorithm {
         RepositoryAeadAlgorithm::XChaCha20Poly1305 => AeadAlgorithm::XChaCha20Poly1305,
     };
@@ -2476,6 +2486,15 @@ fn content_id_for_metadata<T: Serialize>(
     keyed_content_id(master_key, purpose, context, &bytes)
         .map(|id| hex_bytes(&id))
         .map_err(|source| CoreError::Encryption { source })
+}
+
+fn check_read_error(error: CoreError, expected_key: ObjectKey) -> CoreError {
+    match error {
+        CoreError::Storage {
+            source: StorageError::ObjectNotFound { .. },
+        } => CoreError::RepositoryCheckMissingObject { key: expected_key },
+        other => other,
+    }
 }
 
 fn object_key_for_id(group: &str, id: &str) -> CoreResult<ObjectKey> {

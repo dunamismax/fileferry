@@ -355,7 +355,9 @@ storage groundwork, and core backup/restore/check primitives. The CLI
 currently exposes `version`, `completion`, local repository `init`, `backup`,
 `restore`, `snapshots`, `ls`, and `check`; restore currently covers directory
 entries, regular-file contents, and Unix symlinks from initialized local
-repositories. Metadata application and configurable check subsets are not
+repositories. Check failures in JSON and JSONL modes now emit
+machine-readable failure envelopes with stable codes and object-key context
+where available. Metadata application and configurable check subsets are not
 implemented yet. The repository format is still not frozen.
 
 The normal local gate is:

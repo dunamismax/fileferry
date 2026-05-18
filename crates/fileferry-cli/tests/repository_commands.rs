@@ -499,9 +499,110 @@ fn check_requires_initialized_repository_correct_password_and_authentic_chunks()
         .assert()
         .code(6)
         .stdout("")
-        .stderr(predicates::str::contains(
-            "repository object framing could not be decoded",
-        ));
+        .stderr(predicates::str::contains("framing could not be decoded"));
+}
+
+#[test]
+fn check_json_failure_reports_missing_chunk_as_machine_readable_finding() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let chunk_path = find_first_file(repo.join("objects/chunk"));
+    fs::remove_file(&chunk_path).expect("delete chunk");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "check"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failure: Value = serde_json::from_slice(&output).expect("check failure json");
+
+    assert_eq!(failure["command"], "check");
+    assert_eq!(failure["status"], "failure");
+    assert_eq!(failure["data"]["code"], "repository_check_missing_object");
+    assert_eq!(failure["data"]["exit_code"], 6);
+    assert_eq!(failure["data"]["retryable"], false);
+    assert!(
+        failure["data"]["object_key"]
+            .as_str()
+            .expect("object key")
+            .starts_with("objects/chunk/")
+    );
+    assert_eq!(
+        failure["data"]["finding"]["code"],
+        "repository_check_missing_object"
+    );
+    assert_eq!(failure["data"]["finding"]["severity"], "error");
+    assert_eq!(
+        failure["data"]["finding"]["object_key"],
+        failure["data"]["object_key"]
+    );
+}
+
+#[test]
+fn check_jsonl_failure_reports_tampered_chunk_without_stderr() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let chunk_path = find_first_file(repo.join("objects/chunk"));
+    let mut bytes = fs::read(&chunk_path).expect("chunk bytes");
+    bytes[0] ^= 0x01;
+    fs::write(&chunk_path, bytes).expect("tamper chunk");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "check"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let started: Value = serde_json::from_slice(lines[0]).expect("started event");
+    assert_eq!(started["event"], "command_started");
+    assert_eq!(started["command"], "check");
+
+    let failed: Value = serde_json::from_slice(lines[1]).expect("failed event");
+    assert_eq!(failed["event"], "command_failed");
+    assert_eq!(failed["command"], "check");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(failed["data"]["code"], "repository_object_decode_failed");
+    assert_eq!(failed["data"]["exit_code"], 6);
+    assert!(
+        failed["data"]["object_key"]
+            .as_str()
+            .expect("object key")
+            .starts_with("objects/chunk/")
+    );
+    assert_eq!(
+        failed["data"]["finding"]["code"],
+        "repository_object_decode_failed"
+    );
 }
 
 fn find_first_file(root: std::path::PathBuf) -> std::path::PathBuf {

@@ -156,6 +156,21 @@ pub enum Command {
     Version,
 }
 
+impl Command {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Completion { .. } => "completion",
+            Self::Init => "init",
+            Self::Backup { .. } => "backup",
+            Self::Snapshots => "snapshots",
+            Self::Ls { .. } => "ls",
+            Self::Check => "check",
+            Self::Restore { .. } => "restore",
+            Self::Version => "version",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error(transparent)]
@@ -603,6 +618,18 @@ struct ProgressData {
     object_key: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct FailureData {
+    code: String,
+    message: String,
+    exit_code: i32,
+    retryable: bool,
+    path: Option<String>,
+    object_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finding: Option<fileferry_core::CheckFinding>,
+}
+
 pub fn run(cli: Cli) -> Result<Output, CliError> {
     let mode = OutputMode::from_globals(&cli.globals);
 
@@ -662,6 +689,304 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             let _config = resolve_config(&cli.globals)?;
             version(mode)
         }
+    }
+}
+
+pub fn run_with_error_output(cli: Cli) -> (Output, i32) {
+    let mode = OutputMode::from_globals(&cli.globals);
+    let command = cli.command.name();
+
+    match run(cli) {
+        Ok(output) => (output, 0),
+        Err(error) => {
+            let exit_code = error.exit_code();
+            match render_error_output(mode, command, &error, exit_code) {
+                Ok(output) => (output, exit_code),
+                Err(render_error) => (
+                    Output {
+                        stdout: String::new(),
+                        stderr: format!("{render_error}\n"),
+                    },
+                    render_error.exit_code(),
+                ),
+            }
+        }
+    }
+}
+
+fn render_error_output(
+    mode: OutputMode,
+    command: &'static str,
+    error: &CliError,
+    exit_code: i32,
+) -> Result<Output, CliError> {
+    let data = failure_data(command, error, exit_code);
+    let output = match mode {
+        OutputMode::Human => Output {
+            stdout: String::new(),
+            stderr: format!("{error}\n"),
+        },
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command,
+                status: CommandStatus::Failure,
+                data,
+            };
+            Output {
+                stdout: format!("{}\n", serde_json::to_string_pretty(&document)?),
+                stderr: String::new(),
+            }
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<FailureData> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command,
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let failed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandFailed,
+                command,
+                status: CommandStatus::Failure,
+                data: Some(data),
+            };
+            Output {
+                stdout: format!(
+                    "{}\n{}\n",
+                    serde_json::to_string(&started)?,
+                    serde_json::to_string(&failed)?
+                ),
+                stderr: String::new(),
+            }
+        }
+    };
+
+    Ok(output)
+}
+
+fn failure_data(command: &'static str, error: &CliError, exit_code: i32) -> FailureData {
+    FailureData {
+        code: failure_code(error).to_owned(),
+        message: error.to_string(),
+        exit_code,
+        retryable: failure_retryable(error),
+        path: failure_path(error),
+        object_key: failure_object_key(error),
+        finding: match error {
+            CliError::Core(error) if command == "check" => check_finding_for_core_error(error),
+            _ => None,
+        },
+    }
+}
+
+fn failure_code(error: &CliError) -> &'static str {
+    match error {
+        CliError::Config(error) => match error {
+            ConfigError::Read { .. } => "config_read_failed",
+            ConfigError::Parse { .. } => "config_parse_failed",
+            ConfigError::MissingProfile { .. } => "config_profile_missing",
+            ConfigError::InvalidRepositoryUrl { .. } => "config_repository_url_invalid",
+            ConfigError::InvalidLogLevel { .. } => "config_log_level_invalid",
+            ConfigError::InvalidProgress { .. } => "config_progress_invalid",
+        },
+        CliError::Repository(error) => match error {
+            RepositoryError::MissingRepository => "repository_url_missing",
+            RepositoryError::MissingPassword => "repository_password_missing",
+            RepositoryError::PasswordFileRead { .. } => "repository_password_file_read_failed",
+            RepositoryError::UnsupportedRepository { .. } => "repository_url_unsupported",
+            RepositoryError::InvalidFileRepositoryUrl { .. } => "repository_file_url_invalid",
+            RepositoryError::Runtime { .. } => "repository_runtime_failed",
+        },
+        CliError::Core(error) => core_failure_code(error),
+        CliError::Json(_) => "json_serialization_failed",
+        CliError::Completion(_) => "completion_generation_failed",
+    }
+}
+
+fn core_failure_code(error: &CoreError) -> &'static str {
+    match error {
+        CoreError::SourceRootNotAbsolute { .. } => "source_root_not_absolute",
+        CoreError::SourceRootRead { .. } => "source_root_read_failed",
+        CoreError::DirectoryRead { .. } => "directory_read_failed",
+        CoreError::DirectoryEntryRead { .. } => "directory_entry_read_failed",
+        CoreError::MetadataCapture { .. } => "metadata_capture_failed",
+        CoreError::InvalidChunkingConfig { .. } => "chunking_config_invalid",
+        CoreError::InvalidBackupPipelineConfig { .. } => "backup_pipeline_config_invalid",
+        CoreError::FileRead { .. } => "file_read_failed",
+        CoreError::InvalidChunkRange { .. } => "chunk_range_invalid",
+        CoreError::Compression { .. } => "chunk_compression_failed",
+        CoreError::Decompression { .. } => "chunk_decompression_failed",
+        CoreError::InvalidChunkLength { .. } => "chunk_length_invalid",
+        CoreError::MissingChunkIndexEntry { .. } => "chunk_index_entry_missing",
+        CoreError::ChunkIdentityMismatch { .. } => "chunk_identity_mismatch",
+        CoreError::Encryption { .. } => "repository_authentication_failed",
+        CoreError::Serialization { .. } => "repository_metadata_serialization_failed",
+        CoreError::ObjectDecode { .. } => "repository_object_decode_failed",
+        CoreError::MetadataDecode { .. } => "repository_metadata_decode_failed",
+        CoreError::MetadataIdentityMismatch { .. } => "repository_metadata_identity_mismatch",
+        CoreError::CommitDecode { .. } => "repository_commit_decode_failed",
+        CoreError::InvalidCommitMarker { .. } => "repository_commit_marker_invalid",
+        CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
+        CoreError::RepositoryNotInitialized => "repository_not_initialized",
+        CoreError::InvalidRepositoryBootstrap { .. } => "repository_bootstrap_invalid",
+        CoreError::RepositoryUnlock { .. } => "repository_unlock_failed",
+        CoreError::SnapshotNotFound { .. } => "snapshot_not_found",
+        CoreError::SnapshotPathNotFound { .. } => "snapshot_path_not_found",
+        CoreError::InvalidRestoreRequest { .. } => "restore_request_invalid",
+        CoreError::RestoreDestinationNotAbsolute { .. } => "restore_destination_not_absolute",
+        CoreError::RestoreDestinationEscapesRoot { .. } => "restore_destination_escapes_root",
+        CoreError::RestoreDestinationSymlink { .. } => "restore_destination_symlink",
+        CoreError::RestoreDestinationExists { .. } => "restore_destination_exists",
+        CoreError::RestoreDestinationKind { .. } => "restore_destination_kind_mismatch",
+        CoreError::RestoreDestinationWrite { .. } => "restore_destination_write_failed",
+        CoreError::RestoreVerificationRead { .. } => "restore_verification_read_failed",
+        CoreError::RestoreVerificationMismatch { .. } => "restore_verification_mismatch",
+        CoreError::UnsupportedRestoreFeature { .. } => "restore_feature_unsupported",
+        CoreError::RepositoryCheckMissingObject { .. } => "repository_check_missing_object",
+        CoreError::SystemClock { .. } => "system_clock_invalid",
+        CoreError::ObjectKey { .. } => "repository_object_key_invalid",
+        CoreError::Storage { source } => storage_failure_code(source),
+    }
+}
+
+fn storage_failure_code(error: &StorageError) -> &'static str {
+    match error {
+        StorageError::InvalidObjectKey { .. } => "storage_object_key_invalid",
+        StorageError::ObjectAlreadyExists { .. } => "storage_object_already_exists",
+        StorageError::ObjectNotFound { .. } => "storage_object_not_found",
+        StorageError::Io { .. } => "storage_io_failed",
+        StorageError::BackendConfig { .. } => "storage_backend_config_failed",
+        StorageError::ObjectIo { .. } => "storage_object_io_failed",
+        StorageError::BackendObject { .. } => "storage_backend_object_failed",
+        StorageError::Backend { .. } => "storage_backend_failed",
+        StorageError::Timeout { .. } => "storage_timeout",
+        StorageError::PolicyConfig { .. } => "storage_policy_config_invalid",
+    }
+}
+
+fn failure_retryable(error: &CliError) -> bool {
+    match error {
+        CliError::Core(error) => match error.as_ref() {
+            CoreError::Storage { source } => storage_retryable(source),
+            CoreError::SourceRootRead { .. }
+            | CoreError::DirectoryRead { .. }
+            | CoreError::DirectoryEntryRead { .. }
+            | CoreError::MetadataCapture { .. }
+            | CoreError::FileRead { .. }
+            | CoreError::RestoreDestinationWrite { .. }
+            | CoreError::RestoreVerificationRead { .. } => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn storage_retryable(error: &StorageError) -> bool {
+    matches!(
+        error,
+        StorageError::Io { .. }
+            | StorageError::ObjectIo { .. }
+            | StorageError::BackendObject { .. }
+            | StorageError::Backend { .. }
+            | StorageError::Timeout { .. }
+    )
+}
+
+fn failure_path(error: &CliError) -> Option<String> {
+    match error {
+        CliError::Config(error) => match error {
+            ConfigError::Read { path, .. }
+            | ConfigError::Parse { path, .. }
+            | ConfigError::MissingProfile { path, .. } => Some(path.to_string()),
+            _ => None,
+        },
+        CliError::Repository(error) => match error {
+            RepositoryError::PasswordFileRead { path, .. } => Some(path.to_string()),
+            _ => None,
+        },
+        CliError::Core(error) => core_failure_path(error),
+        CliError::Json(_) | CliError::Completion(_) => None,
+    }
+}
+
+fn core_failure_path(error: &CoreError) -> Option<String> {
+    match error {
+        CoreError::SourceRootNotAbsolute { path }
+        | CoreError::InvalidChunkRange { path }
+        | CoreError::SnapshotPathNotFound { path, .. }
+        | CoreError::RestoreDestinationNotAbsolute { path }
+        | CoreError::RestoreDestinationEscapesRoot { path }
+        | CoreError::RestoreDestinationExists { path }
+        | CoreError::RestoreDestinationKind { path }
+        | CoreError::RestoreDestinationWrite { path, .. }
+        | CoreError::RestoreVerificationRead { path, .. }
+        | CoreError::RestoreVerificationMismatch { path } => {
+            Some(redact_for_display(&path.display().to_string()))
+        }
+        CoreError::SourceRootRead { path, .. }
+        | CoreError::DirectoryRead { path, .. }
+        | CoreError::DirectoryEntryRead { path, .. }
+        | CoreError::MetadataCapture { path, .. }
+        | CoreError::FileRead { path, .. }
+        | CoreError::Compression { path, .. } => {
+            Some(redact_for_display(&path.display().to_string()))
+        }
+        CoreError::RestoreDestinationSymlink { path, .. } => {
+            Some(redact_for_display(&path.display().to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn failure_object_key(error: &CliError) -> Option<String> {
+    match error {
+        CliError::Core(error) => core_failure_object_key(error),
+        _ => None,
+    }
+}
+
+fn core_failure_object_key(error: &CoreError) -> Option<String> {
+    match error {
+        CoreError::ObjectDecode { key, .. }
+        | CoreError::MetadataDecode { key, .. }
+        | CoreError::CommitDecode { key, .. }
+        | CoreError::InvalidCommitMarker { key, .. }
+        | CoreError::RepositoryCheckMissingObject { key } => Some(key.as_str().to_owned()),
+        CoreError::Storage {
+            source:
+                StorageError::ObjectAlreadyExists { key }
+                | StorageError::ObjectNotFound { key }
+                | StorageError::ObjectIo { key, .. }
+                | StorageError::BackendObject { key, .. },
+        } => Some(key.as_str().to_owned()),
+        _ => None,
+    }
+}
+
+fn check_finding_for_core_error(error: &CoreError) -> Option<fileferry_core::CheckFinding> {
+    match error {
+        CoreError::RepositoryCheckMissingObject { .. }
+        | CoreError::ObjectDecode { .. }
+        | CoreError::MetadataDecode { .. }
+        | CoreError::MetadataIdentityMismatch { .. }
+        | CoreError::CommitDecode { .. }
+        | CoreError::InvalidCommitMarker { .. }
+        | CoreError::MissingChunkIndexEntry { .. }
+        | CoreError::InvalidChunkLength { .. }
+        | CoreError::Decompression { .. }
+        | CoreError::ChunkIdentityMismatch { .. }
+        | CoreError::Encryption { .. } => Some(fileferry_core::CheckFinding {
+            code: core_failure_code(error).to_owned(),
+            severity: fileferry_core::CheckFindingSeverity::Error,
+            object_key: core_failure_object_key(error),
+            snapshot_id: None,
+            path: None,
+            message: error.to_string(),
+        }),
+        _ => None,
     }
 }
 
