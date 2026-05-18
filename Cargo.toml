@@ -22,7 +22,9 @@ argon2 = { version = "0.5.3", features = ["zeroize"] }
 chacha20poly1305 = "0.10.1"
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.1"
+futures-util = "0.3.31"
 hkdf = "0.12.4"
+object_store = { version = "0.13.2", default-features = false, features = ["aws"] }
 predicates = "3.1.3"
 secrecy = "0.10.3"
 serde = { version = "1.0.228", features = ["derive"] }

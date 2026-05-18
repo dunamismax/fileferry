@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+futures-util.workspace = true
+object_store.workspace = true
+secrecy.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 thiserror.workspace = true
 tracing.workspace = true

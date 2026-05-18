@@ -6,9 +6,17 @@ use std::{
     io,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use futures_util::TryStreamExt;
+use object_store::{
+    Error as ObjectStoreError, ObjectStore as ObjectStoreBackend, ObjectStoreExt, PutMode,
+    aws::{AmazonS3Builder, S3ConditionalPut},
+    path::Path as ObjectStorePath,
+};
+use secrecy::{ExposeSecret, SecretString};
 use tokio::{
     fs::{self, OpenOptions},
     io::AsyncWriteExt,
@@ -35,12 +43,35 @@ pub enum StorageError {
         source: io::Error,
     },
 
+    #[error("{backend:?} backend configuration failed: {reason}")]
+    BackendConfig {
+        backend: BackendKind,
+        reason: String,
+    },
+
     #[error("{operation} failed for object {key}")]
     ObjectIo {
         operation: &'static str,
         key: ObjectKey,
         #[source]
         source: io::Error,
+    },
+
+    #[error("{operation} failed for object {key} on {backend:?}")]
+    BackendObject {
+        backend: BackendKind,
+        operation: &'static str,
+        key: ObjectKey,
+        #[source]
+        source: ObjectStoreError,
+    },
+
+    #[error("{operation} failed on {backend:?}")]
+    Backend {
+        backend: BackendKind,
+        operation: &'static str,
+        #[source]
+        source: ObjectStoreError,
     },
 }
 
@@ -90,6 +121,17 @@ impl StorageCapabilities {
             conditional_create: true,
             atomic_visibility: true,
             strong_read_after_write: true,
+            delete: DeleteCapability::Idempotent,
+            listing: ListingCapability::Prefix,
+        }
+    }
+
+    pub fn s3_compatible() -> Self {
+        Self {
+            backend: BackendKind::S3Compatible,
+            conditional_create: true,
+            atomic_visibility: true,
+            strong_read_after_write: false,
             delete: DeleteCapability::Idempotent,
             listing: ListingCapability::Prefix,
         }
@@ -302,6 +344,284 @@ impl LocalStore {
     }
 }
 
+#[derive(Clone)]
+pub struct S3StoreConfig {
+    bucket: String,
+    region: String,
+    endpoint: String,
+    access_key_id: SecretString,
+    secret_access_key: SecretString,
+    root_prefix: ObjectKeyPrefix,
+}
+
+impl fmt::Debug for S3StoreConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("S3StoreConfig")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("access_key_id", &"[redacted]")
+            .field("secret_access_key", &"[redacted]")
+            .field("root_prefix", &self.root_prefix)
+            .finish()
+    }
+}
+
+impl S3StoreConfig {
+    pub fn new(
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        endpoint: impl Into<String>,
+        access_key_id: impl Into<SecretString>,
+        secret_access_key: impl Into<SecretString>,
+        root_prefix: ObjectKeyPrefix,
+    ) -> StorageResult<Self> {
+        let bucket = bucket.into();
+        let region = region.into();
+        let endpoint = endpoint.into();
+
+        validate_s3_config_value("bucket", &bucket)?;
+        validate_s3_config_value("region", &region)?;
+        validate_s3_endpoint(&endpoint)?;
+
+        Ok(Self {
+            bucket,
+            region,
+            endpoint,
+            access_key_id: access_key_id.into(),
+            secret_access_key: secret_access_key.into(),
+            root_prefix,
+        })
+    }
+
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn root_prefix(&self) -> &ObjectKeyPrefix {
+        &self.root_prefix
+    }
+}
+
+#[derive(Clone)]
+pub struct S3Store {
+    inner: Arc<dyn ObjectStoreBackend>,
+    root_prefix: ObjectKeyPrefix,
+}
+
+impl fmt::Debug for S3Store {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("S3Store")
+            .field("root_prefix", &self.root_prefix)
+            .finish_non_exhaustive()
+    }
+}
+
+impl S3Store {
+    pub fn new(config: S3StoreConfig) -> StorageResult<Self> {
+        let store = AmazonS3Builder::new()
+            .with_bucket_name(config.bucket)
+            .with_region(config.region)
+            .with_endpoint(config.endpoint)
+            .with_access_key_id(config.access_key_id.expose_secret())
+            .with_secret_access_key(config.secret_access_key.expose_secret())
+            .with_virtual_hosted_style_request(false)
+            .with_conditional_put(S3ConditionalPut::ETagMatch)
+            .with_disable_tagging(true)
+            .build()
+            .map_err(|source| StorageError::BackendConfig {
+                backend: BackendKind::S3Compatible,
+                reason: source.to_string(),
+            })?;
+
+        Ok(Self {
+            inner: Arc::new(store),
+            root_prefix: config.root_prefix,
+        })
+    }
+
+    fn remote_path_for_key(&self, key: &ObjectKey) -> ObjectStorePath {
+        if self.root_prefix.as_str().is_empty() {
+            ObjectStorePath::from(key.as_str())
+        } else {
+            ObjectStorePath::from(format!("{}/{}", self.root_prefix.as_str(), key.as_str()))
+        }
+    }
+
+    fn remote_path_for_prefix(&self, prefix: &ObjectKeyPrefix) -> Option<ObjectStorePath> {
+        match (self.root_prefix.as_str(), prefix.as_str()) {
+            ("", "") => None,
+            ("", prefix) => Some(ObjectStorePath::from(prefix)),
+            (root, "") => Some(ObjectStorePath::from(root)),
+            (root, prefix) => Some(ObjectStorePath::from(format!("{root}/{prefix}"))),
+        }
+    }
+
+    fn local_key_from_remote(&self, remote: &ObjectStorePath) -> Option<StorageResult<ObjectKey>> {
+        let remote = remote.as_ref();
+        let root = self.root_prefix.as_str();
+
+        if root.is_empty() {
+            return Some(ObjectKey::new(remote.to_owned()));
+        }
+
+        let remainder = remote.strip_prefix(root)?.strip_prefix('/')?;
+        if remainder.is_empty() {
+            None
+        } else {
+            Some(ObjectKey::new(remainder.to_owned()))
+        }
+    }
+}
+
+impl ObjectStore for S3Store {
+    fn capabilities(&self) -> StorageCapabilities {
+        StorageCapabilities::s3_compatible()
+    }
+
+    fn put_if_absent<'a>(
+        &'a self,
+        key: &'a ObjectKey,
+        bytes: &'a [u8],
+    ) -> StorageFuture<'a, PutStatus> {
+        Box::pin(async move {
+            let path = self.remote_path_for_key(key);
+            match self
+                .inner
+                .put_opts(&path, bytes.to_vec().into(), PutMode::Create.into())
+                .await
+            {
+                Ok(_) => Ok(PutStatus::Created),
+                Err(ObjectStoreError::AlreadyExists { .. }) => {
+                    let existing = self.get(key).await?;
+                    if existing == bytes {
+                        Ok(PutStatus::AlreadyPresent)
+                    } else {
+                        Err(StorageError::ObjectAlreadyExists { key: key.clone() })
+                    }
+                }
+                Err(source) => Err(map_s3_object_error("put object", key, source)),
+            }
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+        Box::pin(async move {
+            let path = self.remote_path_for_key(key);
+            let object = self
+                .inner
+                .get(&path)
+                .await
+                .map_err(|source| map_s3_object_error("read object", key, source))?;
+            let bytes = object
+                .bytes()
+                .await
+                .map_err(|source| map_s3_object_error("read object bytes", key, source))?;
+            Ok(bytes.to_vec())
+        })
+    }
+
+    fn exists<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+        Box::pin(async move {
+            let path = self.remote_path_for_key(key);
+            match self.inner.head(&path).await {
+                Ok(_) => Ok(true),
+                Err(ObjectStoreError::NotFound { .. }) => Ok(false),
+                Err(source) => Err(map_s3_object_error("stat object", key, source)),
+            }
+        })
+    }
+
+    fn delete<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+        Box::pin(async move {
+            let path = self.remote_path_for_key(key);
+            match self.inner.delete(&path).await {
+                Ok(()) | Err(ObjectStoreError::NotFound { .. }) => Ok(()),
+                Err(source) => Err(map_s3_object_error("delete object", key, source)),
+            }
+        })
+    }
+
+    fn list_prefix<'a>(&'a self, prefix: &'a ObjectKeyPrefix) -> StorageFuture<'a, Vec<ObjectKey>> {
+        Box::pin(async move {
+            let remote_prefix = self.remote_path_for_prefix(prefix);
+            let mut stream = self.inner.list(remote_prefix.as_ref());
+            let mut output = Vec::new();
+
+            while let Some(meta) = stream
+                .try_next()
+                .await
+                .map_err(|source| map_s3_backend_error("list objects", source))?
+            {
+                if let Some(key) = self.local_key_from_remote(&meta.location) {
+                    output.push(key?);
+                }
+            }
+
+            output.retain(|key| prefix.contains(key));
+            output.sort();
+            Ok(output)
+        })
+    }
+}
+
+fn validate_s3_config_value(name: &'static str, value: &str) -> StorageResult<()> {
+    if value.trim().is_empty() {
+        return Err(StorageError::BackendConfig {
+            backend: BackendKind::S3Compatible,
+            reason: format!("{name} must not be empty"),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_s3_endpoint(endpoint: &str) -> StorageResult<()> {
+    validate_s3_config_value("endpoint", endpoint)?;
+    if !endpoint.starts_with("https://") {
+        return Err(StorageError::BackendConfig {
+            backend: BackendKind::S3Compatible,
+            reason: "endpoint must be an https:// URL".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn map_s3_object_error(
+    operation: &'static str,
+    key: &ObjectKey,
+    source: ObjectStoreError,
+) -> StorageError {
+    match source {
+        ObjectStoreError::NotFound { .. } => StorageError::ObjectNotFound { key: key.clone() },
+        source => StorageError::BackendObject {
+            backend: BackendKind::S3Compatible,
+            operation,
+            key: key.clone(),
+            source,
+        },
+    }
+}
+
+fn map_s3_backend_error(operation: &'static str, source: ObjectStoreError) -> StorageError {
+    StorageError::Backend {
+        backend: BackendKind::S3Compatible,
+        operation,
+        source,
+    }
+}
+
 impl ObjectStore for LocalStore {
     fn capabilities(&self) -> StorageCapabilities {
         StorageCapabilities::local_filesystem()
@@ -508,6 +828,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn s3_config_debug_redacts_credentials() {
+        let config = S3StoreConfig::new(
+            "dev-bucket",
+            "us-west-001",
+            "https://s3.us-west-001.backblazeb2.com",
+            "visible-key-id",
+            "visible-secret-key",
+            ObjectKeyPrefix::new("sealport/dev").expect("prefix"),
+        )
+        .expect("config");
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("dev-bucket"));
+        assert!(debug.contains("us-west-001"));
+        assert!(!debug.contains("visible-key-id"));
+        assert!(!debug.contains("visible-secret-key"));
+        assert_eq!(config.bucket(), "dev-bucket");
+        assert_eq!(config.region(), "us-west-001");
+        assert_eq!(config.endpoint(), "https://s3.us-west-001.backblazeb2.com");
+    }
+
+    #[test]
+    fn s3_config_requires_https_endpoint() {
+        let error = S3StoreConfig::new(
+            "dev-bucket",
+            "us-west-001",
+            "http://s3.us-west-001.backblazeb2.com",
+            "key-id",
+            "secret",
+            ObjectKeyPrefix::new("sealport/dev").expect("prefix"),
+        )
+        .expect_err("http endpoint");
+
+        assert!(matches!(error, StorageError::BackendConfig { .. }));
+    }
+
     #[tokio::test]
     async fn local_store_put_get_list_and_delete_round_trip() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -599,5 +956,92 @@ mod tests {
                 .expect("list"),
             vec![object]
         );
+    }
+
+    #[tokio::test]
+    async fn s3_store_round_trip_when_integration_env_is_enabled() {
+        let Some(config) = s3_integration_config() else {
+            return;
+        };
+        let store = S3Store::new(config).expect("s3 store");
+        let first = key("chunks/aa/blob");
+        let second = key("indexes/current");
+
+        assert_eq!(store.capabilities(), StorageCapabilities::s3_compatible());
+        assert!(!store.exists(&first).await.expect("exists before put"));
+        assert_eq!(
+            store
+                .put_if_absent(&first, b"sealed-cloud")
+                .await
+                .expect("put first"),
+            PutStatus::Created
+        );
+        assert_eq!(
+            store
+                .put_if_absent(&first, b"sealed-cloud")
+                .await
+                .expect("idempotent put"),
+            PutStatus::AlreadyPresent
+        );
+        assert_eq!(
+            store
+                .put_if_absent(&second, b"index")
+                .await
+                .expect("put second"),
+            PutStatus::Created
+        );
+
+        let conflict = store
+            .put_if_absent(&first, b"different")
+            .await
+            .expect_err("conflicting put");
+        assert!(matches!(conflict, StorageError::ObjectAlreadyExists { .. }));
+        assert_eq!(store.get(&first).await.expect("get"), b"sealed-cloud");
+
+        let listed = store
+            .list_prefix(&ObjectKeyPrefix::new("chunks").expect("prefix"))
+            .await
+            .expect("list chunks");
+        assert_eq!(listed, vec![first.clone()]);
+
+        store.delete(&first).await.expect("delete first");
+        store.delete(&second).await.expect("delete second");
+        store.delete(&first).await.expect("idempotent delete");
+        assert!(!store.exists(&first).await.expect("exists after delete"));
+    }
+
+    fn s3_integration_config() -> Option<S3StoreConfig> {
+        if std::env::var("SEALPORT_S3_INTEGRATION").ok().as_deref() != Some("1") {
+            return None;
+        }
+
+        let configured_prefix = required_env("SEALPORT_S3_TEST_PREFIX");
+        let unique_prefix = format!("{configured_prefix}/run-{}", unique_test_id());
+        let root_prefix = ObjectKeyPrefix::new(unique_prefix).expect("valid s3 test prefix");
+
+        Some(
+            S3StoreConfig::new(
+                required_env("SEALPORT_S3_BUCKET"),
+                required_env("SEALPORT_S3_REGION"),
+                required_env("SEALPORT_S3_ENDPOINT"),
+                required_env("SEALPORT_S3_ACCESS_KEY_ID"),
+                required_env("SEALPORT_S3_SECRET_ACCESS_KEY"),
+                root_prefix,
+            )
+            .expect("s3 config"),
+        )
+    }
+
+    fn required_env(name: &str) -> String {
+        std::env::var(name)
+            .unwrap_or_else(|_| panic!("{name} must be set for S3 integration tests"))
+    }
+
+    fn unique_test_id() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        format!("{}-{nanos}", std::process::id())
     }
 }

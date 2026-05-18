@@ -539,6 +539,12 @@ Trust current primary docs and observed behavior over this file.
   listing protection, and an in-memory fake object store in
   `sealport-testkit`. Added `docs/storage.md`. Verified with `cargo test -p
   sealport-storage -p sealport-testkit`.
+- 2026-05-18 - Added the first real S3-compatible storage groundwork: an
+  `object_store`-backed `S3Store`, HTTPS-only explicit S3 config, redacted
+  credential handling, prefix-scoped live integration test gate, Backblaze B2
+  development-bucket docs, and `.env` ignore rules. Verified with `just check`;
+  the real Backblaze round-trip remains gated on local S3 environment
+  variables.
 - 2026-05-18 - Completed the Phase 2 CLI foundation: config discovery,
   profiles, CLI/env/config precedence, typed config validation, redacted
   diagnostics, JSON and JSONL envelopes, event names, shell completions, and

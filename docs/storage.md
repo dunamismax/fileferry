@@ -88,9 +88,63 @@ tests that need deterministic storage behavior without touching a real backend.
 The fake store enforces the same immutable write rule as the local backend:
 same bytes are idempotent, different bytes are rejected.
 
+## S3-Compatible Backend
+
+`S3Store` is the first S3-compatible backend adapter. It uses the Rust
+`object_store` crate's AWS/S3 implementation, configured with an explicit
+bucket, region, endpoint URL, access key ID, secret access key, and repository
+root prefix.
+
+The backend maps validated SealPort object keys under the configured root
+prefix. For example, a repository key `chunks/aa/blob` with root prefix
+`sealport/dev` is stored at `sealport/dev/chunks/aa/blob` in the bucket.
+Prefix-scoping is mandatory for shared development buckets so tests never need
+to list or delete the whole bucket.
+
+`put_if_absent` uses S3 conditional create semantics through
+`PutMode::Create`. When the object already exists, the backend reads the
+existing bytes and returns `AlreadyPresent` only if they match; different bytes
+return `ObjectAlreadyExists`.
+
+S3 credentials are accepted as secret values and redacted from debug output.
+They must come from local environment, secret stores, or future config-secret
+plumbing. Do not commit credentials, signed URLs, repository URLs containing
+secrets, or local `.env` files.
+
+Current S3 capability assumptions:
+
+- HTTPS endpoint required.
+- Path-style requests are used.
+- Conditional create is required.
+- Deletes are treated as idempotent.
+- Prefix listing is available.
+- Object tags are disabled because some S3-compatible providers reject tagging
+  headers.
+
+The implementation has a gated live integration test. It runs only when
+`SEALPORT_S3_INTEGRATION=1` and all required S3 environment variables are set:
+
+```sh
+export SEALPORT_S3_INTEGRATION=1
+export SEALPORT_S3_BUCKET=dunamismax-b2
+export SEALPORT_S3_REGION=<region>
+export SEALPORT_S3_ENDPOINT=https://s3.<region>.backblazeb2.com
+export SEALPORT_S3_ACCESS_KEY_ID=<application-key-id>
+export SEALPORT_S3_SECRET_ACCESS_KEY=<application-key>
+export SEALPORT_S3_TEST_PREFIX=sealport/dev
+
+cargo test -p sealport-storage s3_store_round_trip_when_integration_env_is_enabled
+```
+
+For Backblaze B2, the S3 endpoint has the form
+`https://s3.<region>.backblazeb2.com`, and the region is the second component
+of the endpoint, such as `us-west-001`.
+
 ## Not Implemented Yet
 
-S3-compatible storage is still pending. Before it is marked complete it needs
-capability checks, retry policy, timeout policy, upload idempotency, stale or
-surprising listings, missing-object behavior, partial upload behavior, and
-permission-error tests against an isolated test bucket or emulator.
+S3-compatible storage now has the initial object-store adapter and a live
+round-trip test gate. Before it is marked complete it still needs explicit
+capability checks, retry policy, timeout policy, concurrency controls,
+stale-or-surprising listing tests, missing-object tests, partial upload
+behavior, permission-error tests, multipart cleanup guidance, and provider
+evidence beyond the initial Backblaze-compatible round trip.
