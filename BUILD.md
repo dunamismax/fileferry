@@ -57,6 +57,10 @@ Last reviewed: 2026-05-18.
 - `fileferry-core` can restore regular-file content to a destination directory
   with destination safety checks, explicit overwrite policy, dry-run reporting,
   and optional byte-for-byte verification.
+- `fileferry-core` writes commit markers after encrypted snapshot manifests,
+  can discover committed manifests from those markers, and has tested snapshot
+  summary and immediate-entry listing primitives for future `snapshots` and
+  `ls` commands.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
@@ -64,9 +68,9 @@ Last reviewed: 2026-05-18.
 - The product target is an all-Rust, cross-platform, encrypted backup CLI
   named `ferry`.
 
-The repo is still pre-backup-engine. Do not describe backup, restore,
-repository, storage, crypto, or platform behavior as working until code,
-tests, and platform evidence exist.
+The repo is still pre-v1 and the backup/restore engine is not wired into the
+CLI. Describe backup, restore, repository, storage, crypto, or platform
+behavior only to the level backed by code, tests, and platform evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
@@ -484,7 +488,7 @@ where documented verification passes on a clean checkout.
 
 ### Phase 11 - Release Engineering
 
-- [ ] Add cargo-dist or documented release equivalent.
+- [x] Add cargo-dist or documented release equivalent.
 - [ ] Add Windows `.zip` artifacts.
 - [ ] Add Unix `.tar.xz` artifacts.
 - [ ] Add checksums and signatures.
@@ -578,6 +582,14 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added committed snapshot discovery groundwork in
+  `fileferry-core`: snapshot writes now publish a commit marker after chunk,
+  index, and encrypted manifest objects; committed manifests can be discovered
+  from commit markers; and tested snapshot summary plus immediate-entry listing
+  helpers now support future `snapshots` and `ls` commands. Documented the
+  plaintext commit marker fields in `docs/repository-format.md`. Added
+  `docs/release.md` as the documented release equivalent until dedicated
+  release tooling lands. Verified with `cargo test -p fileferry-core`.
 - 2026-05-18 - Expanded `docs/cli-contract.md` with required v1 JSON document
   data schemas for `init`, `backup`, `restore`, `snapshots`, `ls`, `check`,
   `forget`, `prune`, `key` subcommands, and `version`, plus JSONL event data

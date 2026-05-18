@@ -7,8 +7,10 @@ use fileferry_crypto::{
     AeadAlgorithm, CryptoError, EncryptedObject, KeyPurpose, MasterKey, ObjectContext, ObjectKind,
     decrypt_object, encrypt_object, keyed_content_id,
 };
-use fileferry_platform::{EntryKind, EntryMetadata, PlatformError, capture_metadata};
-use fileferry_storage::{ObjectKey, ObjectStore, PutStatus, StorageError};
+use fileferry_platform::{
+    EntryKind, EntryMetadata, MetadataValue, PlatformError, Timestamp, capture_metadata,
+};
+use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, StorageError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -121,8 +123,24 @@ pub enum CoreError {
         actual: String,
     },
 
+    #[error("snapshot commit marker {key} could not be decoded")]
+    CommitDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("snapshot commit marker {key} is invalid: {reason}")]
+    InvalidCommitMarker {
+        key: ObjectKey,
+        reason: &'static str,
+    },
+
     #[error("snapshot selection {selection} did not match any loaded snapshot")]
     SnapshotNotFound { selection: String },
+
+    #[error("snapshot path {path} was not found in snapshot {snapshot_id}")]
+    SnapshotPathNotFound { snapshot_id: String, path: PathBuf },
 
     #[error("restore request is invalid: {reason}")]
     InvalidRestoreRequest { reason: &'static str },
@@ -599,10 +617,24 @@ impl BackupPipeline {
         )
         .await?;
 
+        let commit_object = object_key_for_commit(&snapshot_id)?;
+        let commit = SnapshotCommit {
+            schema_version: 0,
+            snapshot_id: snapshot_id.clone(),
+            manifest_object: manifest_object.as_str().to_owned(),
+        };
+        let commit_bytes =
+            serde_json::to_vec(&commit).map_err(|source| CoreError::Serialization { source })?;
+        store
+            .put_if_absent(&commit_object, &commit_bytes)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+
         Ok(SnapshotWriteResult {
             snapshot_id,
             manifest_object,
             index_object,
+            commit_object,
             chunk_objects_written,
             entries: manifest.body.entries.len(),
             chunks: index.chunks.len(),
@@ -650,6 +682,74 @@ impl BackupPipeline {
         }
 
         Ok(manifest)
+    }
+
+    pub async fn read_committed_snapshot_manifests(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+    ) -> CoreResult<Vec<SnapshotManifest>> {
+        let prefix =
+            ObjectKeyPrefix::new("commits").map_err(|source| CoreError::ObjectKey { source })?;
+        let mut commit_keys = store
+            .list_prefix(&prefix)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        commit_keys.sort();
+
+        let mut manifests = Vec::with_capacity(commit_keys.len());
+        for commit_key in commit_keys {
+            let commit = self.read_snapshot_commit(store, &commit_key).await?;
+            let expected_commit_key = object_key_for_commit(&commit.snapshot_id)?;
+            if expected_commit_key != commit_key {
+                return Err(CoreError::InvalidCommitMarker {
+                    key: commit_key,
+                    reason: "commit object key does not match committed snapshot id",
+                });
+            }
+
+            let expected_manifest_object =
+                object_key_for_id("objects/manifest", &commit.snapshot_id)?;
+            if commit.manifest_object != expected_manifest_object.as_str() {
+                return Err(CoreError::InvalidCommitMarker {
+                    key: expected_commit_key,
+                    reason: "commit manifest object does not match committed snapshot id",
+                });
+            }
+
+            manifests.push(
+                self.read_snapshot_manifest(store, master_key, &commit.snapshot_id)
+                    .await?,
+            );
+        }
+        manifests.sort_by(compare_snapshot_manifests);
+
+        Ok(manifests)
+    }
+
+    async fn read_snapshot_commit(
+        &self,
+        store: &dyn ObjectStore,
+        commit_key: &ObjectKey,
+    ) -> CoreResult<SnapshotCommit> {
+        let bytes = store
+            .get(commit_key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        let commit: SnapshotCommit =
+            serde_json::from_slice(&bytes).map_err(|source| CoreError::CommitDecode {
+                key: commit_key.clone(),
+                source,
+            })?;
+
+        if commit.schema_version != 0 {
+            return Err(CoreError::InvalidCommitMarker {
+                key: commit_key.clone(),
+                reason: "unsupported commit marker schema version",
+            });
+        }
+
+        Ok(commit)
     }
 
     pub async fn read_chunk_index(
@@ -883,9 +983,50 @@ pub struct SnapshotWriteResult {
     pub snapshot_id: String,
     pub manifest_object: ObjectKey,
     pub index_object: ObjectKey,
+    pub commit_object: ObjectKey,
     pub chunk_objects_written: usize,
     pub entries: usize,
     pub chunks: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct SnapshotCommit {
+    pub schema_version: u16,
+    pub snapshot_id: String,
+    pub manifest_object: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotSummary {
+    pub snapshot_id: String,
+    pub created_at_unix_seconds: u64,
+    pub tags: Vec<String>,
+    pub source_count: usize,
+    pub entry_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotEntryListing {
+    pub snapshot_id: String,
+    pub path: PathBuf,
+    pub entries: Vec<SnapshotEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotEntry {
+    pub relative_path: PathBuf,
+    pub kind: EntryKind,
+    pub size_bytes: Option<u64>,
+    pub modified: MetadataValue<Timestamp>,
+    pub metadata_status: MetadataStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataStatus {
+    Complete,
+    Partial,
+    Unsupported,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -925,7 +1066,93 @@ pub fn select_snapshot<'a>(
     })
 }
 
+pub fn snapshot_summaries(manifests: &[SnapshotManifest]) -> Vec<SnapshotSummary> {
+    let mut summaries = manifests
+        .iter()
+        .map(|manifest| SnapshotSummary {
+            snapshot_id: manifest.snapshot_id.clone(),
+            created_at_unix_seconds: manifest.body.created_at_unix_seconds,
+            tags: manifest.body.tags.clone(),
+            source_count: manifest
+                .body
+                .entries
+                .iter()
+                .filter(|entry| entry.relative_path.as_os_str().is_empty())
+                .count(),
+            entry_count: manifest.body.entries.len(),
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| {
+        right
+            .created_at_unix_seconds
+            .cmp(&left.created_at_unix_seconds)
+            .then_with(|| right.snapshot_id.cmp(&left.snapshot_id))
+    });
+    summaries
+}
+
+pub fn list_snapshot_entries(
+    manifest: &SnapshotManifest,
+    path: impl AsRef<Path>,
+) -> CoreResult<SnapshotEntryListing> {
+    let path = normalize_restore_path(path.as_ref())?;
+    let exact_entry = if path.as_os_str().is_empty() {
+        None
+    } else {
+        manifest
+            .body
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == path)
+    };
+
+    let entries = match exact_entry {
+        Some(entry) if entry.metadata.kind != EntryKind::Directory => {
+            vec![snapshot_entry_from_manifest(entry)]
+        }
+        Some(_) => manifest
+            .body
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.relative_path.as_os_str().is_empty()
+                    && entry_parent(&entry.relative_path) == path
+            })
+            .map(snapshot_entry_from_manifest)
+            .collect(),
+        None if path.as_os_str().is_empty() => manifest
+            .body
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.relative_path.as_os_str().is_empty()
+                    && entry_parent(&entry.relative_path) == path
+            })
+            .map(snapshot_entry_from_manifest)
+            .collect(),
+        None => {
+            return Err(CoreError::SnapshotPathNotFound {
+                snapshot_id: manifest.snapshot_id.clone(),
+                path,
+            });
+        }
+    };
+
+    Ok(SnapshotEntryListing {
+        snapshot_id: manifest.snapshot_id.clone(),
+        path,
+        entries,
+    })
+}
+
 fn snapshot_order(left: &&SnapshotManifest, right: &&SnapshotManifest) -> std::cmp::Ordering {
+    compare_snapshot_manifests(left, right)
+}
+
+fn compare_snapshot_manifests(
+    left: &SnapshotManifest,
+    right: &SnapshotManifest,
+) -> std::cmp::Ordering {
     left.body
         .created_at_unix_seconds
         .cmp(&right.body.created_at_unix_seconds)
@@ -1358,6 +1585,47 @@ fn scoped_manifest_entries<'a>(
         .collect()
 }
 
+fn snapshot_entry_from_manifest(entry: &ManifestEntry) -> SnapshotEntry {
+    SnapshotEntry {
+        relative_path: entry.relative_path.clone(),
+        kind: entry.metadata.kind.clone(),
+        size_bytes: entry.metadata.size_bytes,
+        modified: entry.metadata.modified.clone(),
+        metadata_status: metadata_status(&entry.metadata),
+    }
+}
+
+fn entry_parent(path: &Path) -> PathBuf {
+    path.parent().unwrap_or_else(|| Path::new("")).to_path_buf()
+}
+
+fn metadata_status(metadata: &EntryMetadata) -> MetadataStatus {
+    let mut saw_captured = false;
+    let mut saw_unsupported = false;
+
+    for value in [&metadata.modified, &metadata.created] {
+        match value {
+            MetadataValue::Captured(_) => saw_captured = true,
+            MetadataValue::Unsupported => saw_unsupported = true,
+            MetadataValue::Denied(_) => return MetadataStatus::Partial,
+        }
+    }
+
+    if metadata.kind == EntryKind::Symlink {
+        match &metadata.symlink_target {
+            MetadataValue::Captured(_) => saw_captured = true,
+            MetadataValue::Unsupported => saw_unsupported = true,
+            MetadataValue::Denied(_) => return MetadataStatus::Partial,
+        }
+    }
+
+    match (saw_captured, saw_unsupported) {
+        (false, true) => MetadataStatus::Unsupported,
+        (true, true) => MetadataStatus::Partial,
+        _ => MetadataStatus::Complete,
+    }
+}
+
 fn content_id_for_metadata<T: Serialize>(
     master_key: &MasterKey,
     purpose: KeyPurpose,
@@ -1375,6 +1643,11 @@ fn object_key_for_id(group: &str, id: &str) -> CoreResult<ObjectKey> {
         reason: "object id must be at least two characters",
     })?;
     ObjectKey::new(format!("{group}/{prefix}/{id}"))
+        .map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn object_key_for_commit(snapshot_id: &str) -> CoreResult<ObjectKey> {
+    ObjectKey::new(format!("commits/{snapshot_id}"))
         .map_err(|source| CoreError::ObjectKey { source })
 }
 
@@ -1732,7 +2005,7 @@ mod tests {
         assert_eq!(result.entries, 3);
         assert_eq!(result.chunks, 1);
         assert_eq!(result.chunk_objects_written, 1);
-        assert_eq!(store.object_count().await, 3);
+        assert_eq!(store.object_count().await, 4);
 
         let keys = store
             .list_prefix(&ObjectKeyPrefix::root())
@@ -1746,6 +2019,7 @@ mod tests {
         assert!(rendered_keys.contains("objects/chunk/"));
         assert!(rendered_keys.contains("objects/index/"));
         assert!(rendered_keys.contains("objects/manifest/"));
+        assert!(rendered_keys.contains("commits/"));
         assert!(!rendered_keys.contains("one.txt"));
         assert!(!rendered_keys.contains("two.txt"));
 
@@ -1794,6 +2068,61 @@ mod tests {
         assert_eq!(index.chunks.len(), result.chunks);
     }
 
+    #[tokio::test]
+    async fn backup_pipeline_publishes_commit_markers_and_lists_committed_manifests() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let first_source = tempfile::tempdir().expect("first tempdir");
+        fs::write(first_source.path().join("first.txt"), b"first").expect("write first");
+        let second_source = tempfile::tempdir().expect("second tempdir");
+        fs::write(second_source.path().join("second.txt"), b"second").expect("write second");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let first = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![first_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: vec!["first".to_owned()],
+                },
+            )
+            .await
+            .expect("first snapshot write");
+        let second = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![second_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: vec!["second".to_owned()],
+                },
+            )
+            .await
+            .expect("second snapshot write");
+
+        assert!(first.commit_object.as_str().starts_with("commits/"));
+        assert!(second.commit_object.as_str().starts_with("commits/"));
+
+        let manifests = pipeline
+            .read_committed_snapshot_manifests(&store, &master_key)
+            .await
+            .expect("committed manifests");
+        let mut ids = manifests
+            .iter()
+            .map(|manifest| manifest.snapshot_id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        let mut expected = vec![first.snapshot_id, second.snapshot_id];
+        expected.sort();
+
+        assert_eq!(ids, expected);
+    }
+
     #[test]
     fn snapshot_selection_supports_id_tag_and_latest() {
         let first = test_manifest("snap-a", 10, &["work"]);
@@ -1822,6 +2151,83 @@ mod tests {
         assert!(matches!(
             select_snapshot(&manifests, &SnapshotSelection::Tag("missing".to_owned())),
             Err(CoreError::SnapshotNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_summaries_are_newest_first_and_count_sources_and_entries() {
+        let mut first = test_manifest("snap-a", 10, &["work"]);
+        first.body.entries = vec![
+            test_manifest_entry("", EntryKind::Directory, None),
+            test_manifest_entry("docs", EntryKind::Directory, None),
+            test_manifest_entry("docs/a.txt", EntryKind::RegularFile, Some(1)),
+        ];
+        let mut second = test_manifest("snap-b", 20, &["home"]);
+        second.body.entries = vec![
+            test_manifest_entry("", EntryKind::Directory, None),
+            test_manifest_entry("b.txt", EntryKind::RegularFile, Some(1)),
+        ];
+
+        let summaries = snapshot_summaries(&[first, second]);
+
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|summary| summary.snapshot_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["snap-b", "snap-a"]
+        );
+        assert_eq!(summaries[0].source_count, 1);
+        assert_eq!(summaries[0].entry_count, 2);
+        assert_eq!(summaries[0].tags, vec!["home"]);
+    }
+
+    #[test]
+    fn list_snapshot_entries_returns_immediate_children_or_exact_file() {
+        let mut manifest = test_manifest("snap-a", 10, &["work"]);
+        manifest.body.entries = vec![
+            test_manifest_entry("", EntryKind::Directory, None),
+            test_manifest_entry("docs", EntryKind::Directory, None),
+            test_manifest_entry("docs/a.txt", EntryKind::RegularFile, Some(1)),
+            test_manifest_entry("docs/nested", EntryKind::Directory, None),
+            test_manifest_entry("docs/nested/b.txt", EntryKind::RegularFile, Some(1)),
+        ];
+
+        let root = list_snapshot_entries(&manifest, "").expect("root listing");
+        assert_eq!(
+            root.entries
+                .iter()
+                .map(|entry| entry.relative_path.as_path())
+                .collect::<Vec<_>>(),
+            vec![Path::new("docs")]
+        );
+
+        let docs = list_snapshot_entries(&manifest, "docs").expect("docs listing");
+        assert_eq!(
+            docs.entries
+                .iter()
+                .map(|entry| entry.relative_path.as_path())
+                .collect::<Vec<_>>(),
+            vec![Path::new("docs/a.txt"), Path::new("docs/nested")]
+        );
+
+        let file = list_snapshot_entries(&manifest, "docs/a.txt").expect("file listing");
+        assert_eq!(file.entries.len(), 1);
+        assert_eq!(file.entries[0].relative_path, PathBuf::from("docs/a.txt"));
+        assert_eq!(file.entries[0].kind, EntryKind::RegularFile);
+    }
+
+    #[test]
+    fn list_snapshot_entries_rejects_unsafe_or_missing_paths() {
+        let manifest = test_manifest("snap-a", 10, &[]);
+
+        assert!(matches!(
+            list_snapshot_entries(&manifest, "../outside"),
+            Err(CoreError::InvalidRestoreRequest { .. })
+        ));
+        assert!(matches!(
+            list_snapshot_entries(&manifest, "missing"),
+            Err(CoreError::SnapshotPathNotFound { .. })
         ));
     }
 
@@ -2450,6 +2856,33 @@ mod tests {
                 entries: Vec::new(),
                 index_ids: Vec::new(),
             },
+        }
+    }
+
+    fn test_manifest_entry(
+        relative_path: &str,
+        kind: EntryKind,
+        size_bytes: Option<u64>,
+    ) -> ManifestEntry {
+        ManifestEntry {
+            root: PathBuf::from("/source"),
+            path: PathBuf::from("/source").join(relative_path),
+            relative_path: PathBuf::from(relative_path),
+            metadata: EntryMetadata {
+                kind,
+                size_bytes,
+                modified: MetadataValue::Captured(Timestamp {
+                    seconds: 1,
+                    nanoseconds: 0,
+                }),
+                created: MetadataValue::Captured(Timestamp {
+                    seconds: 1,
+                    nanoseconds: 0,
+                }),
+                symlink_target: MetadataValue::Unsupported,
+                unix: None,
+            },
+            chunks: Vec::new(),
         }
     }
 }

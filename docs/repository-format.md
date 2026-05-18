@@ -172,6 +172,20 @@ format version, and encrypted or authenticated references needed to discover a
 committed snapshot. They must not contain plaintext tags, paths, source counts,
 or human names.
 
+Current implementation status:
+
+- The first backup pipeline writes `commits/<snapshot-id>` only after chunk,
+  index, and encrypted manifest objects have been written.
+- The commit marker is plaintext JSON containing `schema_version`,
+  `snapshot_id`, and `manifest_object`.
+- These plaintext fields are allowed because the same keyed snapshot id and
+  manifest object key are already visible in repository object names. The marker
+  adds no path, tag, source count, hostname, username, policy, or directory
+  shape information.
+- Commit marker contents are not trusted. Snapshot discovery validates that the
+  marker key, snapshot id, and manifest object name agree, then authenticates
+  and decrypts the encrypted manifest before returning snapshot metadata.
+
 Upload state records are encrypted. Interrupted uploads can be retried or
 abandoned based on upload id and writer id. Correctness must not require
 renaming a temporary object into place.
