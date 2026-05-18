@@ -15,7 +15,7 @@ use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, Stor
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
     path::Component,
     path::{Path, PathBuf},
@@ -144,6 +144,9 @@ pub enum CoreError {
         source: serde_json::Error,
     },
 
+    #[error("repository is not initialized; run ferry init first")]
+    RepositoryNotInitialized,
+
     #[error("repository bootstrap is invalid: {reason}")]
     InvalidRepositoryBootstrap { reason: &'static str },
 
@@ -193,6 +196,12 @@ pub enum CoreError {
 
     #[error("restore verification failed for {path}")]
     RestoreVerificationMismatch { path: PathBuf },
+
+    #[error("restore feature {feature} is not supported on this platform yet")]
+    UnsupportedRestoreFeature { feature: &'static str },
+
+    #[error("repository check failed: object {key} referenced by repository metadata is missing")]
+    RepositoryCheckMissingObject { key: ObjectKey },
 
     #[error("system clock is before the Unix epoch")]
     SystemClock {
@@ -507,10 +516,10 @@ pub async fn open_repository(
     passphrase: &SecretString,
 ) -> CoreResult<OpenedRepository> {
     let key = bootstrap_object_key()?;
-    let bytes = store
-        .get(&key)
-        .await
-        .map_err(|source| CoreError::Storage { source })?;
+    let bytes = store.get(&key).await.map_err(|source| match source {
+        StorageError::ObjectNotFound { .. } => CoreError::RepositoryNotInitialized,
+        source => CoreError::Storage { source },
+    })?;
     let bootstrap: RepositoryBootstrap = serde_json::from_slice(&bytes)
         .map_err(|source| CoreError::RepositoryBootstrapDecode { source })?;
     bootstrap.validate()?;
@@ -1103,6 +1112,262 @@ impl BackupPipeline {
         Ok(index)
     }
 
+    pub async fn check_repository(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+    ) -> CoreResult<RepositoryCheckResult> {
+        let repository_context = self.config.repository_id.as_bytes();
+        let chunk_key = master_key
+            .derive_subkey(KeyPurpose::ChunkData, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let prefix =
+            ObjectKeyPrefix::new("commits").map_err(|source| CoreError::ObjectKey { source })?;
+        let mut commit_keys = store
+            .list_prefix(&prefix)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        commit_keys.sort();
+
+        let mut metadata_objects_checked = 0_usize;
+        let mut chunk_objects_checked = 0_usize;
+        let mut bytes_read = 0_u64;
+        let mut checked_chunk_ids = BTreeSet::new();
+
+        for commit_key in commit_keys {
+            let commit_bytes = store
+                .get(&commit_key)
+                .await
+                .map_err(|source| CoreError::Storage { source })?;
+            bytes_read += commit_bytes.len() as u64;
+            metadata_objects_checked += 1;
+            let commit: SnapshotCommit =
+                serde_json::from_slice(&commit_bytes).map_err(|source| {
+                    CoreError::CommitDecode {
+                        key: commit_key.clone(),
+                        source,
+                    }
+                })?;
+            if commit.schema_version != 0 {
+                return Err(CoreError::InvalidCommitMarker {
+                    key: commit_key,
+                    reason: "unsupported commit marker schema version",
+                });
+            }
+            let expected_commit_key = object_key_for_commit(&commit.snapshot_id)?;
+            if expected_commit_key != commit_key {
+                return Err(CoreError::InvalidCommitMarker {
+                    key: commit_key,
+                    reason: "commit object key does not match committed snapshot id",
+                });
+            }
+            let expected_manifest_object =
+                object_key_for_id("objects/manifest", &commit.snapshot_id)?;
+            if commit.manifest_object != expected_manifest_object.as_str() {
+                return Err(CoreError::InvalidCommitMarker {
+                    key: expected_commit_key,
+                    reason: "commit manifest object does not match committed snapshot id",
+                });
+            }
+
+            let (manifest, manifest_bytes) = self
+                .read_snapshot_manifest_with_bytes(store, master_key, &commit.snapshot_id)
+                .await?;
+            bytes_read += manifest_bytes;
+            metadata_objects_checked += 1;
+
+            let mut index_entries = BTreeMap::new();
+            for index_id in &manifest.body.index_ids {
+                let (index, index_bytes) = self
+                    .read_chunk_index_with_bytes(store, master_key, index_id)
+                    .await?;
+                bytes_read += index_bytes;
+                metadata_objects_checked += 1;
+                for entry in index.chunks {
+                    index_entries.insert(entry.chunk_id.clone(), entry);
+                }
+            }
+
+            for entry in &manifest.body.entries {
+                if entry.metadata.kind != EntryKind::RegularFile {
+                    continue;
+                }
+                for chunk in &entry.chunks {
+                    let indexed = index_entries.get(&chunk.chunk_id).ok_or_else(|| {
+                        CoreError::MissingChunkIndexEntry {
+                            chunk_id: chunk.chunk_id.clone(),
+                        }
+                    })?;
+                    if indexed.object_key != chunk.object_key
+                        || indexed.plaintext_length != chunk.length
+                        || indexed.compression != CompressionAlgorithm::Zstd
+                    {
+                        return Err(CoreError::InvalidChunkLength {
+                            chunk_id: chunk.chunk_id.clone(),
+                        });
+                    }
+                }
+            }
+
+            for (chunk_id, indexed) in index_entries {
+                if !checked_chunk_ids.insert(chunk_id.clone()) {
+                    continue;
+                }
+                let object_key = ObjectKey::new(indexed.object_key.clone())
+                    .map_err(|source| CoreError::ObjectKey { source })?;
+                let encrypted = store
+                    .get(&object_key)
+                    .await
+                    .map_err(|source| match source {
+                        StorageError::ObjectNotFound { .. } => {
+                            CoreError::RepositoryCheckMissingObject {
+                                key: object_key.clone(),
+                            }
+                        }
+                        source => CoreError::Storage { source },
+                    })?;
+                bytes_read += encrypted.len() as u64;
+                let compressed = decrypt_repository_object(
+                    &chunk_key,
+                    ObjectKind::Chunk,
+                    &object_key,
+                    &encrypted,
+                )?;
+                let expected_len = usize::try_from(indexed.plaintext_length).map_err(|_| {
+                    CoreError::InvalidChunkLength {
+                        chunk_id: chunk_id.clone(),
+                    }
+                })?;
+                let plaintext =
+                    zstd::bulk::decompress(&compressed, expected_len).map_err(|source| {
+                        CoreError::Decompression {
+                            chunk_id: chunk_id.clone(),
+                            source,
+                        }
+                    })?;
+                if plaintext.len() != expected_len {
+                    return Err(CoreError::InvalidChunkLength { chunk_id });
+                }
+                let actual = hex_bytes(
+                    &keyed_content_id(
+                        master_key,
+                        KeyPurpose::ChunkIdentity,
+                        repository_context,
+                        &plaintext,
+                    )
+                    .map_err(|source| CoreError::Encryption { source })?,
+                );
+                if actual != chunk_id {
+                    return Err(CoreError::ChunkIdentityMismatch {
+                        expected: chunk_id,
+                        actual,
+                    });
+                }
+
+                chunk_objects_checked += 1;
+            }
+        }
+
+        Ok(RepositoryCheckResult {
+            repository_id: self.config.repository_id.clone(),
+            checked_at_unix_seconds: current_unix_seconds()?,
+            metadata_objects_checked,
+            chunk_objects_checked,
+            bytes_read,
+            read_data_mode: CheckReadDataMode::Full,
+            read_data_subset: None,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+
+    async fn read_snapshot_manifest_with_bytes(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        snapshot_id: &str,
+    ) -> CoreResult<(SnapshotManifest, u64)> {
+        let repository_context = self.config.repository_id.as_bytes();
+        let manifest_key = master_key
+            .derive_subkey(KeyPurpose::SnapshotMetadata, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let object_key = object_key_for_id("objects/manifest", snapshot_id)?;
+        let (manifest, bytes_read): (SnapshotManifest, u64) =
+            read_encrypted_json_object_with_bytes(
+                store,
+                &manifest_key,
+                ObjectKind::SnapshotManifest,
+                &object_key,
+            )
+            .await?;
+        let actual = content_id_for_metadata(
+            master_key,
+            KeyPurpose::SnapshotMetadata,
+            repository_context,
+            &manifest.body,
+        )?;
+
+        if manifest.snapshot_id != snapshot_id {
+            return Err(CoreError::MetadataIdentityMismatch {
+                kind: "snapshot manifest",
+                expected: snapshot_id.to_owned(),
+                actual: manifest.snapshot_id,
+            });
+        }
+        if actual != snapshot_id {
+            return Err(CoreError::MetadataIdentityMismatch {
+                kind: "snapshot manifest",
+                expected: snapshot_id.to_owned(),
+                actual,
+            });
+        }
+
+        Ok((manifest, bytes_read))
+    }
+
+    async fn read_chunk_index_with_bytes(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        index_id: &str,
+    ) -> CoreResult<(ChunkIndex, u64)> {
+        let repository_context = self.config.repository_id.as_bytes();
+        let index_key = master_key
+            .derive_subkey(KeyPurpose::Index, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let object_key = object_key_for_id("objects/index", index_id)?;
+        let (index, bytes_read): (ChunkIndex, u64) = read_encrypted_json_object_with_bytes(
+            store,
+            &index_key,
+            ObjectKind::Index,
+            &object_key,
+        )
+        .await?;
+        let actual = content_id_for_metadata(
+            master_key,
+            KeyPurpose::Index,
+            repository_context,
+            &index.chunks,
+        )?;
+
+        if index.index_id != index_id {
+            return Err(CoreError::MetadataIdentityMismatch {
+                kind: "chunk index",
+                expected: index_id.to_owned(),
+                actual: index.index_id,
+            });
+        }
+        if actual != index_id {
+            return Err(CoreError::MetadataIdentityMismatch {
+                kind: "chunk index",
+                expected: index_id.to_owned(),
+                actual,
+            });
+        }
+
+        Ok((index, bytes_read))
+    }
+
     pub async fn restore_snapshot_contents(
         &self,
         store: &dyn ObjectStore,
@@ -1122,11 +1387,46 @@ impl BackupPipeline {
         let chunk_key = master_key
             .derive_subkey(KeyPurpose::ChunkData, repository_context)
             .map_err(|source| CoreError::Encryption { source })?;
+        let mut directories = Vec::new();
         let mut files = Vec::new();
+        let mut symlinks = Vec::new();
+        let mut metadata_warnings = Vec::new();
 
         for entry in scoped_entries {
-            if entry.metadata.kind != EntryKind::RegularFile {
-                continue;
+            match entry.metadata.kind {
+                EntryKind::Directory => {
+                    directories.push(RestoredDirectory {
+                        relative_path: entry.relative_path.clone(),
+                    });
+                    continue;
+                }
+                EntryKind::Symlink => {
+                    match &entry.metadata.symlink_target {
+                        MetadataValue::Captured(target) => {
+                            symlinks.push(RestoredSymlink {
+                                relative_path: entry.relative_path.clone(),
+                                target: target.clone(),
+                            });
+                        }
+                        MetadataValue::Unsupported => {
+                            metadata_warnings.push(RestoreMetadataWarning {
+                                relative_path: entry.relative_path.clone(),
+                                field: "symlink_target",
+                                reason: "symlink target was not captured".to_owned(),
+                            });
+                        }
+                        MetadataValue::Denied(reason) => {
+                            metadata_warnings.push(RestoreMetadataWarning {
+                                relative_path: entry.relative_path.clone(),
+                                field: "symlink_target",
+                                reason: format!("symlink target was denied: {reason}"),
+                            });
+                        }
+                    }
+                    continue;
+                }
+                EntryKind::RegularFile => {}
+                EntryKind::Other => continue,
             }
 
             let mut contents = Vec::new();
@@ -1202,7 +1502,10 @@ impl BackupPipeline {
         Ok(RestoreContentResult {
             snapshot_id: manifest.snapshot_id,
             selected_entries,
+            directories,
             files,
+            symlinks,
+            metadata_warnings,
         })
     }
 
@@ -1225,7 +1528,29 @@ impl BackupPipeline {
             )
             .await?;
         let file_count = contents.files.len();
+        let mut planned_directories = Vec::with_capacity(contents.directories.len());
         let mut planned_files = Vec::with_capacity(contents.files.len());
+        let mut planned_symlinks = Vec::with_capacity(contents.symlinks.len());
+
+        for directory in contents.directories {
+            let destination_path =
+                safe_destination_path(&request.destination, &directory.relative_path)?;
+            ensure_restore_directory_destination_safe(&request.destination, &destination_path)?;
+
+            if !request.dry_run {
+                create_restored_directory(&destination_path)?;
+            }
+
+            planned_directories.push(RestoreDestinationDirectory {
+                relative_path: directory.relative_path,
+                destination_path,
+                action: if request.dry_run {
+                    RestoreDestinationAction::WouldWrite
+                } else {
+                    RestoreDestinationAction::Written
+                },
+            });
+        }
 
         for file in contents.files {
             let destination_path =
@@ -1259,11 +1584,35 @@ impl BackupPipeline {
             });
         }
 
+        for symlink in contents.symlinks {
+            let destination_path =
+                safe_destination_path(&request.destination, &symlink.relative_path)?;
+            ensure_restore_symlink_destination_safe(&request.destination, &destination_path)?;
+
+            if !request.dry_run {
+                create_restored_symlink(&symlink.target, &destination_path)?;
+            }
+
+            planned_symlinks.push(RestoreDestinationSymlink {
+                relative_path: symlink.relative_path,
+                destination_path,
+                target: symlink.target,
+                action: if request.dry_run {
+                    RestoreDestinationAction::WouldWrite
+                } else {
+                    RestoreDestinationAction::Written
+                },
+            });
+        }
+
         let bytes = planned_files.iter().map(|file| file.bytes).sum();
         Ok(RestoreDestinationResult {
             snapshot_id: contents.snapshot_id,
             selected_entries: contents.selected_entries,
+            directories: planned_directories,
             files: planned_files,
+            symlinks: planned_symlinks,
+            metadata_warnings: contents.metadata_warnings,
             bytes,
             dry_run: request.dry_run,
             verified_files: if request.verify && !request.dry_run {
@@ -1345,6 +1694,44 @@ pub struct SnapshotEntry {
     pub size_bytes: Option<u64>,
     pub modified: MetadataValue<Timestamp>,
     pub metadata_status: MetadataStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepositoryCheckResult {
+    pub repository_id: String,
+    pub checked_at_unix_seconds: u64,
+    pub metadata_objects_checked: usize,
+    pub chunk_objects_checked: usize,
+    pub bytes_read: u64,
+    pub read_data_mode: CheckReadDataMode,
+    pub read_data_subset: Option<String>,
+    pub errors: Vec<CheckFinding>,
+    pub warnings: Vec<CheckFinding>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckReadDataMode {
+    MetadataOnly,
+    Subset,
+    Full,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CheckFinding {
+    pub code: String,
+    pub severity: CheckFindingSeverity,
+    pub object_key: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub path: Option<PathBuf>,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckFindingSeverity {
+    Warning,
+    Error,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1495,13 +1882,27 @@ pub struct RestoreContentRequest {
 pub struct RestoreContentResult {
     pub snapshot_id: String,
     pub selected_entries: usize,
+    pub directories: Vec<RestoredDirectory>,
     pub files: Vec<RestoredFile>,
+    pub symlinks: Vec<RestoredSymlink>,
+    pub metadata_warnings: Vec<RestoreMetadataWarning>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoredDirectory {
+    pub relative_path: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoredFile {
     pub relative_path: PathBuf,
     pub contents: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoredSymlink {
+    pub relative_path: PathBuf,
+    pub target: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1525,10 +1926,20 @@ pub struct RestoreDestinationRequest {
 pub struct RestoreDestinationResult {
     pub snapshot_id: String,
     pub selected_entries: usize,
+    pub directories: Vec<RestoreDestinationDirectory>,
     pub files: Vec<RestoreDestinationFile>,
+    pub symlinks: Vec<RestoreDestinationSymlink>,
+    pub metadata_warnings: Vec<RestoreMetadataWarning>,
     pub bytes: u64,
     pub dry_run: bool,
     pub verified_files: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreDestinationDirectory {
+    pub relative_path: PathBuf,
+    pub destination_path: PathBuf,
+    pub action: RestoreDestinationAction,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1540,10 +1951,25 @@ pub struct RestoreDestinationFile {
     pub verified: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreDestinationSymlink {
+    pub relative_path: PathBuf,
+    pub destination_path: PathBuf,
+    pub target: PathBuf,
+    pub action: RestoreDestinationAction,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestoreDestinationAction {
     WouldWrite,
     Written,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreMetadataWarning {
+    pub relative_path: PathBuf,
+    pub field: &'static str,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1667,12 +2093,26 @@ async fn read_encrypted_json_object<T: for<'de> Deserialize<'de>>(
     kind: ObjectKind,
     object_key: &ObjectKey,
 ) -> CoreResult<T> {
+    read_encrypted_json_object_with_bytes(store, key, kind, object_key)
+        .await
+        .map(|(value, _)| value)
+}
+
+async fn read_encrypted_json_object_with_bytes<T: for<'de> Deserialize<'de>>(
+    store: &dyn ObjectStore,
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+) -> CoreResult<(T, u64)> {
     let encrypted = store
         .get(object_key)
         .await
         .map_err(|source| CoreError::Storage { source })?;
+    let bytes_read = encrypted.len() as u64;
     let plaintext = decrypt_repository_object(key, kind, object_key, &encrypted)?;
-    serde_json::from_slice(&plaintext).map_err(|source| CoreError::MetadataDecode { source })
+    let value = serde_json::from_slice(&plaintext)
+        .map_err(|source| CoreError::MetadataDecode { source })?;
+    Ok((value, bytes_read))
 }
 
 fn decrypt_repository_object(
@@ -1800,6 +2240,52 @@ fn ensure_restore_destination_safe(
     }
 }
 
+fn ensure_restore_directory_destination_safe(
+    root: &Path,
+    destination_path: &Path,
+) -> CoreResult<()> {
+    ensure_no_symlink_ancestor(root, destination_path)?;
+
+    match fs::symlink_metadata(destination_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CoreError::RestoreDestinationSymlink {
+                path: destination_path.to_path_buf(),
+                symlink: destination_path.to_path_buf(),
+            })
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(CoreError::RestoreDestinationKind {
+            path: destination_path.to_path_buf(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CoreError::RestoreDestinationWrite {
+            path: destination_path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn ensure_restore_symlink_destination_safe(root: &Path, destination_path: &Path) -> CoreResult<()> {
+    ensure_no_symlink_ancestor(root, destination_path)?;
+
+    match fs::symlink_metadata(destination_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CoreError::RestoreDestinationSymlink {
+                path: destination_path.to_path_buf(),
+                symlink: destination_path.to_path_buf(),
+            })
+        }
+        Ok(_) => Err(CoreError::RestoreDestinationExists {
+            path: destination_path.to_path_buf(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CoreError::RestoreDestinationWrite {
+            path: destination_path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 fn ensure_no_symlink_ancestor(root: &Path, destination_path: &Path) -> CoreResult<()> {
     let parent = destination_path
         .parent()
@@ -1836,6 +2322,13 @@ fn ensure_no_symlink_ancestor(root: &Path, destination_path: &Path) -> CoreResul
     }
 
     Ok(())
+}
+
+fn create_restored_directory(destination_path: &Path) -> CoreResult<()> {
+    fs::create_dir_all(destination_path).map_err(|source| CoreError::RestoreDestinationWrite {
+        path: destination_path.to_path_buf(),
+        source,
+    })
 }
 
 fn write_restored_file(
@@ -1894,6 +2387,23 @@ fn write_restored_file(
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_restored_symlink(target: &Path, destination_path: &Path) -> CoreResult<()> {
+    std::os::unix::fs::symlink(target, destination_path).map_err(|source| {
+        CoreError::RestoreDestinationWrite {
+            path: destination_path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn create_restored_symlink(_target: &Path, _destination_path: &Path) -> CoreResult<()> {
+    Err(CoreError::UnsupportedRestoreFeature {
+        feature: "symlink restore",
+    })
 }
 
 fn scoped_manifest_entries<'a>(
@@ -2500,6 +3010,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_repository_verifies_commits_metadata_indexes_and_chunks() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("one.txt"), b"same content").expect("write one");
+        fs::write(temp.path().join("two.txt"), b"same content").expect("write two");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let checked = pipeline
+            .check_repository(&store, &master_key)
+            .await
+            .expect("check repository");
+
+        assert_eq!(checked.repository_id, pipeline.config().repository_id);
+        assert_eq!(checked.metadata_objects_checked, 3);
+        assert_eq!(checked.chunk_objects_checked, 1);
+        assert!(checked.bytes_read > 0);
+        assert_eq!(checked.read_data_mode, CheckReadDataMode::Full);
+        assert_eq!(checked.read_data_subset, None);
+        assert!(checked.errors.is_empty());
+        assert!(checked.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_repository_fails_closed_for_missing_or_tampered_chunks() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sample.txt"), b"sample content").expect("write sample");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let chunk_prefix = ObjectKeyPrefix::new("objects/chunk").expect("chunk prefix");
+        let chunk_key = store
+            .list_prefix(&chunk_prefix)
+            .await
+            .expect("list chunks")
+            .into_iter()
+            .next()
+            .expect("chunk key");
+        let chunk_bytes = store.get(&chunk_key).await.expect("chunk bytes");
+
+        store.delete(&chunk_key).await.expect("delete chunk");
+        let missing = pipeline
+            .check_repository(&store, &master_key)
+            .await
+            .expect_err("missing chunk should fail");
+        assert!(matches!(
+            missing,
+            CoreError::RepositoryCheckMissingObject { .. }
+        ));
+
+        let mut tampered = chunk_bytes;
+        tampered[0] ^= 0x01;
+        store.overwrite_for_tests(chunk_key, tampered).await;
+        let corrupted = pipeline
+            .check_repository(&store, &master_key)
+            .await
+            .expect_err("tampered chunk should fail");
+        assert!(matches!(
+            corrupted,
+            CoreError::ObjectDecode { .. } | CoreError::Encryption { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn backup_pipeline_publishes_commit_markers_and_lists_committed_manifests() {
         use fileferry_testkit::FakeObjectStore;
 
@@ -2795,6 +3397,65 @@ mod tests {
         assert!(!destination.path().join("skip.txt").exists());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_writes_directories_and_symlinks() {
+        use fileferry_testkit::FakeObjectStore;
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let restore_root = destination.path().join("restored");
+        fs::create_dir_all(source.path().join("empty/nested")).expect("create empty tree");
+        fs::write(source.path().join("target.txt"), b"target").expect("write target");
+        symlink("target.txt", source.path().join("target.link")).expect("create symlink");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: Vec::new(),
+                    destination: restore_root.clone(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert_eq!(restored.directories.len(), 3);
+        assert_eq!(restored.files.len(), 1);
+        assert_eq!(restored.symlinks.len(), 1);
+        assert!(restore_root.join("empty/nested").is_dir());
+        assert_eq!(
+            fs::read(restore_root.join("target.txt")).expect("restored target"),
+            b"target"
+        );
+        assert_eq!(
+            fs::read_link(restore_root.join("target.link")).expect("restored symlink"),
+            PathBuf::from("target.txt")
+        );
+    }
+
     #[tokio::test]
     async fn restore_snapshot_to_destination_dry_run_reports_without_writes() {
         use fileferry_testkit::FakeObjectStore;
@@ -2844,6 +3505,55 @@ mod tests {
         );
         assert_eq!(restored.files[0].bytes, 6);
         assert!(!destination.path().join("sample.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_rejects_existing_symlink_paths() {
+        use fileferry_testkit::FakeObjectStore;
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        fs::write(source.path().join("target.txt"), b"target").expect("write target");
+        symlink("target.txt", source.path().join("target.link")).expect("create source symlink");
+        symlink(outside.path(), destination.path().join("target.link"))
+            .expect("create destination symlink");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let error = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: vec![PathBuf::from("target.link")],
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::OverwriteFiles,
+                    dry_run: false,
+                    verify: false,
+                },
+            )
+            .await
+            .expect_err("existing symlink path should block restore");
+
+        assert!(matches!(error, CoreError::RestoreDestinationSymlink { .. }));
     }
 
     #[tokio::test]

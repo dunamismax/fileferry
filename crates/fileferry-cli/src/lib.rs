@@ -118,7 +118,10 @@ pub enum Command {
         path: Option<PathBuf>,
     },
 
-    /// Restore regular-file contents from a committed snapshot.
+    /// Verify an initialized local repository.
+    Check,
+
+    /// Restore entries from a committed snapshot.
     Restore {
         /// Snapshot id to restore.
         #[arg(long, conflicts_with_all = ["tag", "latest"])]
@@ -232,6 +235,7 @@ impl RepositoryError {
 fn core_exit_code(error: &CoreError) -> i32 {
     match error {
         CoreError::Storage { source } => storage_exit_code(source),
+        CoreError::RepositoryNotInitialized => 3,
         CoreError::RepositoryUnlock { .. } => 4,
         CoreError::SnapshotNotFound { .. } | CoreError::SnapshotPathNotFound { .. } => 7,
         CoreError::RepositoryBootstrapDecode { .. }
@@ -267,7 +271,9 @@ fn core_exit_code(error: &CoreError) -> i32 {
         CoreError::InvalidChunkRange { .. }
         | CoreError::InvalidChunkLength { .. }
         | CoreError::MissingChunkIndexEntry { .. }
-        | CoreError::RestoreVerificationMismatch { .. } => 6,
+        | CoreError::RestoreVerificationMismatch { .. }
+        | CoreError::RepositoryCheckMissingObject { .. } => 6,
+        CoreError::UnsupportedRestoreFeature { .. } => 9,
     }
 }
 
@@ -627,6 +633,10 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
                 snapshot_selection(snapshot, tag, latest),
                 path.unwrap_or_default(),
             )
+        }
+        Command::Check => {
+            let config = resolve_config(&cli.globals)?;
+            check(mode, &config)
         }
         Command::Restore {
             snapshot,
@@ -1025,6 +1035,18 @@ fn ls(
     })
 }
 
+fn check(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+    let data =
+        runtime.block_on(pipeline.check_repository(&repository.store, &opened.master_key))?;
+
+    emit_check_command(mode, data)
+}
+
 fn restore(
     mode: OutputMode,
     config: &ResolvedConfig,
@@ -1082,6 +1104,26 @@ fn restore(
             )
         })
         .count();
+    let directories_written = result
+        .directories
+        .iter()
+        .filter(|directory| {
+            matches!(
+                directory.action,
+                RestoreDestinationAction::Written | RestoreDestinationAction::WouldWrite
+            )
+        })
+        .count();
+    let symlinks_written = result
+        .symlinks
+        .iter()
+        .filter(|symlink| {
+            matches!(
+                symlink.action,
+                RestoreDestinationAction::Written | RestoreDestinationAction::WouldWrite
+            )
+        })
+        .count();
     let data = RestoreData {
         snapshot_id: result.snapshot_id,
         destination: display_destination,
@@ -1090,10 +1132,18 @@ fn restore(
         overwrite: cli_overwrite,
         entries_selected: result.selected_entries,
         files_written,
-        directories_written: 0,
-        symlinks_written: 0,
+        directories_written,
+        symlinks_written,
         metadata_applied: 0,
-        metadata_warnings: Vec::new(),
+        metadata_warnings: result
+            .metadata_warnings
+            .into_iter()
+            .map(|warning| RestoreMetadataWarning {
+                path: display_snapshot_path(&warning.relative_path),
+                field: warning.field.to_owned(),
+                reason: warning.reason,
+            })
+            .collect(),
         bytes_written: result.bytes,
         verified_files: result.verified_files,
     };
@@ -1354,12 +1404,14 @@ fn emit_restore_command(mode: OutputMode, data: RestoreData) -> Result<Output, C
                 "Restored"
             };
             format!(
-                "{} snapshot {} to {}\nentries_selected={} files={} bytes={} verified_files={}\n",
+                "{} snapshot {} to {}\nentries_selected={} directories={} files={} symlinks={} bytes={} verified_files={}\n",
                 action,
                 data.snapshot_id,
                 data.destination,
                 data.entries_selected,
+                data.directories_written,
                 data.files_written,
+                data.symlinks_written,
                 data.bytes_written,
                 data.verified_files
             )
@@ -1399,8 +1451,8 @@ fn emit_restore_command(mode: OutputMode, data: RestoreData) -> Result<Output, C
                     data: Some(ProgressData {
                         phase,
                         message,
-                        items_done: Some(data.files_written),
-                        items_total: Some(data.files_written),
+                        items_done: Some(data.entries_selected),
+                        items_total: Some(data.entries_selected),
                         bytes_done: Some(data.bytes_written),
                         bytes_total: Some(data.bytes_written),
                         snapshot_id: Some(data.snapshot_id.clone()),
@@ -1425,6 +1477,104 @@ fn emit_restore_command(mode: OutputMode, data: RestoreData) -> Result<Output, C
         stdout,
         stderr: String::new(),
     })
+}
+
+fn emit_check_command(
+    mode: OutputMode,
+    data: fileferry_core::RepositoryCheckResult,
+) -> Result<Output, CliError> {
+    let stdout = match mode {
+        OutputMode::Human => {
+            if data.errors.is_empty() {
+                format!(
+                    "Repository {} checked successfully\nmetadata_objects={} chunk_objects={} bytes_read={} read_data_mode={}\n",
+                    data.repository_id,
+                    data.metadata_objects_checked,
+                    data.chunk_objects_checked,
+                    data.bytes_read,
+                    display_check_read_data_mode(data.read_data_mode)
+                )
+            } else {
+                format!(
+                    "Repository {} check found {} errors and {} warnings\n",
+                    data.repository_id,
+                    data.errors.len(),
+                    data.warnings.len()
+                )
+            }
+        }
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command: "check",
+                status: CommandStatus::Success,
+                data,
+            };
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<fileferry_core::RepositoryCheckResult> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command: "check",
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let phases = [
+                ("load_commits", "loaded snapshot commit markers"),
+                ("verify_metadata", "verified encrypted snapshot manifests"),
+                ("verify_indexes", "verified encrypted chunk indexes"),
+                ("read_data", "read and verified referenced chunk data"),
+                ("complete", "completed repository check"),
+            ];
+            let mut lines = vec![serde_json::to_string(&started)?];
+            for (phase, message) in phases {
+                let event = CommandEvent {
+                    schema_version: OUTPUT_SCHEMA_VERSION,
+                    event: EventKind::Progress,
+                    command: "check",
+                    status: CommandStatus::Started,
+                    data: Some(ProgressData {
+                        phase,
+                        message,
+                        items_done: Some(
+                            data.metadata_objects_checked + data.chunk_objects_checked,
+                        ),
+                        items_total: Some(
+                            data.metadata_objects_checked + data.chunk_objects_checked,
+                        ),
+                        bytes_done: Some(data.bytes_read),
+                        bytes_total: Some(data.bytes_read),
+                        snapshot_id: None,
+                        object_key: None,
+                    }),
+                };
+                lines.push(serde_json::to_string(&event)?);
+            }
+            let completed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandCompleted,
+                command: "check",
+                status: CommandStatus::Success,
+                data: Some(data),
+            };
+            lines.push(serde_json::to_string(&completed)?);
+            lines.join("\n") + "\n"
+        }
+    };
+
+    Ok(Output {
+        stdout,
+        stderr: String::new(),
+    })
+}
+
+fn display_check_read_data_mode(mode: fileferry_core::CheckReadDataMode) -> &'static str {
+    match mode {
+        fileferry_core::CheckReadDataMode::MetadataOnly => "metadata_only",
+        fileferry_core::CheckReadDataMode::Subset => "subset",
+        fileferry_core::CheckReadDataMode::Full => "full",
+    }
 }
 
 impl CliSnapshotEntry {

@@ -400,6 +400,25 @@ ls command_completed
   status: "success"
   data: Ls data schema above
 
+check command_started
+  status: "started"
+  data: null
+
+check progress
+  status: "started"
+  data.phase: "load_commits" | "verify_metadata" | "verify_indexes" | "read_data" | "complete"
+  data.message: string
+  data.items_done: integer | null
+  data.items_total: integer | null
+  data.bytes_done: integer | null
+  data.bytes_total: integer | null
+  data.snapshot_id: string | null
+  data.object_key: string | null
+
+check command_completed
+  status: "success"
+  data: Check data schema above
+
 version command_started
   status: "started"
   data: null
@@ -432,15 +451,25 @@ CLI.
 `ferry restore <DESTINATION>` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects `latest` by default
 or accepts `--snapshot <ID>` / `--tag <TAG>` / `--latest`, and restores
-regular-file contents under the destination directory. `--path <PATH>` may be
-repeated to restore snapshot-relative paths. The command fails if a destination
-file already exists unless `--overwrite` is supplied. `--dry-run` reports the
-selected entries and planned regular-file writes without creating destination
-files. JSON output follows the Restore data schema above; JSONL output emits
-the implemented progress phases listed above. Directory entry restore, symlink
-restore, and metadata application are not implemented yet; the command reports
-zero for those counters and emits metadata warnings only when real warning data
+directory entries, regular-file contents, and Unix symlinks under the
+destination directory. `--path <PATH>` may be repeated to restore
+snapshot-relative paths. The command fails if a destination file already
+exists unless `--overwrite` is supplied. Restored symlink destination paths and
+symlinked ancestors are rejected if they already exist; symlinks are created
+after directory and regular-file writes so restore writes do not traverse
+newly restored symlinks. `--dry-run` reports selected entries and planned
+writes without creating destination entries. JSON output follows the Restore
+data schema above; JSONL output emits the implemented progress phases listed
+above. Metadata application is not implemented yet; the command reports zero
+for `metadata_applied` and emits metadata warnings only when real warning data
 exists.
+
+`ferry check` opens an initialized local repository with `FILEFERRY_PASSWORD`
+or `FILEFERRY_PASSWORD_FILE`, authenticates committed snapshot manifests,
+authenticates chunk indexes, reads every referenced chunk object, decompresses
+chunk payloads, and verifies keyed chunk identities. JSON output follows the
+Check data schema above with `read_data_mode: "full"` and
+`read_data_subset: null`. Configurable subset checks are not implemented yet.
 
 `ferry snapshots` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

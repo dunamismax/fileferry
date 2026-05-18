@@ -207,6 +207,84 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::create_dir_all(source.join("empty/nested")).expect("create empty tree");
+    fs::write(source.join("target.txt"), b"target").expect("write target");
+    symlink("target.txt", source.join("target.link")).expect("create symlink");
+    let backup = backup_source(&repo_url, passphrase, &source);
+
+    let destination = temp.path().join("restore");
+    let restore_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "restore",
+            destination.to_str().expect("destination path"),
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let restore: Value = serde_json::from_slice(&restore_output).expect("restore json");
+    assert_eq!(
+        restore["data"]["snapshot_id"],
+        backup["data"]["snapshot_id"]
+    );
+    assert_eq!(restore["data"]["entries_selected"], 5);
+    assert_eq!(restore["data"]["directories_written"], 3);
+    assert_eq!(restore["data"]["files_written"], 1);
+    assert_eq!(restore["data"]["symlinks_written"], 1);
+    assert_eq!(restore["data"]["metadata_applied"], 0);
+    assert_eq!(restore["data"]["metadata_warnings"], serde_json::json!([]));
+    assert!(destination.join("empty/nested").is_dir());
+    assert_eq!(
+        fs::read(destination.join("target.txt")).expect("restored target"),
+        b"target"
+    );
+    assert_eq!(
+        fs::read_link(destination.join("target.link")).expect("restored symlink"),
+        std::path::PathBuf::from("target.txt")
+    );
+
+    let blocked_destination = temp.path().join("blocked");
+    fs::create_dir(&blocked_destination).expect("create blocked destination");
+    symlink(temp.path(), blocked_destination.join("target.link"))
+        .expect("create destination symlink");
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "restore",
+            "--overwrite",
+            "--path",
+            "target.link",
+            blocked_destination
+                .to_str()
+                .expect("blocked destination path"),
+        ])
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(predicates::str::contains("contains a symlink"));
+}
+
 #[test]
 fn restore_jsonl_emits_progress_events_without_stderr() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -320,6 +398,127 @@ fn restore_requires_correct_password_and_safe_destination() {
         fs::read(destination.join("sample.txt")).expect("overwritten file"),
         b"sample"
     );
+}
+
+#[test]
+fn check_verifies_initialized_local_repository() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let check_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "check"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let check: Value = serde_json::from_slice(&check_output).expect("check json");
+    assert_eq!(check["command"], "check");
+    assert_eq!(check["status"], "success");
+    assert_eq!(check["data"]["metadata_objects_checked"], 3);
+    assert_eq!(check["data"]["chunk_objects_checked"], 1);
+    assert_eq!(check["data"]["read_data_mode"], "full");
+    assert_eq!(check["data"]["read_data_subset"], serde_json::Value::Null);
+    assert_eq!(check["data"]["errors"], serde_json::json!([]));
+    assert_eq!(check["data"]["warnings"], serde_json::json!([]));
+    assert!(check["data"]["bytes_read"].as_u64().expect("bytes read") > 0);
+
+    let check_jsonl_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "check"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = check_jsonl_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 7);
+    let progress: Vec<Value> = lines[1..6]
+        .iter()
+        .map(|line| serde_json::from_slice(line).expect("progress event"))
+        .collect();
+    assert_eq!(progress[0]["data"]["phase"], "load_commits");
+    assert_eq!(progress[4]["data"]["phase"], "complete");
+    let completed: Value = serde_json::from_slice(lines[6]).expect("completed event");
+    assert_eq!(completed["event"], "command_completed");
+    assert_eq!(completed["data"]["read_data_mode"], "full");
+}
+
+#[test]
+fn check_requires_initialized_repository_correct_password_and_authentic_chunks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "check"])
+        .assert()
+        .code(3)
+        .stdout("")
+        .stderr(predicates::str::contains("repository is not initialized"));
+
+    init_repo(&repo_url, passphrase);
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-passphrase")
+        .args(["--repo", &repo_url, "check"])
+        .assert()
+        .code(4)
+        .stdout("")
+        .stderr(predicates::str::contains(
+            "repository could not be unlocked",
+        ));
+
+    let chunk_path = find_first_file(repo.join("objects/chunk"));
+    let mut bytes = fs::read(&chunk_path).expect("chunk bytes");
+    bytes[0] ^= 0x01;
+    fs::write(&chunk_path, bytes).expect("tamper chunk");
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "check"])
+        .assert()
+        .code(6)
+        .stdout("")
+        .stderr(predicates::str::contains(
+            "repository object framing could not be decoded",
+        ));
+}
+
+fn find_first_file(root: std::path::PathBuf) -> std::path::PathBuf {
+    let mut pending = vec![root];
+    while let Some(path) = pending.pop() {
+        if path.is_file() {
+            return path;
+        }
+        let mut children = fs::read_dir(&path)
+            .expect("read dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .collect::<Vec<_>>();
+        children.sort();
+        children.reverse();
+        pending.extend(children);
+    }
+    panic!("file not found");
 }
 
 #[test]
@@ -515,7 +714,7 @@ fn backup_requires_initialized_repository_and_correct_password() {
         .assert()
         .code(3)
         .stdout("")
-        .stderr(predicates::str::contains("repository object write failed"));
+        .stderr(predicates::str::contains("repository is not initialized"));
 
     fileferry()
         .env("FILEFERRY_PASSWORD", "test-passphrase")

@@ -35,10 +35,16 @@ Last reviewed: 2026-05-18.
   and JSONL-safe output paths.
 - `ferry restore` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects snapshots by
-  latest, snapshot id, or tag, restores all or path-scoped regular-file
-  contents through the core restore pipeline, enforces destination
-  fail-if-exists safety unless `--overwrite` is supplied, supports dry-run
-  reporting, and exposes tested human, JSON, and JSONL-safe output paths.
+  latest, snapshot id, or tag, restores all or path-scoped directory entries,
+  regular-file contents, and Unix symlinks through the core restore pipeline,
+  enforces destination fail-if-exists safety unless `--overwrite` is supplied
+  for regular files, supports dry-run reporting, and exposes tested human,
+  JSON, and JSONL-safe output paths.
+- `ferry check` opens initialized local repositories, unlocks with
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
+  manifests and chunk indexes, reads/decompresses every referenced chunk, and
+  verifies keyed chunk identities. Configurable subset checks are not
+  implemented yet.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -85,11 +91,12 @@ Last reviewed: 2026-05-18.
   named `ferry`.
 
 The repo is still pre-v1. Restore is wired into the CLI for initialized local
-repositories and regular-file contents, but directory entry restore, symlink
-restore, metadata application, and S3-compatible repository bootstrap/restore
-are not complete. Describe backup, restore, repository, storage, crypto, or
-platform behavior only to the level backed by code, tests, and platform
-evidence.
+repositories, directory entries, regular-file contents, and Unix symlinks, but
+metadata application and S3-compatible repository bootstrap/restore are not
+complete. `ferry check` has a fixed full referenced-chunk verification path,
+but configurable subset checks are not complete. Describe backup, restore,
+check, repository, storage, crypto, or platform behavior only to the level
+backed by code, tests, and platform evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
@@ -480,9 +487,9 @@ where documented verification passes on a clean checkout.
 
 ### Phase 8 - Check, Repair Guidance, And Doctor
 
-- [ ] Implement repository metadata check.
+- [x] Implement repository metadata check.
 - [ ] Implement configurable data subset checks.
-- [ ] Implement full read-data check.
+- [x] Implement full read-data check.
 - [ ] Add deterministic corruption reports.
 - [ ] Add `doctor` for environment, config, backend, and permission issues.
 - [ ] Document repair guidance without promising unsafe automatic repair.
@@ -601,6 +608,26 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Expanded local restore and added the first `ferry check`
+  implementation. Restore now writes explicit directory entries, regular-file
+  contents, and Unix symlinks from initialized local repositories; it keeps
+  destination containment checks, rejects symlinked destination ancestors and
+  pre-existing symlink paths, creates symlinks after directory/file writes,
+  reports `directories_written`, `symlinks_written`, `metadata_applied`, and
+  `metadata_warnings` honestly, and still leaves metadata application
+  unclaimed. Added core and CLI integration tests for directory/symlink
+  restore success and symlink destination safety. `ferry check` now opens
+  initialized local repositories, authenticates commit markers, encrypted
+  manifests, encrypted indexes, and every referenced chunk, decompresses chunk
+  payloads, verifies keyed chunk identities, and emits human, JSON, and JSONL
+  output with `read_data_mode: "full"` and no configurable subset support.
+  Added tests for wrong passwords, uninitialized repositories, missing chunks,
+  tampered chunks, and JSON/JSONL success output. Ran a local
+  `init -> backup -> restore -> check` drill against a temporary repository
+  with an empty directory tree, a regular file, and a Unix symlink; verified
+  file bytes with `cmp`, directory existence with `test -d`, symlink target
+  with `readlink`, and check counts in JSON. Verified initially with targeted
+  `cargo test -p fileferry-core ...` and `cargo test -p fileferry-cli ...`.
 - 2026-05-18 - Wired `ferry restore` into `fileferry-cli` for initialized
   local repositories. The command unlocks through `FILEFERRY_PASSWORD` or
   `FILEFERRY_PASSWORD_FILE`, selects latest by default or via `--latest`,
