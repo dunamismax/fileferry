@@ -49,6 +49,8 @@ Last reviewed: 2026-05-18.
   planned chunks with zstd, encrypts chunk/index/manifest objects, writes them
   through the object-store trait, deduplicates same-content chunks by keyed
   chunk identity, and creates an encrypted snapshot manifest.
+- `fileferry-core` can read back encrypted snapshot manifests and chunk indexes
+  with authenticated object contexts and decrypted metadata identity checks.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
@@ -149,7 +151,7 @@ Security design work before format freeze:
 - [x] Define key rotation semantics and what rotation does not rewrite.
 - [x] Define tamper/corruption error classes and JSON output.
 - [x] Add `docs/security.md`.
-- [ ] Add adversarial tests for wrong password, wrong key, bit flips, truncated
+- [x] Add adversarial tests for wrong password, wrong key, bit flips, truncated
       objects, swapped objects, replayed indexes, and malformed metadata.
 
 ---
@@ -424,7 +426,7 @@ where documented verification passes on a clean checkout.
 - [x] Implement chunk/index writes.
 - [x] Implement snapshot manifest creation.
 - [ ] Add resumable backup state.
-- [ ] Add tests for sparse trees, symlinks, permissions, large files, many
+- [x] Add tests for sparse trees, symlinks, permissions, large files, many
       small files, and excluded paths.
 
 ### Phase 6 - Restore Pipeline
@@ -570,6 +572,13 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added authenticated repository-object read helpers for snapshot
+  manifests and chunk indexes, including identity checks for decrypted metadata.
+  Expanded adversarial coverage for wrong repository keys, bit flips,
+  truncation, swapped objects, replayed indexes, and malformed metadata. Added
+  backup-pipeline tests for sparse directory trees, symlinks, unreadable files,
+  large files, many small files, and excluded paths. Verified with `cargo test
+  -p fileferry-core -p fileferry-testkit`.
 - 2026-05-18 - Added the first core backup pipeline slice: source entries are
   chunked, zstd-compressed, encrypted through the existing authenticated object
   envelope, written as immutable chunk objects, indexed in an encrypted chunk

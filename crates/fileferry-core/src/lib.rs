@@ -5,7 +5,7 @@ use fastcdc::v2020::{
 };
 use fileferry_crypto::{
     AeadAlgorithm, CryptoError, EncryptedObject, KeyPurpose, MasterKey, ObjectContext, ObjectKind,
-    encrypt_object, keyed_content_id,
+    decrypt_object, encrypt_object, keyed_content_id,
 };
 use fileferry_platform::{EntryKind, EntryMetadata, PlatformError, capture_metadata};
 use fileferry_storage::{ObjectKey, ObjectStore, PutStatus, StorageError};
@@ -82,6 +82,25 @@ pub enum CoreError {
     Serialization {
         #[source]
         source: serde_json::Error,
+    },
+
+    #[error("repository object framing could not be decoded")]
+    ObjectDecode {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("repository metadata could not be decoded")]
+    MetadataDecode {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("{kind} metadata identity mismatch: expected {expected}, found {actual}")]
+    MetadataIdentityMismatch {
+        kind: &'static str,
+        expected: String,
+        actual: String,
     },
 
     #[error("repository object key could not be created")]
@@ -526,6 +545,87 @@ impl BackupPipeline {
             chunks: index.chunks.len(),
         })
     }
+
+    pub async fn read_snapshot_manifest(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        snapshot_id: &str,
+    ) -> CoreResult<SnapshotManifest> {
+        let repository_context = self.config.repository_id.as_bytes();
+        let manifest_key = master_key
+            .derive_subkey(KeyPurpose::SnapshotMetadata, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let object_key = object_key_for_id("objects/manifest", snapshot_id)?;
+        let manifest: SnapshotManifest = read_encrypted_json_object(
+            store,
+            &manifest_key,
+            ObjectKind::SnapshotManifest,
+            &object_key,
+        )
+        .await?;
+        let actual = content_id_for_metadata(
+            master_key,
+            KeyPurpose::SnapshotMetadata,
+            repository_context,
+            &manifest.body,
+        )?;
+
+        if manifest.snapshot_id != snapshot_id {
+            return Err(CoreError::MetadataIdentityMismatch {
+                kind: "snapshot manifest",
+                expected: snapshot_id.to_owned(),
+                actual: manifest.snapshot_id,
+            });
+        }
+        if actual != snapshot_id {
+            return Err(CoreError::MetadataIdentityMismatch {
+                kind: "snapshot manifest",
+                expected: snapshot_id.to_owned(),
+                actual,
+            });
+        }
+
+        Ok(manifest)
+    }
+
+    pub async fn read_chunk_index(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        index_id: &str,
+    ) -> CoreResult<ChunkIndex> {
+        let repository_context = self.config.repository_id.as_bytes();
+        let index_key = master_key
+            .derive_subkey(KeyPurpose::Index, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let object_key = object_key_for_id("objects/index", index_id)?;
+        let index: ChunkIndex =
+            read_encrypted_json_object(store, &index_key, ObjectKind::Index, &object_key).await?;
+        let actual = content_id_for_metadata(
+            master_key,
+            KeyPurpose::Index,
+            repository_context,
+            &index.chunks,
+        )?;
+
+        if index.index_id != index_id {
+            return Err(CoreError::MetadataIdentityMismatch {
+                kind: "chunk index",
+                expected: index_id.to_owned(),
+                actual: index.index_id,
+            });
+        }
+        if actual != index_id {
+            return Err(CoreError::MetadataIdentityMismatch {
+                kind: "chunk index",
+                expected: index_id.to_owned(),
+                actual,
+            });
+        }
+
+        Ok(index)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -646,6 +746,42 @@ async fn write_encrypted_json_object<T: Serialize>(
         .await
         .map_err(|source| CoreError::Storage { source })?;
     Ok(())
+}
+
+async fn read_encrypted_json_object<T: for<'de> Deserialize<'de>>(
+    store: &dyn ObjectStore,
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+) -> CoreResult<T> {
+    let encrypted = store
+        .get(object_key)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    let plaintext = decrypt_repository_object(key, kind, object_key, &encrypted)?;
+    serde_json::from_slice(&plaintext).map_err(|source| CoreError::MetadataDecode { source })
+}
+
+fn decrypt_repository_object(
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+    bytes: &[u8],
+) -> CoreResult<Vec<u8>> {
+    let stored: StoredEncryptedObject =
+        serde_json::from_slice(bytes).map_err(|source| CoreError::ObjectDecode { source })?;
+    let algorithm = match stored.algorithm {
+        RepositoryAeadAlgorithm::XChaCha20Poly1305 => AeadAlgorithm::XChaCha20Poly1305,
+    };
+    let object = EncryptedObject {
+        algorithm,
+        nonce: stored.nonce,
+        ciphertext: stored.ciphertext,
+    };
+    let context = ObjectContext::new(kind, object_key.as_str())
+        .map_err(|source| CoreError::Encryption { source })?;
+
+    decrypt_object(key, &context, &object).map_err(|source| CoreError::Encryption { source })
 }
 
 fn encode_encrypted_object(encrypted: EncryptedObject) -> CoreResult<Vec<u8>> {
@@ -829,6 +965,15 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn small_test_pipeline() -> BackupPipeline {
+        BackupPipeline::new(BackupPipelineConfig {
+            chunking: ChunkingConfig::new(64, 256, 1024),
+            compression_level: DEFAULT_ZSTD_COMPRESSION_LEVEL,
+            repository_id: "repo-test-id".to_owned(),
+        })
+        .expect("pipeline")
+    }
+
     fn relative_entries(entries: &[SourceEntry]) -> Vec<String> {
         entries
             .iter()
@@ -1005,12 +1150,7 @@ mod tests {
         fs::write(temp.path().join("one.txt"), b"same content").expect("write one");
         fs::write(temp.path().join("two.txt"), b"same content").expect("write two");
 
-        let config = BackupPipelineConfig {
-            chunking: ChunkingConfig::new(64, 256, 1024),
-            compression_level: DEFAULT_ZSTD_COMPRESSION_LEVEL,
-            repository_id: "repo-test-id".to_owned(),
-        };
-        let pipeline = BackupPipeline::new(config).expect("pipeline");
+        let pipeline = small_test_pipeline();
         let store = FakeObjectStore::new();
         let master_key = MasterKey::generate();
 
@@ -1052,5 +1192,350 @@ mod tests {
         assert!(!rendered_manifest.contains("one.txt"));
         assert!(!rendered_manifest.contains("two.txt"));
         assert!(!rendered_manifest.contains("laptop"));
+    }
+
+    #[tokio::test]
+    async fn backup_pipeline_reads_back_authenticated_manifest_and_index() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sample.txt"), b"sample content").expect("write sample");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: vec!["verified".to_owned()],
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let manifest = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect("manifest read");
+        let index = pipeline
+            .read_chunk_index(&store, &master_key, &manifest.body.index_ids[0])
+            .await
+            .expect("index read");
+
+        assert_eq!(manifest.snapshot_id, result.snapshot_id);
+        assert_eq!(manifest.body.tags, vec!["verified"]);
+        assert_eq!(index.index_id, manifest.body.index_ids[0]);
+        assert_eq!(index.chunks.len(), result.chunks);
+    }
+
+    #[tokio::test]
+    async fn repository_object_reads_fail_closed_for_wrong_key_bit_flips_truncation_and_swaps() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sample.txt"), b"sample content").expect("write sample");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let wrong_master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let wrong_key_error = pipeline
+            .read_snapshot_manifest(&store, &wrong_master_key, &result.snapshot_id)
+            .await
+            .expect_err("wrong repository key must fail");
+        assert!(matches!(
+            wrong_key_error,
+            CoreError::Encryption {
+                source: CryptoError::Decryption
+            }
+        ));
+
+        let manifest_bytes = store
+            .get(&result.manifest_object)
+            .await
+            .expect("manifest bytes");
+        let mut corrupted: StoredEncryptedObject =
+            serde_json::from_slice(&manifest_bytes).expect("manifest frame");
+        corrupted.ciphertext[0] ^= 0x01;
+        store
+            .overwrite_for_tests(
+                result.manifest_object.clone(),
+                serde_json::to_vec(&corrupted).expect("corrupted frame"),
+            )
+            .await;
+        let bit_flip_error = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect_err("bit flip must fail");
+        assert!(matches!(
+            bit_flip_error,
+            CoreError::Encryption {
+                source: CryptoError::Decryption
+            }
+        ));
+
+        let mut truncated: StoredEncryptedObject =
+            serde_json::from_slice(&manifest_bytes).expect("manifest frame");
+        truncated
+            .ciphertext
+            .truncate(truncated.ciphertext.len() / 2);
+        store
+            .overwrite_for_tests(
+                result.manifest_object.clone(),
+                serde_json::to_vec(&truncated).expect("truncated frame"),
+            )
+            .await;
+        let truncated_error = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect_err("truncation must fail");
+        assert!(matches!(
+            truncated_error,
+            CoreError::Encryption {
+                source: CryptoError::Decryption
+            }
+        ));
+
+        let index_bytes = store.get(&result.index_object).await.expect("index bytes");
+        store
+            .overwrite_for_tests(result.manifest_object.clone(), index_bytes)
+            .await;
+        let swapped_error = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect_err("swapped object must fail");
+        assert!(matches!(
+            swapped_error,
+            CoreError::Encryption {
+                source: CryptoError::Decryption
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_metadata_reads_reject_replayed_indexes_and_malformed_metadata() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sample.txt"), b"sample content").expect("write sample");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let manifest = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect("manifest read");
+        let index_id = manifest.body.index_ids[0].clone();
+        let mut index = pipeline
+            .read_chunk_index(&store, &master_key, &index_id)
+            .await
+            .expect("index read");
+        index.chunks.clear();
+
+        let index_key = master_key
+            .derive_subkey(
+                KeyPurpose::Index,
+                pipeline.config().repository_id.as_bytes(),
+            )
+            .expect("index key");
+        let replayed = encrypt_repository_object(
+            &index_key,
+            ObjectKind::Index,
+            &result.index_object,
+            &serde_json::to_vec(&index).expect("index json"),
+        )
+        .expect("replayed encrypted index");
+        store
+            .overwrite_for_tests(result.index_object.clone(), replayed)
+            .await;
+        let replayed_error = pipeline
+            .read_chunk_index(&store, &master_key, &index_id)
+            .await
+            .expect_err("replayed index contents must fail identity check");
+        assert!(matches!(
+            replayed_error,
+            CoreError::MetadataIdentityMismatch {
+                kind: "chunk index",
+                ..
+            }
+        ));
+
+        let manifest_key = master_key
+            .derive_subkey(
+                KeyPurpose::SnapshotMetadata,
+                pipeline.config().repository_id.as_bytes(),
+            )
+            .expect("manifest key");
+        let malformed = encrypt_repository_object(
+            &manifest_key,
+            ObjectKind::SnapshotManifest,
+            &result.manifest_object,
+            br#"{"schema_version":"not-a-number"}"#,
+        )
+        .expect("malformed encrypted object");
+        store
+            .overwrite_for_tests(result.manifest_object.clone(), malformed)
+            .await;
+        let malformed_error = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect_err("malformed metadata must fail");
+        assert!(matches!(malformed_error, CoreError::MetadataDecode { .. }));
+    }
+
+    #[tokio::test]
+    async fn backup_pipeline_covers_sparse_trees_symlinks_exclusions_large_and_many_files() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("empty/nested")).expect("create empty tree");
+        fs::create_dir_all(temp.path().join("excluded/cache")).expect("create excluded tree");
+        fs::create_dir_all(temp.path().join("many")).expect("create many tree");
+        fs::write(temp.path().join("excluded/cache/skip.txt"), b"skip").expect("write skip");
+        for index in 0..32 {
+            fs::write(
+                temp.path().join(format!("many/file-{index:02}.txt")),
+                format!("many small file {index}"),
+            )
+            .expect("write many file");
+        }
+        let large = (0..16_384)
+            .map(|index| ((index * 17 + index / 3) % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(temp.path().join("large.bin"), large).expect("write large file");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("large.bin", temp.path().join("large.link")).expect("symlink");
+        }
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: vec![ExclusionRule::new("excluded/")],
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let manifest = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect("manifest read");
+
+        assert!(
+            manifest
+                .body
+                .entries
+                .iter()
+                .any(|entry| entry.relative_path == Path::new("empty/nested"))
+        );
+        assert!(
+            !manifest
+                .body
+                .entries
+                .iter()
+                .any(|entry| entry.relative_path.starts_with("excluded"))
+        );
+        assert_eq!(
+            manifest
+                .body
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.relative_path.parent() == Some(Path::new("many"))
+                        && entry
+                            .relative_path
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with("file-"))
+                })
+                .count(),
+            32
+        );
+
+        let large_entry = manifest
+            .body
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == Path::new("large.bin"))
+            .expect("large entry");
+        assert!(large_entry.chunks.len() > 1);
+
+        #[cfg(unix)]
+        {
+            let symlink_entry = manifest
+                .body
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == Path::new("large.link"))
+                .expect("symlink entry");
+            assert_eq!(symlink_entry.metadata.kind, EntryKind::Symlink);
+            assert!(symlink_entry.chunks.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn backup_pipeline_reports_permission_denied_file_reads() {
+        use fileferry_testkit::FakeObjectStore;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let locked = temp.path().join("locked.txt");
+        fs::write(&locked, b"locked").expect("write locked");
+        let original_permissions = fs::metadata(&locked).expect("metadata").permissions();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock file");
+
+        let pipeline = small_test_pipeline();
+        let result = pipeline
+            .write_snapshot(
+                &FakeObjectStore::new(),
+                &MasterKey::generate(),
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await;
+        fs::set_permissions(&locked, original_permissions).expect("restore permissions");
+
+        let error = result.expect_err("unreadable file should fail backup");
+        assert!(matches!(error, CoreError::FileRead { .. }));
     }
 }

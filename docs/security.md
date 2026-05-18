@@ -223,8 +223,13 @@ The `fileferry-crypto` crate currently includes focused tests for:
   tags, and directory shape inside encrypted metadata objects and use keyed
   chunk identities for object placement.
 - Wrong authenticated object context failure.
+- Authenticated snapshot-manifest and chunk-index reads.
+- Wrong repository key failure for encrypted repository metadata.
+- Bit-flipped and truncated repository object read failures.
+- Swapped repository object failures across realistic object names.
+- Replayed chunk-index metadata identity failures.
+- Malformed decrypted metadata failures.
 - Redacted `Debug` output for master keys.
 
-The broader adversarial test matrix still needs replayed indexes, swapped
-objects across realistic repository names, malformed decrypted metadata, and
-format migration failures once repository objects exist.
+The broader adversarial test matrix still needs format migration failures once
+format fixtures and migrations exist.

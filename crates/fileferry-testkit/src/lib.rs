@@ -25,6 +25,10 @@ impl FakeObjectStore {
     pub async fn object_count(&self) -> usize {
         self.objects.lock().await.len()
     }
+
+    pub async fn overwrite_for_tests(&self, key: ObjectKey, bytes: Vec<u8>) {
+        self.objects.lock().await.insert(key, bytes);
+    }
 }
 
 impl ObjectStore for FakeObjectStore {
