@@ -7,6 +7,8 @@ fn fileferry() -> Command {
         "FILEFERRY_CONFIG",
         "FILEFERRY_PROFILE",
         "FILEFERRY_REPOSITORY",
+        "FILEFERRY_PASSWORD",
+        "FILEFERRY_PASSWORD_FILE",
         "FILEFERRY_LOG",
     ] {
         command.env_remove(variable);
@@ -30,6 +32,9 @@ fn top_level_help_lists_stable_global_flags_and_commands() {
                 .and(predicates::str::contains("--json"))
                 .and(predicates::str::contains("--jsonl"))
                 .and(predicates::str::contains("completion"))
+                .and(predicates::str::contains("init"))
+                .and(predicates::str::contains("snapshots"))
+                .and(predicates::str::contains("ls"))
                 .and(predicates::str::contains("version")),
         )
         .stderr("");

@@ -11,6 +11,7 @@ fastcdc.workspace = true
 fileferry-crypto = { path = "../fileferry-crypto" }
 fileferry-platform = { path = "../fileferry-platform" }
 fileferry-storage = { path = "../fileferry-storage" }
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

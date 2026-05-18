@@ -1,5 +1,14 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
+use fileferry_core::{
+    BackupPipeline, BackupPipelineConfig, CoreError, MetadataStatus, SnapshotEntry,
+    SnapshotSelection, create_repository, list_snapshot_entries, open_repository, select_snapshot,
+    snapshot_summaries,
+};
+use fileferry_crypto::KdfParams;
+use fileferry_platform::{EntryKind, MetadataValue};
+use fileferry_storage::{LocalStore, StorageError};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -72,6 +81,30 @@ pub enum Command {
         shell: Shell,
     },
 
+    /// Create an encrypted local repository.
+    Init,
+
+    /// List committed snapshots.
+    Snapshots,
+
+    /// List entries in a committed snapshot.
+    Ls {
+        /// Snapshot id to list.
+        #[arg(long, conflicts_with_all = ["tag", "latest"])]
+        snapshot: Option<String>,
+
+        /// Select the newest snapshot with this tag.
+        #[arg(long, conflicts_with_all = ["snapshot", "latest"])]
+        tag: Option<String>,
+
+        /// Select the newest committed snapshot.
+        #[arg(long, conflicts_with_all = ["snapshot", "tag"])]
+        latest: bool,
+
+        /// Snapshot-relative path to list.
+        path: Option<PathBuf>,
+    },
+
     /// Print version information.
     Version,
 }
@@ -80,6 +113,12 @@ pub enum Command {
 pub enum CliError {
     #[error(transparent)]
     Config(#[from] ConfigError),
+
+    #[error(transparent)]
+    Repository(#[from] RepositoryError),
+
+    #[error(transparent)]
+    Core(Box<CoreError>),
 
     #[error("JSON serialization failed")]
     Json(#[from] serde_json::Error),
@@ -92,8 +131,113 @@ impl CliError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Config(_) => 2,
+            Self::Repository(error) => error.exit_code(),
+            Self::Core(error) => core_exit_code(error),
             Self::Json(_) | Self::Completion(_) => 1,
         }
+    }
+}
+
+impl From<CoreError> for CliError {
+    fn from(error: CoreError) -> Self {
+        Self::Core(Box::new(error))
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RepositoryError {
+    #[error("repository URL is required; pass --repo or set FILEFERRY_REPOSITORY")]
+    MissingRepository,
+
+    #[error("FILEFERRY_PASSWORD or FILEFERRY_PASSWORD_FILE is required for repository access")]
+    MissingPassword,
+
+    #[error("password file {path} could not be read: {source}")]
+    PasswordFileRead {
+        path: Redacted,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("repository URL {value} is not supported by this command yet")]
+    UnsupportedRepository { value: Redacted },
+
+    #[error("file repository URL {value} is invalid; expected file:///absolute/path")]
+    InvalidFileRepositoryUrl { value: Redacted },
+
+    #[error("repository runtime could not be started: {source}")]
+    Runtime {
+        #[source]
+        source: io::Error,
+    },
+}
+
+impl RepositoryError {
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::MissingRepository
+            | Self::MissingPassword
+            | Self::PasswordFileRead { .. }
+            | Self::InvalidFileRepositoryUrl { .. } => 2,
+            Self::UnsupportedRepository { .. } => 9,
+            Self::Runtime { .. } => 1,
+        }
+    }
+}
+
+fn core_exit_code(error: &CoreError) -> i32 {
+    match error {
+        CoreError::Storage { source } => storage_exit_code(source),
+        CoreError::RepositoryUnlock { .. } => 4,
+        CoreError::SnapshotNotFound { .. } | CoreError::SnapshotPathNotFound { .. } => 7,
+        CoreError::RepositoryBootstrapDecode { .. }
+        | CoreError::InvalidRepositoryBootstrap { .. }
+        | CoreError::CommitDecode { .. }
+        | CoreError::InvalidCommitMarker { .. }
+        | CoreError::MetadataIdentityMismatch { .. }
+        | CoreError::ObjectDecode { .. }
+        | CoreError::MetadataDecode { .. }
+        | CoreError::ChunkIdentityMismatch { .. } => 6,
+        CoreError::Encryption { .. } => 6,
+        CoreError::ObjectKey { .. }
+        | CoreError::Serialization { .. }
+        | CoreError::SystemClock { .. }
+        | CoreError::InvalidBackupPipelineConfig { .. }
+        | CoreError::InvalidChunkingConfig { .. } => 1,
+        CoreError::SourceRootNotAbsolute { .. }
+        | CoreError::InvalidRestoreRequest { .. }
+        | CoreError::RestoreDestinationNotAbsolute { .. }
+        | CoreError::RestoreDestinationEscapesRoot { .. }
+        | CoreError::RestoreDestinationSymlink { .. }
+        | CoreError::RestoreDestinationExists { .. }
+        | CoreError::RestoreDestinationKind { .. } => 2,
+        CoreError::SourceRootRead { .. }
+        | CoreError::DirectoryRead { .. }
+        | CoreError::DirectoryEntryRead { .. }
+        | CoreError::MetadataCapture { .. }
+        | CoreError::FileRead { .. }
+        | CoreError::Compression { .. }
+        | CoreError::Decompression { .. }
+        | CoreError::RestoreDestinationWrite { .. }
+        | CoreError::RestoreVerificationRead { .. } => 5,
+        CoreError::InvalidChunkRange { .. }
+        | CoreError::InvalidChunkLength { .. }
+        | CoreError::MissingChunkIndexEntry { .. }
+        | CoreError::RestoreVerificationMismatch { .. } => 6,
+    }
+}
+
+fn storage_exit_code(error: &StorageError) -> i32 {
+    match error {
+        StorageError::ObjectNotFound { .. } => 3,
+        StorageError::InvalidObjectKey { .. } | StorageError::PolicyConfig { .. } => 1,
+        StorageError::BackendConfig { .. } => 9,
+        StorageError::Io { .. }
+        | StorageError::ObjectIo { .. }
+        | StorageError::BackendObject { .. }
+        | StorageError::Backend { .. }
+        | StorageError::Timeout { .. }
+        | StorageError::ObjectAlreadyExists { .. } => 5,
     }
 }
 
@@ -288,11 +432,89 @@ struct VersionData<'a> {
     version: &'a str,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct InitData {
+    repository_id: String,
+    repository_url: String,
+    format_version: u16,
+    backend: CliBackendKind,
+    created: bool,
+    key_slots: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CliBackendKind {
+    Local,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct SnapshotsData {
+    snapshots: Vec<fileferry_core::SnapshotSummary>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct LsData {
+    snapshot_id: String,
+    path: String,
+    entries: Vec<CliSnapshotEntry>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct CliSnapshotEntry {
+    path: String,
+    kind: EntryKind,
+    size_bytes: Option<u64>,
+    modified: CliTimestampValue,
+    metadata_status: MetadataStatus,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct CliTimestampValue {
+    status: CliTimestampStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nanoseconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    denial_reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CliTimestampStatus {
+    Captured,
+    Unsupported,
+    Denied,
+}
+
 pub fn run(cli: Cli) -> Result<Output, CliError> {
     let mode = OutputMode::from_globals(&cli.globals);
 
     match cli.command {
         Command::Completion { shell } => completion(shell),
+        Command::Init => {
+            let config = resolve_config(&cli.globals)?;
+            init_repository(mode, &config)
+        }
+        Command::Snapshots => {
+            let config = resolve_config(&cli.globals)?;
+            snapshots(mode, &config)
+        }
+        Command::Ls {
+            snapshot,
+            tag,
+            latest,
+            path,
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            ls(
+                mode,
+                &config,
+                snapshot_selection(snapshot, tag, latest),
+                path.unwrap_or_default(),
+            )
+        }
         Command::Version => {
             let _config = resolve_config(&cli.globals)?;
             version(mode)
@@ -504,6 +726,317 @@ fn completion(shell: Shell) -> Result<Output, CliError> {
         stdout,
         stderr: String::new(),
     })
+}
+
+fn init_repository(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let result = runtime.block_on(create_repository(
+        &repository.store,
+        &passphrase,
+        KdfParams::default(),
+    ))?;
+    let data = InitData {
+        repository_id: result.repository.repository_id,
+        repository_url: redact_for_display(&repository.url),
+        format_version: result.format_version,
+        backend: repository.backend,
+        created: result.created,
+        key_slots: result.key_slots,
+    };
+
+    emit_command(mode, "init", data, |data| {
+        if data.created {
+            format!(
+                "Initialized repository {} at {}\n",
+                data.repository_id, data.repository_url
+            )
+        } else {
+            format!(
+                "Repository {} already initialized at {}\n",
+                data.repository_id, data.repository_url
+            )
+        }
+    })
+}
+
+fn snapshots(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, CliError> {
+    let loaded = load_repository_snapshots(config)?;
+    let data = SnapshotsData {
+        snapshots: snapshot_summaries(&loaded.manifests),
+    };
+
+    emit_command(mode, "snapshots", data, |data| {
+        if data.snapshots.is_empty() {
+            return "No snapshots found.\n".to_owned();
+        }
+
+        data.snapshots
+            .iter()
+            .map(|snapshot| {
+                let tags = if snapshot.tags.is_empty() {
+                    "-".to_owned()
+                } else {
+                    snapshot.tags.join(",")
+                };
+                format!(
+                    "{} {} entries={} sources={} tags={}",
+                    snapshot.snapshot_id,
+                    snapshot.created_at_unix_seconds,
+                    snapshot.entry_count,
+                    snapshot.source_count,
+                    tags
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    })
+}
+
+fn ls(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    selection: SnapshotSelection,
+    path: PathBuf,
+) -> Result<Output, CliError> {
+    let loaded = load_repository_snapshots(config)?;
+    let manifest = select_snapshot(&loaded.manifests, &selection)?;
+    let listing = list_snapshot_entries(manifest, &path)?;
+    let data = LsData {
+        snapshot_id: listing.snapshot_id,
+        path: display_snapshot_path(&listing.path),
+        entries: listing
+            .entries
+            .iter()
+            .map(CliSnapshotEntry::from_snapshot_entry)
+            .collect(),
+    };
+
+    emit_command(mode, "ls", data, |data| {
+        if data.entries.is_empty() {
+            return String::new();
+        }
+
+        data.entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}\t{}\t{}",
+                    display_entry_kind(&entry.kind),
+                    entry
+                        .size_bytes
+                        .map(|size| size.to_string())
+                        .unwrap_or_else(|| "-".to_owned()),
+                    entry.path
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    })
+}
+
+struct LocalRepository {
+    url: String,
+    backend: CliBackendKind,
+    store: LocalStore,
+}
+
+struct LoadedRepositorySnapshots {
+    manifests: Vec<fileferry_core::SnapshotManifest>,
+}
+
+fn load_repository_snapshots(
+    config: &ResolvedConfig,
+) -> Result<LoadedRepositorySnapshots, CliError> {
+    let repository = local_repository(config)?;
+    let passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+    let manifests = runtime.block_on(
+        pipeline.read_committed_snapshot_manifests(&repository.store, &opened.master_key),
+    )?;
+
+    Ok(LoadedRepositorySnapshots { manifests })
+}
+
+fn local_repository(config: &ResolvedConfig) -> Result<LocalRepository, RepositoryError> {
+    let url = config
+        .repository_url
+        .as_deref()
+        .ok_or(RepositoryError::MissingRepository)?;
+    let path = local_repository_path(url)?;
+
+    Ok(LocalRepository {
+        url: url.to_owned(),
+        backend: CliBackendKind::Local,
+        store: LocalStore::new(path),
+    })
+}
+
+fn local_repository_path(value: &str) -> Result<PathBuf, RepositoryError> {
+    if value.starts_with("s3://") {
+        return Err(RepositoryError::UnsupportedRepository {
+            value: Redacted::new(value),
+        });
+    }
+
+    if let Some(path) = value.strip_prefix("file://") {
+        if path.starts_with('/') {
+            return Ok(PathBuf::from(path));
+        }
+        return Err(RepositoryError::InvalidFileRepositoryUrl {
+            value: Redacted::new(value),
+        });
+    }
+
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        env::current_dir()
+            .map(|current_dir| current_dir.join(path))
+            .map_err(|source| RepositoryError::Runtime { source })
+    }
+}
+
+fn repository_passphrase() -> Result<SecretString, RepositoryError> {
+    if let Ok(value) = env::var("FILEFERRY_PASSWORD") {
+        return Ok(SecretString::from(value));
+    }
+
+    if let Some(path) = env::var_os("FILEFERRY_PASSWORD_FILE").map(PathBuf::from) {
+        let content =
+            fs::read_to_string(&path).map_err(|source| RepositoryError::PasswordFileRead {
+                path: Redacted::new(path.display().to_string()),
+                source,
+            })?;
+        return Ok(SecretString::from(
+            content.trim_end_matches(['\r', '\n']).to_owned(),
+        ));
+    }
+
+    Err(RepositoryError::MissingPassword)
+}
+
+fn tokio_runtime() -> Result<tokio::runtime::Runtime, RepositoryError> {
+    tokio::runtime::Runtime::new().map_err(|source| RepositoryError::Runtime { source })
+}
+
+fn snapshot_selection(
+    snapshot: Option<String>,
+    tag: Option<String>,
+    latest: bool,
+) -> SnapshotSelection {
+    match (snapshot, tag, latest) {
+        (Some(snapshot), None, false) => SnapshotSelection::Id(snapshot),
+        (None, Some(tag), false) => SnapshotSelection::Tag(tag),
+        _ => SnapshotSelection::Latest,
+    }
+}
+
+fn emit_command<T>(
+    mode: OutputMode,
+    command: &'static str,
+    data: T,
+    human: impl FnOnce(&T) -> String,
+) -> Result<Output, CliError>
+where
+    T: Serialize,
+{
+    let stdout = match mode {
+        OutputMode::Human => human(&data),
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command,
+                status: CommandStatus::Success,
+                data,
+            };
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<T> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command,
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let completed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandCompleted,
+                command,
+                status: CommandStatus::Success,
+                data: Some(data),
+            };
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&started)?,
+                serde_json::to_string(&completed)?
+            )
+        }
+    };
+
+    Ok(Output {
+        stdout,
+        stderr: String::new(),
+    })
+}
+
+impl CliSnapshotEntry {
+    fn from_snapshot_entry(entry: &SnapshotEntry) -> Self {
+        Self {
+            path: display_snapshot_path(&entry.relative_path),
+            kind: entry.kind.clone(),
+            size_bytes: entry.size_bytes,
+            modified: timestamp_value(&entry.modified),
+            metadata_status: entry.metadata_status,
+        }
+    }
+}
+
+fn timestamp_value(value: &MetadataValue<fileferry_platform::Timestamp>) -> CliTimestampValue {
+    match value {
+        MetadataValue::Captured(timestamp) => CliTimestampValue {
+            status: CliTimestampStatus::Captured,
+            seconds: Some(timestamp.seconds),
+            nanoseconds: Some(timestamp.nanoseconds),
+            denial_reason: None,
+        },
+        MetadataValue::Unsupported => CliTimestampValue {
+            status: CliTimestampStatus::Unsupported,
+            seconds: None,
+            nanoseconds: None,
+            denial_reason: None,
+        },
+        MetadataValue::Denied(reason) => CliTimestampValue {
+            status: CliTimestampStatus::Denied,
+            seconds: None,
+            nanoseconds: None,
+            denial_reason: Some(reason.clone()),
+        },
+    }
+}
+
+fn display_snapshot_path(path: &Path) -> String {
+    if path.as_os_str().is_empty() {
+        ".".to_owned()
+    } else {
+        path.display().to_string()
+    }
+}
+
+fn display_entry_kind(kind: &EntryKind) -> &'static str {
+    match kind {
+        EntryKind::RegularFile => "file",
+        EntryKind::Directory => "dir",
+        EntryKind::Symlink => "symlink",
+        EntryKind::Other => "other",
+    }
 }
 
 fn version(mode: OutputMode) -> Result<Output, CliError> {

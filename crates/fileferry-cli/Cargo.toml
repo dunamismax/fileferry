@@ -13,9 +13,15 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 clap_complete.workspace = true
+fileferry-core = { path = "../fileferry-core" }
+fileferry-crypto = { path = "../fileferry-crypto" }
+fileferry-platform = { path = "../fileferry-platform" }
+fileferry-storage = { path = "../fileferry-storage" }
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml.workspace = true
 tracing.workspace = true
 

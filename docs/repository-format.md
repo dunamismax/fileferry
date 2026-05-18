@@ -44,6 +44,21 @@ plaintext metadata, tags, hostnames, usernames, retention policy details, index
 contents, chunk sizes tied to files, or object counts that are not already
 visible from object storage listing.
 
+Current implementation status:
+
+- `ferry init` writes a plaintext `bootstrap` JSON object for local
+  filesystem repositories.
+- The bootstrap object contains `magic`, `format_version`, a random
+  32-byte repository id encoded as lowercase hex, key-slot KDF parameters,
+  key-slot salt, key-slot AEAD nonce, encrypted master-key bytes, and an empty
+  feature list.
+- The key-slot fields are plaintext only to the extent required for
+  passphrase unlock; the repository master key remains encrypted and
+  authenticated.
+- `ferry snapshots` and `ferry ls` read the bootstrap, unlock the master key
+  from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then authenticate
+  encrypted manifests before returning snapshot metadata.
+
 ## Object Name Layout
 
 Object names are storage paths, not trusted metadata. They are opaque placement

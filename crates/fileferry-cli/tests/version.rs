@@ -7,6 +7,8 @@ fn fileferry() -> Command {
         "FILEFERRY_CONFIG",
         "FILEFERRY_PROFILE",
         "FILEFERRY_REPOSITORY",
+        "FILEFERRY_PASSWORD",
+        "FILEFERRY_PASSWORD_FILE",
         "FILEFERRY_LOG",
     ] {
         command.env_remove(variable);

@@ -4,13 +4,15 @@ use fastcdc::v2020::{
     AVERAGE_MAX, AVERAGE_MIN, FastCDC, MAXIMUM_MAX, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN,
 };
 use fileferry_crypto::{
-    AeadAlgorithm, CryptoError, EncryptedObject, KeyPurpose, MasterKey, ObjectContext, ObjectKind,
-    decrypt_object, encrypt_object, keyed_content_id,
+    AeadAlgorithm, CryptoError, EncryptedObject, KdfAlgorithm, KdfParams, KeyPurpose, KeySlot,
+    MasterKey, ObjectContext, ObjectKind, create_master_key, decrypt_object, encrypt_object,
+    keyed_content_id, random_bytes, unlock_master_key,
 };
 use fileferry_platform::{
     EntryKind, EntryMetadata, MetadataValue, PlatformError, Timestamp, capture_metadata,
 };
 use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, StorageError};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -134,6 +136,21 @@ pub enum CoreError {
     InvalidCommitMarker {
         key: ObjectKey,
         reason: &'static str,
+    },
+
+    #[error("repository bootstrap could not be decoded")]
+    RepositoryBootstrapDecode {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("repository bootstrap is invalid: {reason}")]
+    InvalidRepositoryBootstrap { reason: &'static str },
+
+    #[error("repository could not be unlocked")]
+    RepositoryUnlock {
+        #[source]
+        source: CryptoError,
     },
 
     #[error("snapshot selection {selection} did not match any loaded snapshot")]
@@ -405,6 +422,247 @@ impl ContentChunker {
 }
 
 pub const DEFAULT_ZSTD_COMPRESSION_LEVEL: i32 = 3;
+pub const REPOSITORY_MAGIC: &str = "fileferry";
+pub const REPOSITORY_FORMAT_VERSION_V0: u16 = fileferry_crypto::FORMAT_VERSION_V0;
+const REPOSITORY_ID_BYTES: usize = 32;
+
+#[derive(Debug)]
+pub struct OpenedRepository {
+    pub repository_id: String,
+    pub master_key: MasterKey,
+}
+
+#[derive(Debug)]
+pub struct RepositoryInitResult {
+    pub repository: OpenedRepository,
+    pub format_version: u16,
+    pub key_slots: usize,
+    pub created: bool,
+}
+
+pub async fn create_repository(
+    store: &dyn ObjectStore,
+    passphrase: &SecretString,
+    kdf: KdfParams,
+) -> CoreResult<RepositoryInitResult> {
+    if store
+        .exists(&bootstrap_object_key()?)
+        .await
+        .map_err(|source| CoreError::Storage { source })?
+    {
+        let opened = open_repository(store, passphrase).await?;
+        return Ok(RepositoryInitResult {
+            repository: opened,
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            key_slots: 1,
+            created: false,
+        });
+    }
+
+    let repository_id = hex_bytes(&random_bytes::<REPOSITORY_ID_BYTES>());
+    let (master_key, key_slot) =
+        create_master_key(passphrase, kdf).map_err(|source| CoreError::Encryption { source })?;
+    let bootstrap = RepositoryBootstrap {
+        magic: REPOSITORY_MAGIC.to_owned(),
+        format_version: REPOSITORY_FORMAT_VERSION_V0,
+        repository_id: repository_id.clone(),
+        key_slots: vec![StoredKeySlot::from_key_slot(&key_slot)],
+        features: Vec::new(),
+    };
+    let bytes = serde_json::to_vec_pretty(&bootstrap)
+        .map_err(|source| CoreError::Serialization { source })?;
+    let key = bootstrap_object_key()?;
+    let created = match store
+        .put_if_absent(&key, &bytes)
+        .await
+        .map_err(|source| CoreError::Storage { source })?
+    {
+        PutStatus::Created => true,
+        PutStatus::AlreadyPresent => false,
+    };
+
+    if created {
+        Ok(RepositoryInitResult {
+            repository: OpenedRepository {
+                repository_id,
+                master_key,
+            },
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            key_slots: 1,
+            created: true,
+        })
+    } else {
+        let opened = open_repository(store, passphrase).await?;
+        Ok(RepositoryInitResult {
+            repository: opened,
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            key_slots: 1,
+            created: false,
+        })
+    }
+}
+
+pub async fn open_repository(
+    store: &dyn ObjectStore,
+    passphrase: &SecretString,
+) -> CoreResult<OpenedRepository> {
+    let key = bootstrap_object_key()?;
+    let bytes = store
+        .get(&key)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    let bootstrap: RepositoryBootstrap = serde_json::from_slice(&bytes)
+        .map_err(|source| CoreError::RepositoryBootstrapDecode { source })?;
+    bootstrap.validate()?;
+
+    for stored_slot in &bootstrap.key_slots {
+        let key_slot = stored_slot.to_key_slot()?;
+        match unlock_master_key(passphrase, &key_slot) {
+            Ok(master_key) => {
+                return Ok(OpenedRepository {
+                    repository_id: bootstrap.repository_id,
+                    master_key,
+                });
+            }
+            Err(CryptoError::Decryption) => {}
+            Err(source) => return Err(CoreError::RepositoryUnlock { source }),
+        }
+    }
+
+    Err(CoreError::RepositoryUnlock {
+        source: CryptoError::Decryption,
+    })
+}
+
+fn bootstrap_object_key() -> CoreResult<ObjectKey> {
+    ObjectKey::new("bootstrap").map_err(|source| CoreError::ObjectKey { source })
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RepositoryBootstrap {
+    magic: String,
+    format_version: u16,
+    repository_id: String,
+    key_slots: Vec<StoredKeySlot>,
+    features: Vec<String>,
+}
+
+impl RepositoryBootstrap {
+    fn validate(&self) -> CoreResult<()> {
+        if self.magic != REPOSITORY_MAGIC {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "repository magic is not recognized",
+            });
+        }
+        if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "repository format version is not supported",
+            });
+        }
+        if self.repository_id.len() != REPOSITORY_ID_BYTES * 2
+            || !self
+                .repository_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "repository id is invalid",
+            });
+        }
+        if self.key_slots.is_empty() {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "repository has no key slots",
+            });
+        }
+        if !self.features.is_empty() {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "repository uses unsupported features",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredKeySlot {
+    kdf: StoredKdfParams,
+    salt: Vec<u8>,
+    nonce: Vec<u8>,
+    wrapped_master_key: Vec<u8>,
+}
+
+impl StoredKeySlot {
+    fn from_key_slot(key_slot: &KeySlot) -> Self {
+        Self {
+            kdf: StoredKdfParams::from_kdf_params(key_slot.kdf),
+            salt: key_slot.salt.to_vec(),
+            nonce: key_slot.nonce.to_vec(),
+            wrapped_master_key: key_slot.wrapped_master_key.clone(),
+        }
+    }
+
+    fn to_key_slot(&self) -> CoreResult<KeySlot> {
+        let salt = fixed_bytes::<{ fileferry_crypto::KDF_SALT_LEN }>(
+            &self.salt,
+            "key slot salt has an invalid length",
+        )?;
+        let nonce = fixed_bytes::<{ fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN }>(
+            &self.nonce,
+            "key slot nonce has an invalid length",
+        )?;
+
+        Ok(KeySlot {
+            kdf: self.kdf.to_kdf_params()?,
+            salt,
+            nonce,
+            wrapped_master_key: self.wrapped_master_key.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct StoredKdfParams {
+    algorithm: StoredKdfAlgorithm,
+    memory_cost_kib: u32,
+    time_cost: u32,
+    parallelism: u32,
+}
+
+impl StoredKdfParams {
+    fn from_kdf_params(params: KdfParams) -> Self {
+        Self {
+            algorithm: match params.algorithm {
+                KdfAlgorithm::Argon2idV19 => StoredKdfAlgorithm::Argon2idV19,
+            },
+            memory_cost_kib: params.memory_cost_kib,
+            time_cost: params.time_cost,
+            parallelism: params.parallelism,
+        }
+    }
+
+    fn to_kdf_params(self) -> CoreResult<KdfParams> {
+        Ok(KdfParams {
+            algorithm: match self.algorithm {
+                StoredKdfAlgorithm::Argon2idV19 => KdfAlgorithm::Argon2idV19,
+            },
+            memory_cost_kib: self.memory_cost_kib,
+            time_cost: self.time_cost,
+            parallelism: self.parallelism,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredKdfAlgorithm {
+    Argon2idV19,
+}
+
+fn fixed_bytes<const N: usize>(bytes: &[u8], reason: &'static str) -> CoreResult<[u8; N]> {
+    bytes
+        .try_into()
+        .map_err(|_| CoreError::InvalidRepositoryBootstrap { reason })
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct BackupPipelineConfig {
@@ -1807,6 +2065,95 @@ mod tests {
             repository_id: "repo-test-id".to_owned(),
         })
         .expect("pipeline")
+    }
+
+    #[tokio::test]
+    async fn repository_bootstrap_creates_and_unlocks_master_key() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("correct horse battery staple");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+
+        assert!(created.created);
+        assert_eq!(created.format_version, REPOSITORY_FORMAT_VERSION_V0);
+        assert_eq!(created.key_slots, 1);
+        assert_eq!(
+            created.repository.repository_id.len(),
+            REPOSITORY_ID_BYTES * 2
+        );
+
+        let opened = open_repository(&store, &passphrase)
+            .await
+            .expect("open repository");
+        assert_eq!(opened.repository_id, created.repository.repository_id);
+
+        let reopened = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("reopen existing repository");
+        assert!(!reopened.created);
+        assert_eq!(reopened.repository.repository_id, opened.repository_id);
+    }
+
+    #[tokio::test]
+    async fn repository_bootstrap_fails_closed_for_wrong_passphrase() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        create_repository(
+            &store,
+            &SecretString::from("correct"),
+            KdfParams::for_tests(),
+        )
+        .await
+        .expect("create repository");
+
+        let error = open_repository(&store, &SecretString::from("wrong"))
+            .await
+            .expect_err("wrong passphrase fails");
+        assert!(matches!(error, CoreError::RepositoryUnlock { .. }));
+    }
+
+    #[tokio::test]
+    async fn initialized_repository_supports_committed_snapshot_discovery() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sample.txt"), b"sample").expect("write sample");
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("correct");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+        let written = pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: vec!["drill".to_owned()],
+                },
+            )
+            .await
+            .expect("write snapshot");
+        let opened = open_repository(&store, &passphrase)
+            .await
+            .expect("open repository");
+        let discovered = pipeline
+            .read_committed_snapshot_manifests(&store, &opened.master_key)
+            .await
+            .expect("discover snapshots");
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].snapshot_id, written.snapshot_id);
+        assert_eq!(snapshot_summaries(&discovered)[0].tags, vec!["drill"]);
     }
 
     fn relative_entries(entries: &[SourceEntry]) -> Vec<String> {

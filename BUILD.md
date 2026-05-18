@@ -23,6 +23,12 @@ Last reviewed: 2026-05-18.
   GitHub Actions CI.
 - `ferry version` supports human, JSON, and JSONL output.
 - `ferry completion <SHELL>` generates shell completion scripts.
+- `ferry init` creates encrypted local filesystem repositories from
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`; S3-compatible repository
+  bootstrap is still not wired into the CLI.
+- `ferry snapshots` and `ferry ls` open initialized local repositories,
+  authenticate committed encrypted manifests, and expose tested human, JSON,
+  and JSONL-safe output paths.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -339,7 +345,7 @@ Minimum v1 bar:
 - [ ] `ferry init` creates encrypted local and S3-compatible repositories.
 - [ ] `ferry backup` creates encrypted, compressed, deduplicated snapshots.
 - [ ] `ferry restore` restores by snapshot id, tag, path, and `latest`.
-- [ ] `ferry snapshots` and `ferry ls` have human, JSON, and JSONL-safe
+- [x] `ferry snapshots` and `ferry ls` have human, JSON, and JSONL-safe
       behavior where appropriate.
 - [ ] `ferry check` verifies metadata and configurable data subsets.
 - [ ] `ferry forget` and `ferry prune` implement retention and two-phase
@@ -451,8 +457,8 @@ where documented verification passes on a clean checkout.
 
 ### Phase 7 - Listing, Search, And Diff
 
-- [ ] Implement `snapshots`.
-- [ ] Implement `ls`.
+- [x] Implement `snapshots`.
+- [x] Implement `ls`.
 - [ ] Implement `find`.
 - [ ] Implement `diff`.
 - [ ] Keep output stable and machine-readable.
@@ -582,6 +588,17 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Wired the first end-user repository commands into
+  `fileferry-cli`: `ferry init` now creates an encrypted local filesystem
+  repository bootstrap from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
+  and `ferry snapshots` / `ferry ls` open initialized local repositories,
+  authenticate committed encrypted manifests, and emit human, JSON, and
+  JSONL-safe output. Added core bootstrap/open tests and CLI integration tests
+  that initialize a real local repository, write a committed snapshot through
+  the core pipeline, then list snapshots and entries through the `ferry`
+  binary. S3-compatible repository bootstrap remains unchecked. Verified with
+  `cargo test -p fileferry-core -p fileferry-cli`, `just fmt`, `just check`,
+  `just test`, `just build`, and `git diff --check`.
 - 2026-05-18 - Added committed snapshot discovery groundwork in
   `fileferry-core`: snapshot writes now publish a commit marker after chunk,
   index, and encrypted manifest objects; committed manifests can be discovered

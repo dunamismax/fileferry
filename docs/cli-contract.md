@@ -32,7 +32,8 @@ These exit code families are stable for the current CLI foundation:
 10  partial success; inspect JSON output for item-level failures
 ```
 
-Only `0`, `1`, and `2` are emitted by the current implementation.
+The current implementation can emit these families for the implemented command
+surface: `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, and `9`.
 
 ## Global Precedence
 
@@ -48,6 +49,8 @@ Implemented environment variables:
 FILEFERRY_CONFIG
 FILEFERRY_PROFILE
 FILEFERRY_REPOSITORY
+FILEFERRY_PASSWORD
+FILEFERRY_PASSWORD_FILE
 FILEFERRY_LOG
 ```
 
@@ -211,9 +214,10 @@ SnapshotEntry
   metadata_status: "complete" | "partial" | "unsupported"
 
 TimestampValue
-  seconds: integer
-  nanoseconds: integer
   status: "captured" | "unsupported" | "denied"
+  seconds: integer, present only when status is "captured"
+  nanoseconds: integer, present only when status is "captured"
+  denial_reason: string, present only when status is "denied"
 
 RestoreMetadataWarning
   path: snapshot-relative string
@@ -334,6 +338,30 @@ key export-recovery: load_bootstrap, create_export, complete
 Implemented command events:
 
 ```text
+init command_started
+  status: "started"
+  data: null
+
+init command_completed
+  status: "success"
+  data: Init data schema above
+
+snapshots command_started
+  status: "started"
+  data: null
+
+snapshots command_completed
+  status: "success"
+  data: Snapshots data schema above
+
+ls command_started
+  status: "started"
+  data: null
+
+ls command_completed
+  status: "success"
+  data: Ls data schema above
+
 version command_started
   status: "started"
   data: null
@@ -348,6 +376,19 @@ Future long-running commands must keep human progress off stdout in both JSON
 and JSONL modes. Machine progress belongs in JSONL `progress` events.
 
 ## Current Commands
+
+`ferry init` creates an encrypted local filesystem repository when `--repo` or
+`FILEFERRY_REPOSITORY` points at a local path or `file:///absolute/path`.
+It requires `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`. S3-compatible
+repository bootstrap is not wired into the CLI yet.
+
+`ferry snapshots` opens an initialized local repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
+snapshot manifests, and emits human, JSON, or JSONL-safe snapshot summaries.
+
+`ferry ls` opens an initialized local repository, selects `latest` by default
+or accepts `--snapshot <ID>` / `--tag <TAG>`, and lists immediate entries at a
+snapshot-relative path. JSON output uses `"."` for the snapshot root path.
 
 `ferry version` supports human, JSON, and JSONL output.
 

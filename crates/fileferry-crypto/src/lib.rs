@@ -220,6 +220,12 @@ pub fn keyed_content_id(
     Ok(*blake3::keyed_hash(key.expose(), bytes).as_bytes())
 }
 
+pub fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0_u8; N];
+    OsRng.fill_bytes(&mut bytes);
+    bytes
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeySlot {
     pub kdf: KdfParams,
