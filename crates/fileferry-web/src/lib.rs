@@ -61,7 +61,7 @@ fn Homepage() -> impl IntoView {
                         <a href="#status">"Status"</a>
                         <a href="#operators">"Operators"</a>
                         <a href="#roadmap">"Roadmap"</a>
-                        <a href="https://github.com/dunamismax/sealport">"GitHub"</a>
+                        <a href="https://github.com/dunamismax/fileferry">"GitHub"</a>
                     </nav>
                 </header>
                 <main id="main">
@@ -93,7 +93,7 @@ fn Homepage() -> impl IntoView {
                                 "FileFerry is an all-Rust backup command being built for owned, inspectable, scriptable backups with client-side encryption and boring restore paths."
                             </p>
                             <div class="hero-actions" aria-label="Primary links">
-                                <a class="button primary" href="https://github.com/dunamismax/sealport">"View source"</a>
+                                <a class="button primary" href="https://github.com/dunamismax/fileferry">"View source"</a>
                                 <a class="button secondary" href="#status">"Read project status"</a>
                             </div>
                             <dl class="hero-facts" aria-label="Product facts">
@@ -265,7 +265,7 @@ fn Homepage() -> impl IntoView {
                 </main>
                 <footer>
                     <span>"FileFerry"</span>
-                    <a href="https://github.com/dunamismax/sealport">"GitHub"</a>
+                    <a href="https://github.com/dunamismax/fileferry">"GitHub"</a>
                     <a href="https://fileferry.app/">"fileferry.app"</a>
                 </footer>
             </body>

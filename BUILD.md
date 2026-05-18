@@ -17,7 +17,7 @@ Last reviewed: 2026-05-18.
 
 - Repository exists with MIT license.
 - `origin` fetches from and pushes to
-  `https://github.com/dunamismax/sealport.git`.
+  `https://github.com/dunamismax/fileferry.git`.
 - Rust workspace exists with the target crate boundaries, `fileferry-cli`
   binary, `fileferry-web` homepage binary, `just` verification recipes, and
   GitHub Actions CI.

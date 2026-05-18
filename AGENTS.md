@@ -274,7 +274,7 @@ Portable correctness beats platform-specific cleverness in default builds.
 Current observed remote on 2026-05-17:
 
 ```text
-origin https://github.com/dunamismax/sealport.git
+origin https://github.com/dunamismax/fileferry.git
 ```
 
 - Before substantial code changes, inspect branch and status.
