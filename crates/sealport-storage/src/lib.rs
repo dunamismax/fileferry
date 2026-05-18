@@ -126,10 +126,10 @@ impl StorageCapabilities {
         }
     }
 
-    pub fn s3_compatible() -> Self {
+    pub fn s3_compatible(conditional_create: bool) -> Self {
         Self {
             backend: BackendKind::S3Compatible,
-            conditional_create: true,
+            conditional_create,
             atomic_visibility: true,
             strong_read_after_write: false,
             delete: DeleteCapability::Idempotent,
@@ -352,6 +352,7 @@ pub struct S3StoreConfig {
     access_key_id: SecretString,
     secret_access_key: SecretString,
     root_prefix: ObjectKeyPrefix,
+    conditional_create: bool,
 }
 
 impl fmt::Debug for S3StoreConfig {
@@ -364,6 +365,7 @@ impl fmt::Debug for S3StoreConfig {
             .field("access_key_id", &"[redacted]")
             .field("secret_access_key", &"[redacted]")
             .field("root_prefix", &self.root_prefix)
+            .field("conditional_create", &self.conditional_create)
             .finish()
     }
 }
@@ -392,6 +394,7 @@ impl S3StoreConfig {
             access_key_id: access_key_id.into(),
             secret_access_key: secret_access_key.into(),
             root_prefix,
+            conditional_create: true,
         })
     }
 
@@ -410,12 +413,18 @@ impl S3StoreConfig {
     pub fn root_prefix(&self) -> &ObjectKeyPrefix {
         &self.root_prefix
     }
+
+    pub fn with_conditional_create(mut self, conditional_create: bool) -> Self {
+        self.conditional_create = conditional_create;
+        self
+    }
 }
 
 #[derive(Clone)]
 pub struct S3Store {
     inner: Arc<dyn ObjectStoreBackend>,
     root_prefix: ObjectKeyPrefix,
+    conditional_create: bool,
 }
 
 impl fmt::Debug for S3Store {
@@ -447,6 +456,7 @@ impl S3Store {
         Ok(Self {
             inner: Arc::new(store),
             root_prefix: config.root_prefix,
+            conditional_create: config.conditional_create,
         })
     }
 
@@ -486,7 +496,7 @@ impl S3Store {
 
 impl ObjectStore for S3Store {
     fn capabilities(&self) -> StorageCapabilities {
-        StorageCapabilities::s3_compatible()
+        StorageCapabilities::s3_compatible(self.conditional_create)
     }
 
     fn put_if_absent<'a>(
@@ -496,6 +506,22 @@ impl ObjectStore for S3Store {
     ) -> StorageFuture<'a, PutStatus> {
         Box::pin(async move {
             let path = self.remote_path_for_key(key);
+            if !self.conditional_create {
+                match self.get(key).await {
+                    Ok(existing) if existing == bytes => return Ok(PutStatus::AlreadyPresent),
+                    Ok(_) => return Err(StorageError::ObjectAlreadyExists { key: key.clone() }),
+                    Err(StorageError::ObjectNotFound { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+
+                return self
+                    .inner
+                    .put_opts(&path, bytes.to_vec().into(), PutMode::Overwrite.into())
+                    .await
+                    .map(|_| PutStatus::Created)
+                    .map_err(|source| map_s3_object_error("put object", key, source));
+            }
+
             match self
                 .inner
                 .put_opts(&path, bytes.to_vec().into(), PutMode::Create.into())
@@ -967,7 +993,10 @@ mod tests {
         let first = key("chunks/aa/blob");
         let second = key("indexes/current");
 
-        assert_eq!(store.capabilities(), StorageCapabilities::s3_compatible());
+        assert_eq!(
+            store.capabilities(),
+            StorageCapabilities::s3_compatible(false)
+        );
         assert!(!store.exists(&first).await.expect("exists before put"));
         assert_eq!(
             store
@@ -1028,7 +1057,8 @@ mod tests {
                 required_env("SEALPORT_S3_SECRET_ACCESS_KEY"),
                 root_prefix,
             )
-            .expect("s3 config"),
+            .expect("s3 config")
+            .with_conditional_create(false),
         )
     }
 

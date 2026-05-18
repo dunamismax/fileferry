@@ -102,9 +102,11 @@ Prefix-scoping is mandatory for shared development buckets so tests never need
 to list or delete the whole bucket.
 
 `put_if_absent` uses S3 conditional create semantics through
-`PutMode::Create`. When the object already exists, the backend reads the
-existing bytes and returns `AlreadyPresent` only if they match; different bytes
-return `ObjectAlreadyExists`.
+`PutMode::Create` when the provider supports `If-None-Match` on `PutObject`.
+When conditional create is disabled for a provider, the backend falls back to a
+head/read-before-write flow and reports `conditional_create = false` in
+capabilities. That fallback preserves idempotent same-byte retries, but it is
+not race-safe for concurrent writers.
 
 S3 credentials are accepted as secret values and redacted from debug output.
 They must come from local environment, secret stores, or future config-secret
@@ -115,7 +117,7 @@ Current S3 capability assumptions:
 
 - HTTPS endpoint required.
 - Path-style requests are used.
-- Conditional create is required.
+- Conditional create is provider-dependent and reported in capabilities.
 - Deletes are treated as idempotent.
 - Prefix listing is available.
 - Object tags are disabled because some S3-compatible providers reject tagging
@@ -138,7 +140,9 @@ cargo test -p sealport-storage s3_store_round_trip_when_integration_env_is_enabl
 
 For Backblaze B2, the S3 endpoint has the form
 `https://s3.<region>.backblazeb2.com`, and the region is the second component
-of the endpoint, such as `us-west-001`.
+of the endpoint, such as `us-west-001`. The current Backblaze test disables
+conditional create because Backblaze returns `501 NotImplemented` for the
+`If-None-Match` create-only request header used by `object_store`.
 
 ## Not Implemented Yet
 

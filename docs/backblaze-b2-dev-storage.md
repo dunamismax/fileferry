@@ -64,6 +64,11 @@ Backblaze S3-compatible authentication uses:
 - Signature v4.
 - HTTPS endpoints.
 
+The current live test disables S3 conditional create for Backblaze B2 because
+Backblaze rejects the `If-None-Match` create-only `PutObject` header with
+`501 NotImplemented`. SealPort reports that weaker capability instead of
+pretending the backend has race-safe conditional writes.
+
 Bucket-restricted application keys may need `listAllBucketNames` for some SDKs
 or integrations. SealPort's live test should still be scoped by
 `SEALPORT_S3_TEST_PREFIX` and must never operate on unrelated bucket objects.
