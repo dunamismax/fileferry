@@ -263,7 +263,11 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::ObjectDecode { .. }
         | CoreError::ObjectAuthentication { .. }
         | CoreError::MetadataDecode { .. }
-        | CoreError::ChunkIdentityMismatch { .. } => 6,
+        | CoreError::ChunkIdentityMismatch { .. }
+        | CoreError::ChunkIndexMismatch { .. }
+        | CoreError::Decompression { .. }
+        | CoreError::InvalidChunkLength { .. }
+        | CoreError::MissingChunkIndexEntry { .. } => 6,
         CoreError::Encryption { .. } => 6,
         CoreError::ObjectKey { .. }
         | CoreError::Serialization { .. }
@@ -283,12 +287,9 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::MetadataCapture { .. }
         | CoreError::FileRead { .. }
         | CoreError::Compression { .. }
-        | CoreError::Decompression { .. }
         | CoreError::RestoreDestinationWrite { .. }
         | CoreError::RestoreVerificationRead { .. } => 5,
         CoreError::InvalidChunkRange { .. }
-        | CoreError::InvalidChunkLength { .. }
-        | CoreError::MissingChunkIndexEntry { .. }
         | CoreError::RestoreVerificationMismatch { .. }
         | CoreError::RepositoryCheckMissingObject { .. }
         | CoreError::RepositoryReferencedObjectMissing { .. } => 6,
@@ -834,6 +835,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::Decompression { .. } => "chunk_decompression_failed",
         CoreError::InvalidChunkLength { .. } => "chunk_length_invalid",
         CoreError::MissingChunkIndexEntry { .. } => "chunk_index_entry_missing",
+        CoreError::ChunkIndexMismatch { .. } => "chunk_index_mismatch",
         CoreError::ChunkIdentityMismatch { .. } => "chunk_identity_mismatch",
         CoreError::Encryption { .. } => "repository_authentication_failed",
         CoreError::Serialization { .. } => "repository_metadata_serialization_failed",
@@ -936,6 +938,8 @@ fn core_failure_path(error: &CoreError) -> Option<String> {
         CoreError::SourceRootNotAbsolute { path }
         | CoreError::InvalidChunkRange { path }
         | CoreError::SnapshotPathNotFound { path, .. }
+        | CoreError::MissingChunkIndexEntry { path, .. }
+        | CoreError::ChunkIndexMismatch { path, .. }
         | CoreError::RestoreDestinationNotAbsolute { path }
         | CoreError::RestoreDestinationEscapesRoot { path }
         | CoreError::RestoreDestinationExists { path }
@@ -956,6 +960,15 @@ fn core_failure_path(error: &CoreError) -> Option<String> {
         CoreError::RestoreDestinationSymlink { path, .. } => {
             Some(redact_for_display(&path.display().to_string()))
         }
+        CoreError::Decompression {
+            path: Some(path), ..
+        }
+        | CoreError::InvalidChunkLength {
+            path: Some(path), ..
+        }
+        | CoreError::ChunkIdentityMismatch {
+            path: Some(path), ..
+        } => Some(redact_for_display(&path.display().to_string())),
         _ => None,
     }
 }
@@ -976,6 +989,20 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         | CoreError::InvalidCommitMarker { key, .. }
         | CoreError::RepositoryCheckMissingObject { key }
         | CoreError::RepositoryReferencedObjectMissing { key } => Some(key.as_str().to_owned()),
+        CoreError::MissingChunkIndexEntry { object_key, .. }
+        | CoreError::ChunkIndexMismatch { object_key, .. } => Some(object_key.clone()),
+        CoreError::Decompression {
+            object_key: Some(object_key),
+            ..
+        }
+        | CoreError::InvalidChunkLength {
+            object_key: Some(object_key),
+            ..
+        }
+        | CoreError::ChunkIdentityMismatch {
+            object_key: Some(object_key),
+            ..
+        } => Some(object_key.clone()),
         CoreError::Storage {
             source:
                 StorageError::ObjectAlreadyExists { key }
@@ -983,6 +1010,26 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
                 | StorageError::ObjectIo { key, .. }
                 | StorageError::BackendObject { key, .. },
         } => Some(key.as_str().to_owned()),
+        _ => None,
+    }
+}
+
+fn core_failure_snapshot_id(error: &CoreError) -> Option<String> {
+    match error {
+        CoreError::MissingChunkIndexEntry { snapshot_id, .. }
+        | CoreError::ChunkIndexMismatch { snapshot_id, .. } => Some(snapshot_id.clone()),
+        CoreError::Decompression {
+            snapshot_id: Some(snapshot_id),
+            ..
+        }
+        | CoreError::InvalidChunkLength {
+            snapshot_id: Some(snapshot_id),
+            ..
+        }
+        | CoreError::ChunkIdentityMismatch {
+            snapshot_id: Some(snapshot_id),
+            ..
+        } => Some(snapshot_id.clone()),
         _ => None,
     }
 }
@@ -998,6 +1045,7 @@ fn check_finding_for_core_error(error: &CoreError) -> Option<fileferry_core::Che
         | CoreError::CommitDecode { .. }
         | CoreError::InvalidCommitMarker { .. }
         | CoreError::MissingChunkIndexEntry { .. }
+        | CoreError::ChunkIndexMismatch { .. }
         | CoreError::InvalidChunkLength { .. }
         | CoreError::Decompression { .. }
         | CoreError::ChunkIdentityMismatch { .. }
@@ -1005,8 +1053,8 @@ fn check_finding_for_core_error(error: &CoreError) -> Option<fileferry_core::Che
             code: core_failure_code(error).to_owned(),
             severity: fileferry_core::CheckFindingSeverity::Error,
             object_key: core_failure_object_key(error),
-            snapshot_id: None,
-            path: None,
+            snapshot_id: core_failure_snapshot_id(error),
+            path: core_failure_path(error).map(PathBuf::from),
             message: error.to_string(),
         }),
         _ => None,
@@ -2189,6 +2237,33 @@ mod tests {
         assert_eq!(
             lines.last().expect("completed event")["event"],
             "command_completed"
+        );
+    }
+
+    #[test]
+    fn check_failure_finding_preserves_chunk_reference_context() {
+        let error = CliError::Core(Box::new(CoreError::ChunkIndexMismatch {
+            snapshot_id: "snapshot-123".to_owned(),
+            path: PathBuf::from("docs/sample.txt"),
+            chunk_id: "chunk-123".to_owned(),
+            object_key: "objects/chunk/ab/chunk-123".to_owned(),
+            reason: "plaintext length mismatch",
+        }));
+        let output = render_error_output(OutputMode::Json, "check", &error, 6)
+            .expect("render check failure");
+        let failure: serde_json::Value =
+            serde_json::from_str(&output.stdout).expect("failure json");
+
+        assert_eq!(output.stderr, "");
+        assert_eq!(output.exit_code, 6);
+        assert_eq!(failure["data"]["code"], "chunk_index_mismatch");
+        assert_eq!(failure["data"]["path"], "docs/sample.txt");
+        assert_eq!(failure["data"]["object_key"], "objects/chunk/ab/chunk-123");
+        assert_eq!(failure["data"]["finding"]["snapshot_id"], "snapshot-123");
+        assert_eq!(failure["data"]["finding"]["path"], "docs/sample.txt");
+        assert_eq!(
+            failure["data"]["finding"]["object_key"],
+            "objects/chunk/ab/chunk-123"
         );
     }
 

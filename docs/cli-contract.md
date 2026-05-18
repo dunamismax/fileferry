@@ -500,7 +500,9 @@ modes, runtime check failures emit a machine-readable failure envelope with a
 stable `code`, `exit_code`, optional `object_key`, and, for repository
 integrity failures, a `finding` object shaped like `CheckFinding`. Encrypted
 object authentication failures retain the repository object key when the
-failing object is known.
+failing object is known. Chunk-reference integrity failures retain the
+snapshot-relative path, snapshot id, and object key when the committed manifest
+provides that context.
 Configurable subset checks are not implemented yet.
 
 `ferry snapshots` opens an initialized local repository with

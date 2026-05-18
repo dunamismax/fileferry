@@ -81,18 +81,50 @@ pub enum CoreError {
     #[error("chunk {chunk_id} could not be decompressed")]
     Decompression {
         chunk_id: String,
+        snapshot_id: Option<String>,
+        path: Option<PathBuf>,
+        object_key: Option<String>,
         #[source]
         source: io::Error,
     },
 
     #[error("chunk {chunk_id} has an invalid length")]
-    InvalidChunkLength { chunk_id: String },
+    InvalidChunkLength {
+        chunk_id: String,
+        snapshot_id: Option<String>,
+        path: Option<PathBuf>,
+        object_key: Option<String>,
+    },
 
-    #[error("chunk {chunk_id} is missing from the loaded indexes")]
-    MissingChunkIndexEntry { chunk_id: String },
+    #[error(
+        "chunk {chunk_id} referenced by {path} in snapshot {snapshot_id} is missing from the loaded indexes"
+    )]
+    MissingChunkIndexEntry {
+        snapshot_id: String,
+        path: PathBuf,
+        chunk_id: String,
+        object_key: String,
+    },
+
+    #[error(
+        "chunk {chunk_id} referenced by {path} in snapshot {snapshot_id} does not match the loaded index: {reason}"
+    )]
+    ChunkIndexMismatch {
+        snapshot_id: String,
+        path: PathBuf,
+        chunk_id: String,
+        object_key: String,
+        reason: &'static str,
+    },
 
     #[error("restored chunk identity mismatch: expected {expected}, found {actual}")]
-    ChunkIdentityMismatch { expected: String, actual: String },
+    ChunkIdentityMismatch {
+        expected: String,
+        actual: String,
+        snapshot_id: Option<String>,
+        path: Option<PathBuf>,
+        object_key: Option<String>,
+    },
 
     #[error("repository object could not be encrypted")]
     Encryption {
@@ -1197,6 +1229,7 @@ impl BackupPipeline {
             metadata_objects_checked += 1;
 
             let mut index_entries = BTreeMap::new();
+            let mut chunk_contexts = BTreeMap::new();
             for index_id in &manifest.body.index_ids {
                 let expected_index_object = object_key_for_id("objects/index", index_id)?;
                 let (index, index_bytes) = self
@@ -1217,17 +1250,25 @@ impl BackupPipeline {
                 for chunk in &entry.chunks {
                     let indexed = index_entries.get(&chunk.chunk_id).ok_or_else(|| {
                         CoreError::MissingChunkIndexEntry {
+                            snapshot_id: manifest.snapshot_id.clone(),
+                            path: entry.relative_path.clone(),
                             chunk_id: chunk.chunk_id.clone(),
+                            object_key: chunk.object_key.clone(),
                         }
                     })?;
-                    if indexed.object_key != chunk.object_key
-                        || indexed.plaintext_length != chunk.length
-                        || indexed.compression != CompressionAlgorithm::Zstd
-                    {
-                        return Err(CoreError::InvalidChunkLength {
-                            chunk_id: chunk.chunk_id.clone(),
+                    validate_indexed_chunk_reference(
+                        &manifest.snapshot_id,
+                        &entry.relative_path,
+                        chunk,
+                        indexed,
+                    )?;
+                    chunk_contexts
+                        .entry(chunk.chunk_id.clone())
+                        .or_insert_with(|| ChunkReferenceContext {
+                            snapshot_id: manifest.snapshot_id.clone(),
+                            path: entry.relative_path.clone(),
+                            object_key: chunk.object_key.clone(),
                         });
-                    }
                 }
             }
 
@@ -1235,6 +1276,7 @@ impl BackupPipeline {
                 if !checked_chunk_ids.insert(chunk_id.clone()) {
                     continue;
                 }
+                let reference_context = chunk_contexts.get(&chunk_id);
                 let object_key = ObjectKey::new(indexed.object_key.clone())
                     .map_err(|source| CoreError::ObjectKey { source })?;
                 let encrypted = store
@@ -1258,17 +1300,41 @@ impl BackupPipeline {
                 let expected_len = usize::try_from(indexed.plaintext_length).map_err(|_| {
                     CoreError::InvalidChunkLength {
                         chunk_id: chunk_id.clone(),
+                        snapshot_id: reference_context.map(|context| context.snapshot_id.clone()),
+                        path: reference_context.map(|context| context.path.clone()),
+                        object_key: Some(
+                            reference_context
+                                .map(|context| context.object_key.clone())
+                                .unwrap_or_else(|| indexed.object_key.clone()),
+                        ),
                     }
                 })?;
                 let plaintext =
                     zstd::bulk::decompress(&compressed, expected_len).map_err(|source| {
                         CoreError::Decompression {
                             chunk_id: chunk_id.clone(),
+                            snapshot_id: reference_context
+                                .map(|context| context.snapshot_id.clone()),
+                            path: reference_context.map(|context| context.path.clone()),
+                            object_key: Some(
+                                reference_context
+                                    .map(|context| context.object_key.clone())
+                                    .unwrap_or_else(|| indexed.object_key.clone()),
+                            ),
                             source,
                         }
                     })?;
                 if plaintext.len() != expected_len {
-                    return Err(CoreError::InvalidChunkLength { chunk_id });
+                    return Err(CoreError::InvalidChunkLength {
+                        chunk_id,
+                        snapshot_id: reference_context.map(|context| context.snapshot_id.clone()),
+                        path: reference_context.map(|context| context.path.clone()),
+                        object_key: Some(
+                            reference_context
+                                .map(|context| context.object_key.clone())
+                                .unwrap_or(indexed.object_key),
+                        ),
+                    });
                 }
                 let actual = hex_bytes(
                     &keyed_content_id(
@@ -1283,6 +1349,13 @@ impl BackupPipeline {
                     return Err(CoreError::ChunkIdentityMismatch {
                         expected: chunk_id,
                         actual,
+                        snapshot_id: reference_context.map(|context| context.snapshot_id.clone()),
+                        path: reference_context.map(|context| context.path.clone()),
+                        object_key: Some(
+                            reference_context
+                                .map(|context| context.object_key.clone())
+                                .unwrap_or(indexed.object_key),
+                        ),
                     });
                 }
 
@@ -1459,17 +1532,18 @@ impl BackupPipeline {
             for chunk in &entry.chunks {
                 let indexed = chunk_index.get(&chunk.chunk_id).ok_or_else(|| {
                     CoreError::MissingChunkIndexEntry {
+                        snapshot_id: manifest.snapshot_id.clone(),
+                        path: entry.relative_path.clone(),
                         chunk_id: chunk.chunk_id.clone(),
+                        object_key: chunk.object_key.clone(),
                     }
                 })?;
-                if indexed.object_key != chunk.object_key
-                    || indexed.plaintext_length != chunk.length
-                    || indexed.compression != CompressionAlgorithm::Zstd
-                {
-                    return Err(CoreError::InvalidChunkLength {
-                        chunk_id: chunk.chunk_id.clone(),
-                    });
-                }
+                validate_indexed_chunk_reference(
+                    &manifest.snapshot_id,
+                    &entry.relative_path,
+                    chunk,
+                    indexed,
+                )?;
 
                 let object_key = ObjectKey::new(chunk.object_key.clone())
                     .map_err(|source| CoreError::ObjectKey { source })?;
@@ -1493,18 +1567,27 @@ impl BackupPipeline {
                 let expected_len = usize::try_from(indexed.plaintext_length).map_err(|_| {
                     CoreError::InvalidChunkLength {
                         chunk_id: chunk.chunk_id.clone(),
+                        snapshot_id: Some(manifest.snapshot_id.clone()),
+                        path: Some(entry.relative_path.clone()),
+                        object_key: Some(indexed.object_key.clone()),
                     }
                 })?;
                 let plaintext =
                     zstd::bulk::decompress(&compressed, expected_len).map_err(|source| {
                         CoreError::Decompression {
                             chunk_id: chunk.chunk_id.clone(),
+                            snapshot_id: Some(manifest.snapshot_id.clone()),
+                            path: Some(entry.relative_path.clone()),
+                            object_key: Some(indexed.object_key.clone()),
                             source,
                         }
                     })?;
                 if plaintext.len() != expected_len {
                     return Err(CoreError::InvalidChunkLength {
                         chunk_id: chunk.chunk_id.clone(),
+                        snapshot_id: Some(manifest.snapshot_id.clone()),
+                        path: Some(entry.relative_path.clone()),
+                        object_key: Some(indexed.object_key.clone()),
                     });
                 }
                 let actual = hex_bytes(
@@ -1520,6 +1603,9 @@ impl BackupPipeline {
                     return Err(CoreError::ChunkIdentityMismatch {
                         expected: chunk.chunk_id.clone(),
                         actual,
+                        snapshot_id: Some(manifest.snapshot_id.clone()),
+                        path: Some(entry.relative_path.clone()),
+                        object_key: Some(indexed.object_key.clone()),
                     });
                 }
 
@@ -1808,6 +1894,13 @@ pub struct CheckFinding {
     pub snapshot_id: Option<String>,
     pub path: Option<PathBuf>,
     pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChunkReferenceContext {
+    snapshot_id: String,
+    path: PathBuf,
+    object_key: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -2628,6 +2721,35 @@ fn scoped_manifest_entries<'a>(
         .collect()
 }
 
+fn validate_indexed_chunk_reference(
+    snapshot_id: &str,
+    path: &Path,
+    chunk: &ManifestChunkRef,
+    indexed: &ChunkIndexEntry,
+) -> CoreResult<()> {
+    let reason = if indexed.object_key != chunk.object_key {
+        Some("object key mismatch")
+    } else if indexed.plaintext_length != chunk.length {
+        Some("plaintext length mismatch")
+    } else if indexed.compression != CompressionAlgorithm::Zstd {
+        Some("compression algorithm mismatch")
+    } else {
+        None
+    };
+
+    if let Some(reason) = reason {
+        return Err(CoreError::ChunkIndexMismatch {
+            snapshot_id: snapshot_id.to_owned(),
+            path: path.to_path_buf(),
+            chunk_id: chunk.chunk_id.clone(),
+            object_key: chunk.object_key.clone(),
+            reason,
+        });
+    }
+
+    Ok(())
+}
+
 fn ensure_restore_paths_exist(
     manifest: &SnapshotManifest,
     restore_paths: &[PathBuf],
@@ -3402,6 +3524,200 @@ mod tests {
         assert!(matches!(
             corrupted,
             CoreError::ObjectDecode { .. } | CoreError::ObjectAuthentication { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_repository_reports_manifest_index_mismatch_with_entry_context() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sample.txt"), b"sample content").expect("write sample");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let mut manifest = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect("manifest read");
+        let file_entry = manifest
+            .body
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == Path::new("sample.txt"))
+            .expect("file entry");
+        let referenced_chunk = file_entry.chunks[0].clone();
+
+        let repository_context = pipeline.config().repository_id.as_bytes();
+        let index_key = master_key
+            .derive_subkey(KeyPurpose::Index, repository_context)
+            .expect("index key");
+        let empty_index_id = content_id_for_metadata(
+            &master_key,
+            KeyPurpose::Index,
+            repository_context,
+            &Vec::<ChunkIndexEntry>::new(),
+        )
+        .expect("empty index id");
+        let empty_index = ChunkIndex {
+            schema_version: 0,
+            index_id: empty_index_id.clone(),
+            chunks: Vec::new(),
+        };
+        let empty_index_object =
+            object_key_for_id("objects/index", &empty_index_id).expect("empty index object key");
+        let empty_index_bytes = encrypt_repository_object(
+            &index_key,
+            ObjectKind::Index,
+            &empty_index_object,
+            &serde_json::to_vec(&empty_index).expect("empty index json"),
+        )
+        .expect("encrypted empty index");
+        store
+            .overwrite_for_tests(empty_index_object, empty_index_bytes)
+            .await;
+
+        manifest.body.index_ids = vec![empty_index_id];
+        let new_snapshot_id = content_id_for_metadata(
+            &master_key,
+            KeyPurpose::SnapshotMetadata,
+            repository_context,
+            &manifest.body,
+        )
+        .expect("new snapshot id");
+        manifest.snapshot_id = new_snapshot_id.clone();
+        let manifest_object =
+            object_key_for_id("objects/manifest", &new_snapshot_id).expect("manifest object key");
+        let manifest_key = master_key
+            .derive_subkey(KeyPurpose::SnapshotMetadata, repository_context)
+            .expect("manifest key");
+        let manifest_bytes = encrypt_repository_object(
+            &manifest_key,
+            ObjectKind::SnapshotManifest,
+            &manifest_object,
+            &serde_json::to_vec(&manifest).expect("manifest json"),
+        )
+        .expect("encrypted manifest");
+        store
+            .overwrite_for_tests(manifest_object.clone(), manifest_bytes)
+            .await;
+
+        store
+            .delete(&result.commit_object)
+            .await
+            .expect("delete old commit");
+        let commit_object = object_key_for_commit(&new_snapshot_id).expect("new commit object key");
+        let commit = SnapshotCommit {
+            schema_version: 0,
+            snapshot_id: new_snapshot_id.clone(),
+            manifest_object: manifest_object.as_str().to_owned(),
+        };
+        store
+            .overwrite_for_tests(
+                commit_object,
+                serde_json::to_vec(&commit).expect("commit json"),
+            )
+            .await;
+
+        let error = pipeline
+            .check_repository(&store, &master_key)
+            .await
+            .expect_err("manifest/index mismatch should fail check");
+
+        assert!(matches!(
+            error,
+            CoreError::MissingChunkIndexEntry {
+                snapshot_id,
+                path,
+                chunk_id,
+                object_key,
+            } if snapshot_id == new_snapshot_id
+                && path == Path::new("sample.txt")
+                && chunk_id == referenced_chunk.chunk_id
+                && object_key == referenced_chunk.object_key
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_repository_reports_chunk_decompression_with_entry_context() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sample.txt"), b"sample content").expect("write sample");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let manifest = pipeline
+            .read_snapshot_manifest(&store, &master_key, &result.snapshot_id)
+            .await
+            .expect("manifest read");
+        let file_entry = manifest
+            .body
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == Path::new("sample.txt"))
+            .expect("file entry");
+        let referenced_chunk = file_entry.chunks[0].clone();
+        let chunk_object = ObjectKey::new(referenced_chunk.object_key.clone())
+            .expect("referenced chunk object key");
+        let chunk_key = master_key
+            .derive_subkey(
+                KeyPurpose::ChunkData,
+                pipeline.config().repository_id.as_bytes(),
+            )
+            .expect("chunk key");
+        let invalid_compressed_chunk = encrypt_repository_object(
+            &chunk_key,
+            ObjectKind::Chunk,
+            &chunk_object,
+            b"not a zstd frame",
+        )
+        .expect("encrypted invalid compressed chunk");
+        store
+            .overwrite_for_tests(chunk_object, invalid_compressed_chunk)
+            .await;
+
+        let error = pipeline
+            .check_repository(&store, &master_key)
+            .await
+            .expect_err("invalid compressed chunk should fail check");
+
+        assert!(matches!(
+            error,
+            CoreError::Decompression {
+                chunk_id,
+                snapshot_id: Some(snapshot_id),
+                path: Some(path),
+                object_key: Some(object_key),
+                ..
+            } if chunk_id == referenced_chunk.chunk_id
+                && snapshot_id == result.snapshot_id
+                && path == Path::new("sample.txt")
+                && object_key == referenced_chunk.object_key
         ));
     }
 

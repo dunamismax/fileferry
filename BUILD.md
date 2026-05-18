@@ -55,6 +55,9 @@ Last reviewed: 2026-05-18.
   enough context. Missing objects referenced by committed repository metadata
   are reported as integrity failures instead of uninitialized-repository
   failures. Configurable subset checks are not implemented yet.
+  Manifest/index chunk-reference mismatches and chunk decompression failures
+  now retain snapshot-relative path, snapshot id, and object-key context where
+  committed metadata provides it.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -621,6 +624,19 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Tightened `ferry check` integrity diagnostics for committed
+  chunk-reference failures without adding repair or subset-check behavior.
+  `fileferry-core` now carries snapshot id, snapshot-relative path, and
+  object-key context through manifest/index chunk-reference mismatches and
+  referenced chunk decompression failures when committed metadata provides
+  that context. `fileferry-cli` maps those cases to integrity exit code `6`
+  and includes the context in JSON/JSONL failure envelopes and `CheckFinding`
+  details. Documented the narrower machine-output behavior in
+  `docs/cli-contract.md`. Verified initially with targeted `cargo test -p
+  fileferry-core ...` and `cargo test -p fileferry-cli ...` commands, then
+  with `cargo test -p fileferry-core`, `cargo test -p fileferry-cli`, and the
+  full `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check` gate.
 - 2026-05-18 - Tightened restore and repository-incompatibility failure
   behavior without broadening command scope. `fileferry-core` now rejects any
   requested restore `--path` that matches no manifest entry before destination
