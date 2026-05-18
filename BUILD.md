@@ -47,9 +47,12 @@ Last reviewed: 2026-05-18.
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
   manifests and chunk indexes, reads/decompresses every referenced chunk, and
   verifies keyed chunk identities. Runtime check failures in JSON and JSONL
-  modes emit stable machine-readable failure envelopes with object keys and
+  modes emit stable machine-readable failure envelopes with object keys,
+  including encrypted-object authentication failures, and
   `CheckFinding`-shaped integrity details where the failing core error carries
-  enough context. Configurable subset checks are not implemented yet.
+  enough context. Missing objects referenced by committed repository metadata
+  are reported as integrity failures instead of uninitialized-repository
+  failures. Configurable subset checks are not implemented yet.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -616,6 +619,18 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Tightened local repository open/check diagnostics without
+  broadening command scope. `fileferry-core` now reports missing objects
+  referenced by committed repository metadata as integrity failures outside
+  `check` as well, and encrypted repository-object authentication failures now
+  retain the object key for JSON/JSONL diagnostics and check findings.
+  `fileferry-cli` maps those cases to stable machine-readable failure codes
+  while preserving stdout/stderr separation and existing exit-code families.
+  Added CLI integration coverage for uninitialized repositories, unsupported
+  redacted S3 URLs, wrong passwords, corrupted bootstrap JSON, missing
+  referenced manifests, malformed commit markers, and tampered encrypted
+  metadata. Verified initially with `cargo test -p fileferry-core` and
+  `cargo test -p fileferry-cli`.
 - 2026-05-18 - Improved restore dry-run metadata reporting without broadening
   platform metadata claims. `fileferry-core` now reports `metadata_planned`
   for restored regular-file and directory modified timestamp fields and runs

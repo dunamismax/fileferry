@@ -493,12 +493,17 @@ Check data schema above with `read_data_mode: "full"` and
 `read_data_subset: null`. Check failures still fail closed. In JSON and JSONL
 modes, runtime check failures emit a machine-readable failure envelope with a
 stable `code`, `exit_code`, optional `object_key`, and, for repository
-integrity failures, a `finding` object shaped like `CheckFinding`.
+integrity failures, a `finding` object shaped like `CheckFinding`. Encrypted
+object authentication failures retain the repository object key when the
+failing object is known.
 Configurable subset checks are not implemented yet.
 
 `ferry snapshots` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
 snapshot manifests, and emits human, JSON, or JSONL-safe snapshot summaries.
+If a committed snapshot marker references a missing manifest object, the
+command fails closed with an integrity failure instead of treating the
+repository as uninitialized.
 
 `ferry ls` opens an initialized local repository, selects `latest` by default
 or accepts `--snapshot <ID>` / `--tag <TAG>`, and lists immediate entries at a

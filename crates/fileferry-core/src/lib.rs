@@ -113,6 +113,13 @@ pub enum CoreError {
         source: serde_json::Error,
     },
 
+    #[error("repository object {key} failed authentication")]
+    ObjectAuthentication {
+        key: ObjectKey,
+        #[source]
+        source: CryptoError,
+    },
+
     #[error("repository metadata object {key} could not be decoded")]
     MetadataDecode {
         key: ObjectKey,
@@ -204,6 +211,9 @@ pub enum CoreError {
 
     #[error("repository check failed: object {key} referenced by repository metadata is missing")]
     RepositoryCheckMissingObject { key: ObjectKey },
+
+    #[error("repository object {key} referenced by repository metadata is missing")]
+    RepositoryReferencedObjectMissing { key: ObjectKey },
 
     #[error("system clock is before the Unix epoch")]
     SystemClock {
@@ -1043,7 +1053,10 @@ impl BackupPipeline {
 
             manifests.push(
                 self.read_snapshot_manifest(store, master_key, &commit.snapshot_id)
-                    .await?,
+                    .await
+                    .map_err(|error| {
+                        referenced_object_read_error(error, expected_manifest_object)
+                    })?,
             );
         }
         manifests.sort_by(compare_snapshot_manifests);
@@ -1380,9 +1393,11 @@ impl BackupPipeline {
         request: RestoreContentRequest,
     ) -> CoreResult<RestoreContentResult> {
         let restore_paths = normalize_restore_paths(&request.paths)?;
+        let expected_manifest_object = object_key_for_id("objects/manifest", &request.snapshot_id)?;
         let manifest = self
             .read_snapshot_manifest(store, master_key, &request.snapshot_id)
-            .await?;
+            .await
+            .map_err(|error| referenced_object_read_error(error, expected_manifest_object))?;
         let scoped_entries = scoped_manifest_entries(&manifest, &restore_paths);
         let selected_entries = scoped_entries.len();
         let chunk_index = self
@@ -1456,7 +1471,14 @@ impl BackupPipeline {
                 let encrypted = store
                     .get(&object_key)
                     .await
-                    .map_err(|source| CoreError::Storage { source })?;
+                    .map_err(|source| match source {
+                        StorageError::ObjectNotFound { .. } => {
+                            CoreError::RepositoryReferencedObjectMissing {
+                                key: object_key.clone(),
+                            }
+                        }
+                        source => CoreError::Storage { source },
+                    })?;
                 let compressed = decrypt_repository_object(
                     &chunk_key,
                     ObjectKind::Chunk,
@@ -1683,7 +1705,11 @@ impl BackupPipeline {
     ) -> CoreResult<BTreeMap<String, ChunkIndexEntry>> {
         let mut entries = BTreeMap::new();
         for index_id in &manifest.body.index_ids {
-            let index = self.read_chunk_index(store, master_key, index_id).await?;
+            let expected_index_object = object_key_for_id("objects/index", index_id)?;
+            let index = self
+                .read_chunk_index(store, master_key, index_id)
+                .await
+                .map_err(|error| referenced_object_read_error(error, expected_index_object))?;
             for entry in index.chunks {
                 entries.insert(entry.chunk_id.clone(), entry);
             }
@@ -2197,7 +2223,10 @@ fn decrypt_repository_object(
     let context = ObjectContext::new(kind, object_key.as_str())
         .map_err(|source| CoreError::Encryption { source })?;
 
-    decrypt_object(key, &context, &object).map_err(|source| CoreError::Encryption { source })
+    decrypt_object(key, &context, &object).map_err(|source| CoreError::ObjectAuthentication {
+        key: object_key.clone(),
+        source,
+    })
 }
 
 fn encode_encrypted_object(encrypted: EncryptedObject) -> CoreResult<Vec<u8>> {
@@ -2652,6 +2681,15 @@ fn check_read_error(error: CoreError, expected_key: ObjectKey) -> CoreError {
         CoreError::Storage {
             source: StorageError::ObjectNotFound { .. },
         } => CoreError::RepositoryCheckMissingObject { key: expected_key },
+        other => other,
+    }
+}
+
+fn referenced_object_read_error(error: CoreError, expected_key: ObjectKey) -> CoreError {
+    match error {
+        CoreError::Storage {
+            source: StorageError::ObjectNotFound { .. },
+        } => CoreError::RepositoryReferencedObjectMissing { key: expected_key },
         other => other,
     }
 }
@@ -3275,7 +3313,7 @@ mod tests {
             .expect_err("tampered chunk should fail");
         assert!(matches!(
             corrupted,
-            CoreError::ObjectDecode { .. } | CoreError::Encryption { .. }
+            CoreError::ObjectDecode { .. } | CoreError::ObjectAuthentication { .. }
         ));
     }
 
@@ -4020,9 +4058,10 @@ mod tests {
             .expect_err("wrong repository key must fail");
         assert!(matches!(
             wrong_key_error,
-            CoreError::Encryption {
+            CoreError::ObjectAuthentication {
+                key,
                 source: CryptoError::Decryption
-            }
+            } if key.as_str() == result.manifest_object.as_str()
         ));
 
         let manifest_bytes = store
@@ -4044,9 +4083,10 @@ mod tests {
             .expect_err("bit flip must fail");
         assert!(matches!(
             bit_flip_error,
-            CoreError::Encryption {
+            CoreError::ObjectAuthentication {
+                key,
                 source: CryptoError::Decryption
-            }
+            } if key.as_str() == result.manifest_object.as_str()
         ));
 
         let mut truncated: StoredEncryptedObject =
@@ -4066,9 +4106,10 @@ mod tests {
             .expect_err("truncation must fail");
         assert!(matches!(
             truncated_error,
-            CoreError::Encryption {
+            CoreError::ObjectAuthentication {
+                key,
                 source: CryptoError::Decryption
-            }
+            } if key.as_str() == result.manifest_object.as_str()
         ));
 
         let index_bytes = store.get(&result.index_object).await.expect("index bytes");
@@ -4081,9 +4122,10 @@ mod tests {
             .expect_err("swapped object must fail");
         assert!(matches!(
             swapped_error,
-            CoreError::Encryption {
+            CoreError::ObjectAuthentication {
+                key,
                 source: CryptoError::Decryption
-            }
+            } if key.as_str() == result.manifest_object.as_str()
         ));
     }
 

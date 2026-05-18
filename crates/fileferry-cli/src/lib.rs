@@ -259,6 +259,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidCommitMarker { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::ObjectDecode { .. }
+        | CoreError::ObjectAuthentication { .. }
         | CoreError::MetadataDecode { .. }
         | CoreError::ChunkIdentityMismatch { .. } => 6,
         CoreError::Encryption { .. } => 6,
@@ -287,7 +288,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidChunkLength { .. }
         | CoreError::MissingChunkIndexEntry { .. }
         | CoreError::RestoreVerificationMismatch { .. }
-        | CoreError::RepositoryCheckMissingObject { .. } => 6,
+        | CoreError::RepositoryCheckMissingObject { .. }
+        | CoreError::RepositoryReferencedObjectMissing { .. } => 6,
         CoreError::UnsupportedRestoreFeature { .. } => 9,
     }
 }
@@ -834,6 +836,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::Encryption { .. } => "repository_authentication_failed",
         CoreError::Serialization { .. } => "repository_metadata_serialization_failed",
         CoreError::ObjectDecode { .. } => "repository_object_decode_failed",
+        CoreError::ObjectAuthentication { .. } => "repository_object_authentication_failed",
         CoreError::MetadataDecode { .. } => "repository_metadata_decode_failed",
         CoreError::MetadataIdentityMismatch { .. } => "repository_metadata_identity_mismatch",
         CoreError::CommitDecode { .. } => "repository_commit_decode_failed",
@@ -855,6 +858,9 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::RestoreVerificationMismatch { .. } => "restore_verification_mismatch",
         CoreError::UnsupportedRestoreFeature { .. } => "restore_feature_unsupported",
         CoreError::RepositoryCheckMissingObject { .. } => "repository_check_missing_object",
+        CoreError::RepositoryReferencedObjectMissing { .. } => {
+            "repository_referenced_object_missing"
+        }
         CoreError::SystemClock { .. } => "system_clock_invalid",
         CoreError::ObjectKey { .. } => "repository_object_key_invalid",
         CoreError::Storage { source } => storage_failure_code(source),
@@ -960,10 +966,12 @@ fn failure_object_key(error: &CliError) -> Option<String> {
 fn core_failure_object_key(error: &CoreError) -> Option<String> {
     match error {
         CoreError::ObjectDecode { key, .. }
+        | CoreError::ObjectAuthentication { key, .. }
         | CoreError::MetadataDecode { key, .. }
         | CoreError::CommitDecode { key, .. }
         | CoreError::InvalidCommitMarker { key, .. }
-        | CoreError::RepositoryCheckMissingObject { key } => Some(key.as_str().to_owned()),
+        | CoreError::RepositoryCheckMissingObject { key }
+        | CoreError::RepositoryReferencedObjectMissing { key } => Some(key.as_str().to_owned()),
         CoreError::Storage {
             source:
                 StorageError::ObjectAlreadyExists { key }
@@ -978,7 +986,9 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
 fn check_finding_for_core_error(error: &CoreError) -> Option<fileferry_core::CheckFinding> {
     match error {
         CoreError::RepositoryCheckMissingObject { .. }
+        | CoreError::RepositoryReferencedObjectMissing { .. }
         | CoreError::ObjectDecode { .. }
+        | CoreError::ObjectAuthentication { .. }
         | CoreError::MetadataDecode { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::CommitDecode { .. }

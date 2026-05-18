@@ -634,6 +634,217 @@ fn check_jsonl_failure_reports_tampered_chunk_without_stderr() {
     );
 }
 
+#[test]
+fn repository_open_failures_are_structured_and_redacted_in_machine_modes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+
+    let uninitialized_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "check"])
+        .assert()
+        .code(3)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let uninitialized: Value =
+        serde_json::from_slice(&uninitialized_output).expect("uninitialized json");
+    assert_eq!(uninitialized["command"], "check");
+    assert_eq!(uninitialized["status"], "failure");
+    assert_eq!(uninitialized["data"]["code"], "repository_not_initialized");
+    assert_eq!(uninitialized["data"]["exit_code"], 3);
+
+    let secret_url = "s3://access:secret@example.com/bucket?token=sensitive";
+    let unsupported_output = fileferry()
+        .args(["--repo", secret_url, "--json", "check"])
+        .assert()
+        .code(9)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let unsupported_text = String::from_utf8(unsupported_output.clone()).expect("unsupported utf8");
+    let unsupported: Value = serde_json::from_slice(&unsupported_output).expect("unsupported json");
+    assert_eq!(unsupported["data"]["code"], "repository_url_unsupported");
+    assert_eq!(unsupported["data"]["exit_code"], 9);
+    assert!(unsupported_text.contains("s3://<redacted>@example.com/bucket?<redacted>"));
+    assert!(!unsupported_text.contains("secret"));
+    assert!(!unsupported_text.contains("sensitive"));
+
+    init_repo(&repo_url, passphrase);
+    let wrong_password_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-passphrase")
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_password_text =
+        String::from_utf8(wrong_password_output.clone()).expect("wrong password utf8");
+    let wrong_password: Value =
+        serde_json::from_slice(&wrong_password_output).expect("wrong password json");
+    assert_eq!(wrong_password["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong_password["data"]["exit_code"], 4);
+    assert!(!wrong_password_text.contains("wrong-passphrase"));
+
+    fs::write(repo.join("bootstrap"), b"not-json").expect("corrupt bootstrap");
+    let bootstrap_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "snapshots"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = bootstrap_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let failed: Value = serde_json::from_slice(lines[1]).expect("bootstrap failed event");
+    assert_eq!(failed["event"], "command_failed");
+    assert_eq!(failed["data"]["code"], "repository_bootstrap_decode_failed");
+    assert_eq!(failed["data"]["exit_code"], 6);
+}
+
+#[test]
+fn snapshots_json_failure_reports_missing_referenced_manifest_as_integrity_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let manifest_path = find_first_file(repo.join("objects/manifest"));
+    fs::remove_file(&manifest_path).expect("delete manifest");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failure: Value = serde_json::from_slice(&output).expect("snapshots failure json");
+
+    assert_eq!(failure["command"], "snapshots");
+    assert_eq!(failure["status"], "failure");
+    assert_eq!(
+        failure["data"]["code"],
+        "repository_referenced_object_missing"
+    );
+    assert_eq!(failure["data"]["exit_code"], 6);
+    assert!(
+        failure["data"]["object_key"]
+            .as_str()
+            .expect("object key")
+            .starts_with("objects/manifest/")
+    );
+}
+
+#[test]
+fn check_machine_failures_report_malformed_commits_and_corrupted_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let manifest_path = find_first_file(repo.join("objects/manifest"));
+    let mut manifest_frame: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest frame"))
+            .expect("manifest frame json");
+    let first_ciphertext_byte = manifest_frame["ciphertext"]
+        .as_array_mut()
+        .expect("ciphertext array")
+        .first_mut()
+        .expect("ciphertext byte");
+    let byte = first_ciphertext_byte
+        .as_u64()
+        .expect("ciphertext byte value");
+    *first_ciphertext_byte = serde_json::json!(byte ^ 0x01);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest_frame).expect("tampered manifest json"),
+    )
+    .expect("tamper manifest");
+
+    let metadata_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "check"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let metadata_failure: Value =
+        serde_json::from_slice(&metadata_output).expect("metadata failure json");
+    assert_eq!(
+        metadata_failure["data"]["code"],
+        "repository_object_authentication_failed"
+    );
+    assert!(
+        metadata_failure["data"]["object_key"]
+            .as_str()
+            .expect("object key")
+            .starts_with("objects/manifest/")
+    );
+    assert_eq!(
+        metadata_failure["data"]["finding"]["object_key"],
+        metadata_failure["data"]["object_key"]
+    );
+
+    init_repo(&repo_url, passphrase);
+    let commit_path = find_first_file(repo.join("commits"));
+    fs::write(&commit_path, b"not-json").expect("malform commit");
+    let commit_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "check"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = commit_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let failed: Value = serde_json::from_slice(lines[1]).expect("commit failed event");
+    assert_eq!(failed["event"], "command_failed");
+    assert_eq!(failed["data"]["code"], "repository_commit_decode_failed");
+    assert!(
+        failed["data"]["object_key"]
+            .as_str()
+            .expect("object key")
+            .starts_with("commits/")
+    );
+    assert_eq!(
+        failed["data"]["finding"]["code"],
+        "repository_commit_decode_failed"
+    );
+}
+
 fn find_first_file(root: std::path::PathBuf) -> std::path::PathBuf {
     let mut pending = vec![root];
     while let Some(path) = pending.pop() {
