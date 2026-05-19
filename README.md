@@ -359,8 +359,10 @@ restored regular files and directories from initialized local repositories.
 Other metadata application is not implemented yet. Check failures in JSON and
 JSONL modes now emit
 machine-readable failure envelopes with stable codes and object-key context
-where available. Broader metadata application and configurable check subsets
-are not implemented yet. The repository format is still not frozen.
+where available. `ferry check --read-data-subset <N|PERCENT>` reads a
+deterministic subset of referenced chunk data for initialized local
+repositories. Broader metadata application is not implemented yet. The
+repository format is still not frozen.
 
 The normal local gate is:
 

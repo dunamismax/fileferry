@@ -15,7 +15,7 @@ use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, Stor
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     fs, io,
     path::Component,
     path::{Path, PathBuf},
@@ -60,6 +60,9 @@ pub enum CoreError {
 
     #[error("backup pipeline configuration is invalid: {reason}")]
     InvalidBackupPipelineConfig { reason: &'static str },
+
+    #[error("repository check data subset is invalid: {reason}")]
+    InvalidCheckDataSubset { reason: &'static str },
 
     #[error("file {path} could not be read")]
     FileRead {
@@ -1184,6 +1187,16 @@ impl BackupPipeline {
         store: &dyn ObjectStore,
         master_key: &MasterKey,
     ) -> CoreResult<RepositoryCheckResult> {
+        self.check_repository_with_options(store, master_key, CheckRepositoryOptions::full())
+            .await
+    }
+
+    pub async fn check_repository_with_options(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        options: CheckRepositoryOptions,
+    ) -> CoreResult<RepositoryCheckResult> {
         let repository_context = self.config.repository_id.as_bytes();
         let chunk_key = master_key
             .derive_subkey(KeyPurpose::ChunkData, repository_context)
@@ -1199,7 +1212,7 @@ impl BackupPipeline {
         let mut metadata_objects_checked = 0_usize;
         let mut chunk_objects_checked = 0_usize;
         let mut bytes_read = 0_u64;
-        let mut checked_chunk_ids = BTreeSet::new();
+        let mut chunk_targets = BTreeMap::new();
 
         for commit_key in commit_keys {
             let commit_bytes = store
@@ -1288,95 +1301,93 @@ impl BackupPipeline {
                 }
             }
 
-            for (chunk_id, indexed) in index_entries {
-                if !checked_chunk_ids.insert(chunk_id.clone()) {
-                    continue;
-                }
-                let reference_context = chunk_contexts.get(&chunk_id);
-                let object_key = ObjectKey::new(indexed.object_key.clone())
-                    .map_err(|source| CoreError::ObjectKey { source })?;
-                let encrypted = store
-                    .get(&object_key)
-                    .await
-                    .map_err(|source| match source {
-                        StorageError::ObjectNotFound { .. } => {
-                            CoreError::RepositoryCheckMissingObject {
-                                key: object_key.clone(),
-                            }
-                        }
-                        source => CoreError::Storage { source },
-                    })?;
-                bytes_read += encrypted.len() as u64;
-                let compressed = decrypt_repository_object(
-                    &chunk_key,
-                    ObjectKind::Chunk,
-                    &object_key,
-                    &encrypted,
-                )?;
-                let expected_len = usize::try_from(indexed.plaintext_length).map_err(|_| {
-                    CoreError::InvalidChunkLength {
+            for (chunk_id, context) in chunk_contexts {
+                let indexed = index_entries.get(&chunk_id).ok_or_else(|| {
+                    CoreError::MissingChunkIndexEntry {
+                        snapshot_id: context.snapshot_id.clone(),
+                        path: context.path.clone(),
                         chunk_id: chunk_id.clone(),
-                        snapshot_id: reference_context.map(|context| context.snapshot_id.clone()),
-                        path: reference_context.map(|context| context.path.clone()),
-                        object_key: Some(
-                            reference_context
-                                .map(|context| context.object_key.clone())
-                                .unwrap_or_else(|| indexed.object_key.clone()),
-                        ),
+                        object_key: context.object_key.clone(),
                     }
                 })?;
-                let plaintext =
-                    zstd::bulk::decompress(&compressed, expected_len).map_err(|source| {
-                        CoreError::Decompression {
-                            chunk_id: chunk_id.clone(),
-                            snapshot_id: reference_context
-                                .map(|context| context.snapshot_id.clone()),
-                            path: reference_context.map(|context| context.path.clone()),
-                            object_key: Some(
-                                reference_context
-                                    .map(|context| context.object_key.clone())
-                                    .unwrap_or_else(|| indexed.object_key.clone()),
-                            ),
-                            source,
-                        }
-                    })?;
-                if plaintext.len() != expected_len {
-                    return Err(CoreError::InvalidChunkLength {
-                        chunk_id,
-                        snapshot_id: reference_context.map(|context| context.snapshot_id.clone()),
-                        path: reference_context.map(|context| context.path.clone()),
-                        object_key: Some(
-                            reference_context
-                                .map(|context| context.object_key.clone())
-                                .unwrap_or(indexed.object_key),
-                        ),
+                chunk_targets
+                    .entry(chunk_id)
+                    .or_insert_with(|| ChunkCheckTarget {
+                        indexed: indexed.clone(),
+                        reference_context: context,
                     });
-                }
-                let actual = hex_bytes(
-                    &keyed_content_id(
-                        master_key,
-                        KeyPurpose::ChunkIdentity,
-                        repository_context,
-                        &plaintext,
-                    )
-                    .map_err(|source| CoreError::Encryption { source })?,
-                );
-                if actual != chunk_id {
-                    return Err(CoreError::ChunkIdentityMismatch {
-                        expected: chunk_id,
-                        actual,
-                        snapshot_id: reference_context.map(|context| context.snapshot_id.clone()),
-                        path: reference_context.map(|context| context.path.clone()),
-                        object_key: Some(
-                            reference_context
-                                .map(|context| context.object_key.clone())
-                                .unwrap_or(indexed.object_key),
-                        ),
-                    });
-                }
-
-                chunk_objects_checked += 1;
             }
+        }
+
+        let selected_chunk_ids = select_check_chunk_ids(&chunk_targets, options.read_data);
+        for chunk_id in selected_chunk_ids {
+            let target = chunk_targets
+                .get(&chunk_id)
+                .expect("selected chunk id must come from chunk target map");
+            let indexed = &target.indexed;
+            let reference_context = &target.reference_context;
+            let object_key = ObjectKey::new(indexed.object_key.clone())
+                .map_err(|source| CoreError::ObjectKey { source })?;
+            let encrypted = store
+                .get(&object_key)
+                .await
+                .map_err(|source| match source {
+                    StorageError::ObjectNotFound { .. } => {
+                        CoreError::RepositoryCheckMissingObject {
+                            key: object_key.clone(),
+                        }
+                    }
+                    source => CoreError::Storage { source },
+                })?;
+            bytes_read += encrypted.len() as u64;
+            let compressed =
+                decrypt_repository_object(&chunk_key, ObjectKind::Chunk, &object_key, &encrypted)?;
+            let expected_len = usize::try_from(indexed.plaintext_length).map_err(|_| {
+                CoreError::InvalidChunkLength {
+                    chunk_id: chunk_id.clone(),
+                    snapshot_id: Some(reference_context.snapshot_id.clone()),
+                    path: Some(reference_context.path.clone()),
+                    object_key: Some(reference_context.object_key.clone()),
+                }
+            })?;
+            let plaintext =
+                zstd::bulk::decompress(&compressed, expected_len).map_err(|source| {
+                    CoreError::Decompression {
+                        chunk_id: chunk_id.clone(),
+                        snapshot_id: Some(reference_context.snapshot_id.clone()),
+                        path: Some(reference_context.path.clone()),
+                        object_key: Some(reference_context.object_key.clone()),
+                        source,
+                    }
+                })?;
+            if plaintext.len() != expected_len {
+                return Err(CoreError::InvalidChunkLength {
+                    chunk_id,
+                    snapshot_id: Some(reference_context.snapshot_id.clone()),
+                    path: Some(reference_context.path.clone()),
+                    object_key: Some(reference_context.object_key.clone()),
+                });
+            }
+            let actual = hex_bytes(
+                &keyed_content_id(
+                    master_key,
+                    KeyPurpose::ChunkIdentity,
+                    repository_context,
+                    &plaintext,
+                )
+                .map_err(|source| CoreError::Encryption { source })?,
+            );
+            if actual != chunk_id {
+                return Err(CoreError::ChunkIdentityMismatch {
+                    expected: chunk_id,
+                    actual,
+                    snapshot_id: Some(reference_context.snapshot_id.clone()),
+                    path: Some(reference_context.path.clone()),
+                    object_key: Some(reference_context.object_key.clone()),
+                });
+            }
+
+            chunk_objects_checked += 1;
         }
 
         Ok(RepositoryCheckResult {
@@ -1385,8 +1396,8 @@ impl BackupPipeline {
             metadata_objects_checked,
             chunk_objects_checked,
             bytes_read,
-            read_data_mode: CheckReadDataMode::Full,
-            read_data_subset: None,
+            read_data_mode: options.read_data.mode(),
+            read_data_subset: options.read_data.subset_label(),
             errors: Vec::new(),
             warnings: Vec::new(),
         })
@@ -1898,6 +1909,104 @@ pub struct SnapshotEntry {
     pub metadata_status: MetadataStatus,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckRepositoryOptions {
+    pub read_data: CheckReadDataSelection,
+}
+
+impl CheckRepositoryOptions {
+    pub const fn full() -> Self {
+        Self {
+            read_data: CheckReadDataSelection::Full,
+        }
+    }
+
+    pub const fn subset(subset: CheckReadDataSubset) -> Self {
+        Self {
+            read_data: CheckReadDataSelection::Subset(subset),
+        }
+    }
+}
+
+impl Default for CheckRepositoryOptions {
+    fn default() -> Self {
+        Self::full()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckReadDataSelection {
+    Full,
+    Subset(CheckReadDataSubset),
+}
+
+impl CheckReadDataSelection {
+    fn mode(self) -> CheckReadDataMode {
+        match self {
+            Self::Full => CheckReadDataMode::Full,
+            Self::Subset(_) => CheckReadDataMode::Subset,
+        }
+    }
+
+    fn subset_label(self) -> Option<String> {
+        match self {
+            Self::Full => None,
+            Self::Subset(subset) => Some(subset.label()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckReadDataSubset {
+    Count(usize),
+    Percent(u8),
+}
+
+impl CheckReadDataSubset {
+    pub fn count(count: usize) -> CoreResult<Self> {
+        if count == 0 {
+            return Err(CoreError::InvalidCheckDataSubset {
+                reason: "count must be greater than zero",
+            });
+        }
+
+        Ok(Self::Count(count))
+    }
+
+    pub fn percent(percent: u8) -> CoreResult<Self> {
+        if !(1..=100).contains(&percent) {
+            return Err(CoreError::InvalidCheckDataSubset {
+                reason: "percent must be between 1 and 100",
+            });
+        }
+
+        Ok(Self::Percent(percent))
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Count(count) => count.to_string(),
+            Self::Percent(percent) => format!("{percent}%"),
+        }
+    }
+
+    fn selected_count(self, total_chunks: usize) -> usize {
+        match self {
+            Self::Count(count) => count.min(total_chunks),
+            Self::Percent(percent) => {
+                if total_chunks == 0 {
+                    0
+                } else {
+                    total_chunks
+                        .saturating_mul(percent as usize)
+                        .div_ceil(100)
+                        .min(total_chunks)
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RepositoryCheckResult {
     pub repository_id: String,
@@ -1934,6 +2043,12 @@ struct ChunkReferenceContext {
     snapshot_id: String,
     path: PathBuf,
     object_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChunkCheckTarget {
+    indexed: ChunkIndexEntry,
+    reference_context: ChunkReferenceContext,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -2996,6 +3111,18 @@ fn check_read_error(error: CoreError, expected_key: ObjectKey) -> CoreError {
     }
 }
 
+fn select_check_chunk_ids(
+    chunk_targets: &BTreeMap<String, ChunkCheckTarget>,
+    selection: CheckReadDataSelection,
+) -> Vec<String> {
+    let selected_count = match selection {
+        CheckReadDataSelection::Full => chunk_targets.len(),
+        CheckReadDataSelection::Subset(subset) => subset.selected_count(chunk_targets.len()),
+    };
+
+    chunk_targets.keys().take(selected_count).cloned().collect()
+}
+
 fn referenced_object_read_error(error: CoreError, expected_key: ObjectKey) -> CoreError {
     match error {
         CoreError::Storage {
@@ -3174,6 +3301,53 @@ mod tests {
             repository_id: "repo-test-id".to_owned(),
         })
         .expect("pipeline")
+    }
+
+    fn varied_bytes(seed: usize, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|index| ((index * 31 + seed * 17 + index / 5) % 251) as u8)
+            .collect()
+    }
+
+    struct ReverseListingStore<'a> {
+        inner: &'a fileferry_testkit::FakeObjectStore,
+    }
+
+    impl ObjectStore for ReverseListingStore<'_> {
+        fn capabilities(&self) -> fileferry_storage::StorageCapabilities {
+            self.inner.capabilities()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            key: &'a ObjectKey,
+            bytes: &'a [u8],
+        ) -> fileferry_storage::StorageFuture<'a, PutStatus> {
+            self.inner.put_if_absent(key, bytes)
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, Vec<u8>> {
+            self.inner.get(key)
+        }
+
+        fn exists<'a>(&'a self, key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, bool> {
+            self.inner.exists(key)
+        }
+
+        fn delete<'a>(&'a self, key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, ()> {
+            self.inner.delete(key)
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            prefix: &'a ObjectKeyPrefix,
+        ) -> fileferry_storage::StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move {
+                let mut keys = self.inner.list_prefix(prefix).await?;
+                keys.reverse();
+                Ok(keys)
+            })
+        }
     }
 
     async fn replace_committed_manifest_for_tests(
@@ -3691,6 +3865,153 @@ mod tests {
         assert_eq!(checked.read_data_subset, None);
         assert!(checked.errors.is_empty());
         assert!(checked.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_repository_supports_count_and_percent_subsets() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("a.bin"), varied_bytes(1, 12_000)).expect("write a");
+        fs::write(temp.path().join("b.bin"), varied_bytes(2, 16_000)).expect("write b");
+        fs::write(temp.path().join("c.bin"), varied_bytes(3, 20_000)).expect("write c");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let written = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        assert!(written.chunks >= 3);
+
+        let count_subset = CheckReadDataSubset::count(2).expect("count subset");
+        let count_checked = pipeline
+            .check_repository_with_options(
+                &store,
+                &master_key,
+                CheckRepositoryOptions::subset(count_subset),
+            )
+            .await
+            .expect("count subset check");
+        assert_eq!(count_checked.chunk_objects_checked, 2);
+        assert_eq!(count_checked.read_data_mode, CheckReadDataMode::Subset);
+        assert_eq!(count_checked.read_data_subset, Some("2".to_owned()));
+
+        let percent_subset = CheckReadDataSubset::percent(50).expect("percent subset");
+        let percent_checked = pipeline
+            .check_repository_with_options(
+                &store,
+                &master_key,
+                CheckRepositoryOptions::subset(percent_subset),
+            )
+            .await
+            .expect("percent subset check");
+        assert_eq!(
+            percent_checked.chunk_objects_checked,
+            percent_subset.selected_count(written.chunks)
+        );
+        assert_eq!(percent_checked.read_data_mode, CheckReadDataMode::Subset);
+        assert_eq!(percent_checked.read_data_subset, Some("50%".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn check_repository_subset_selection_is_deterministic() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("small.bin"), varied_bytes(4, 4_000)).expect("write small");
+        fs::write(temp.path().join("medium.bin"), varied_bytes(5, 14_000)).expect("write medium");
+        fs::write(temp.path().join("large.bin"), varied_bytes(6, 28_000)).expect("write large");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let options = CheckRepositoryOptions::subset(
+            CheckReadDataSubset::percent(50).expect("percent subset"),
+        );
+        let normal = pipeline
+            .check_repository_with_options(&store, &master_key, options)
+            .await
+            .expect("normal listing subset check");
+        let reverse_store = ReverseListingStore { inner: &store };
+        let reversed = pipeline
+            .check_repository_with_options(&reverse_store, &master_key, options)
+            .await
+            .expect("reversed listing subset check");
+
+        assert_eq!(normal.chunk_objects_checked, reversed.chunk_objects_checked);
+        assert_eq!(normal.bytes_read, reversed.bytes_read);
+        assert_eq!(normal.read_data_mode, reversed.read_data_mode);
+        assert_eq!(normal.read_data_subset, reversed.read_data_subset);
+    }
+
+    #[tokio::test]
+    async fn check_repository_subset_fails_closed_for_selected_chunk_integrity_failure() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("a.bin"), varied_bytes(7, 12_000)).expect("write a");
+        fs::write(temp.path().join("b.bin"), varied_bytes(8, 16_000)).expect("write b");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let chunk_prefix = ObjectKeyPrefix::new("objects/chunk").expect("chunk prefix");
+        let mut chunk_keys = store.list_prefix(&chunk_prefix).await.expect("list chunks");
+        chunk_keys.sort();
+        let selected_key = chunk_keys.into_iter().next().expect("selected chunk");
+        let mut selected_bytes = store.get(&selected_key).await.expect("chunk bytes");
+        selected_bytes[0] ^= 0x01;
+        store
+            .overwrite_for_tests(selected_key, selected_bytes)
+            .await;
+
+        let error = pipeline
+            .check_repository_with_options(
+                &store,
+                &master_key,
+                CheckRepositoryOptions::subset(
+                    CheckReadDataSubset::count(1).expect("count subset"),
+                ),
+            )
+            .await
+            .expect_err("tampered selected chunk should fail");
+        assert!(matches!(
+            error,
+            CoreError::ObjectDecode { .. } | CoreError::ObjectAuthentication { .. }
+        ));
     }
 
     #[tokio::test]

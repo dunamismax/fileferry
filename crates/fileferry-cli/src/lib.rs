@@ -1,10 +1,10 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use fileferry_core::{
-    BackupPipeline, BackupPipelineConfig, BackupRequest, CoreError, MetadataStatus,
-    RestoreDestinationAction, RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry,
-    SnapshotSelection, create_repository, list_snapshot_entries, open_repository, select_snapshot,
-    snapshot_summaries,
+    BackupPipeline, BackupPipelineConfig, BackupRequest, CheckReadDataSubset,
+    CheckRepositoryOptions, CoreError, MetadataStatus, RestoreDestinationAction,
+    RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection,
+    create_repository, list_snapshot_entries, open_repository, select_snapshot, snapshot_summaries,
 };
 use fileferry_crypto::KdfParams;
 use fileferry_platform::{EntryKind, MetadataValue};
@@ -119,7 +119,15 @@ pub enum Command {
     },
 
     /// Verify an initialized local repository.
-    Check,
+    Check {
+        /// Read and verify a deterministic subset of referenced chunks, as a count or percent.
+        #[arg(
+            long = "read-data-subset",
+            value_name = "N|PERCENT",
+            value_parser = parse_read_data_subset
+        )]
+        read_data_subset: Option<CheckReadDataSubset>,
+    },
 
     /// Restore entries from a committed snapshot.
     Restore {
@@ -164,7 +172,7 @@ impl Command {
             Self::Backup { .. } => "backup",
             Self::Snapshots => "snapshots",
             Self::Ls { .. } => "ls",
-            Self::Check => "check",
+            Self::Check { .. } => "check",
             Self::Restore { .. } => "restore",
             Self::Version => "version",
         }
@@ -276,6 +284,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidBackupPipelineConfig { .. }
         | CoreError::InvalidChunkingConfig { .. } => 1,
         CoreError::SourceRootNotAbsolute { .. }
+        | CoreError::InvalidCheckDataSubset { .. }
         | CoreError::InvalidRestoreRequest { .. }
         | CoreError::RestoreDestinationNotAbsolute { .. }
         | CoreError::RestoreDestinationEscapesRoot { .. }
@@ -669,9 +678,9 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
                 path.unwrap_or_default(),
             )
         }
-        Command::Check => {
+        Command::Check { read_data_subset } => {
             let config = resolve_config(&cli.globals)?;
-            check(mode, &config)
+            check(mode, &config, read_data_subset)
         }
         Command::Restore {
             snapshot,
@@ -830,6 +839,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::MetadataCapture { .. } => "metadata_capture_failed",
         CoreError::InvalidChunkingConfig { .. } => "chunking_config_invalid",
         CoreError::InvalidBackupPipelineConfig { .. } => "backup_pipeline_config_invalid",
+        CoreError::InvalidCheckDataSubset { .. } => "check_data_subset_invalid",
         CoreError::FileRead { .. } => "file_read_failed",
         CoreError::InvalidChunkRange { .. } => "chunk_range_invalid",
         CoreError::Compression { .. } => "chunk_compression_failed",
@@ -1445,14 +1455,24 @@ fn ls(
     })
 }
 
-fn check(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, CliError> {
+fn check(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    read_data_subset: Option<CheckReadDataSubset>,
+) -> Result<Output, CliError> {
     let repository = local_repository(config)?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
-    let data =
-        runtime.block_on(pipeline.check_repository(&repository.store, &opened.master_key))?;
+    let options = read_data_subset
+        .map(CheckRepositoryOptions::subset)
+        .unwrap_or_else(CheckRepositoryOptions::full);
+    let data = runtime.block_on(pipeline.check_repository_with_options(
+        &repository.store,
+        &opened.master_key,
+        options,
+    ))?;
 
     emit_check_command(mode, data)
 }
@@ -1677,6 +1697,23 @@ fn snapshot_selection(
         (None, Some(tag), false) => SnapshotSelection::Tag(tag),
         _ => SnapshotSelection::Latest,
     }
+}
+
+fn parse_read_data_subset(value: &str) -> Result<CheckReadDataSubset, String> {
+    if let Some(percent) = value.strip_suffix('%') {
+        if percent.is_empty() {
+            return Err("percent subset must include a number before '%'".to_owned());
+        }
+        let percent = percent
+            .parse::<u8>()
+            .map_err(|_| "percent subset must be an integer from 1% through 100%".to_owned())?;
+        return CheckReadDataSubset::percent(percent).map_err(|error| error.to_string());
+    }
+
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "count subset must be a positive integer or percent like 5%".to_owned())?;
+    CheckReadDataSubset::count(count).map_err(|error| error.to_string())
 }
 
 fn emit_command<T>(

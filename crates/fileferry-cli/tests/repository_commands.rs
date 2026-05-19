@@ -61,6 +61,12 @@ fn set_modified_time(path: &Path, modified: SystemTime) {
         .expect("set file modified time");
 }
 
+fn patterned_bytes(seed: usize, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|index| ((index * 29 + seed * 11 + index / 3) % 251) as u8)
+        .collect()
+}
+
 #[test]
 fn init_creates_encrypted_local_repository_and_snapshots_lists_it() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -688,6 +694,136 @@ fn check_verifies_initialized_local_repository() {
     let completed: Value = serde_json::from_slice(lines[6]).expect("completed event");
     assert_eq!(completed["event"], "command_completed");
     assert_eq!(completed["data"]["read_data_mode"], "full");
+}
+
+#[test]
+fn check_read_data_subset_reports_count_and_percent_modes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("a.bin"), patterned_bytes(1, 700_000)).expect("write a");
+    fs::write(source.join("b.bin"), patterned_bytes(2, 800_000)).expect("write b");
+    fs::write(source.join("c.bin"), patterned_bytes(3, 900_000)).expect("write c");
+    backup_source(&repo_url, passphrase, &source);
+
+    let count_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "check",
+            "--read-data-subset",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let count: Value = serde_json::from_slice(&count_output).expect("count subset json");
+    assert_eq!(count["data"]["read_data_mode"], "subset");
+    assert_eq!(count["data"]["read_data_subset"], "1");
+    assert_eq!(count["data"]["chunk_objects_checked"], 1);
+
+    let percent_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "check",
+            "--read-data-subset",
+            "50%",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = percent_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    let completed: Value = serde_json::from_slice(lines.last().expect("completed event"))
+        .expect("percent completed jsonl event");
+    assert_eq!(completed["event"], "command_completed");
+    assert_eq!(completed["data"]["read_data_mode"], "subset");
+    assert_eq!(completed["data"]["read_data_subset"], "50%");
+    assert!(
+        completed["data"]["chunk_objects_checked"]
+            .as_u64()
+            .expect("checked chunks")
+            >= 1
+    );
+}
+
+#[test]
+fn check_read_data_subset_rejects_invalid_arguments() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+
+    for subset in ["0", "0%", "101%", "abc"] {
+        fileferry()
+            .args(["--repo", &repo_url, "check", "--read-data-subset", subset])
+            .assert()
+            .code(2);
+    }
+}
+
+#[test]
+fn check_read_data_subset_integrity_failure_exits_six() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("a.bin"), patterned_bytes(4, 700_000)).expect("write a");
+    fs::write(source.join("b.bin"), patterned_bytes(5, 800_000)).expect("write b");
+    backup_source(&repo_url, passphrase, &source);
+
+    let chunk_path = find_first_file(repo.join("objects/chunk"));
+    let mut bytes = fs::read(&chunk_path).expect("chunk bytes");
+    bytes[0] ^= 0x01;
+    fs::write(&chunk_path, bytes).expect("tamper selected chunk");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "check",
+            "--read-data-subset",
+            "1",
+        ])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failure: Value = serde_json::from_slice(&output).expect("check failure json");
+    assert_eq!(failure["command"], "check");
+    assert_eq!(failure["status"], "failure");
+    assert_eq!(failure["data"]["exit_code"], 6);
+    assert!(
+        failure["data"]["object_key"]
+            .as_str()
+            .expect("object key")
+            .starts_with("objects/chunk/")
+    );
 }
 
 #[test]

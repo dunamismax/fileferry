@@ -499,18 +499,26 @@ or `FILEFERRY_PASSWORD_FILE`, authenticates committed snapshot manifests,
 authenticates chunk indexes, reads every referenced chunk object, decompresses
 chunk payloads, and verifies keyed chunk identities. JSON output follows the
 Check data schema above with `read_data_mode: "full"` and
-`read_data_subset: null`. Check failures still fail closed. In JSON and JSONL
-modes, runtime check failures emit a machine-readable failure envelope with a
-stable `code`, `exit_code`, optional `object_key`, and, for repository
-integrity failures, a `finding` object shaped like `CheckFinding`. Encrypted
-object authentication failures retain the repository object key when the
-failing object is known. Chunk-reference integrity failures retain the
+`read_data_subset: null` when no subset is requested. With
+`--read-data-subset <N|PERCENT>`, check still authenticates all committed
+metadata and validates manifest/index references, then reads a deterministic
+subset of referenced chunk data selected from sorted chunk identities. Counts
+must be positive integers. Percent values use `1%` through `100%`, select the
+ceiling of the referenced chunk count, and select zero chunks only when the
+repository has no referenced chunks. Subset JSON/JSONL output uses
+`read_data_mode: "subset"` and reports the normalized requested value in
+`read_data_subset`, such as `"5"` or `"5%"`. Invalid subset arguments fail with
+exit code `2`. Check failures still fail closed. In JSON and JSONL modes,
+runtime check failures emit a machine-readable failure envelope with a stable
+`code`, `exit_code`, optional `object_key`, and, for repository integrity
+failures, a `finding` object shaped like `CheckFinding`. Encrypted object
+authentication failures retain the repository object key when the failing
+object is known. Chunk-reference integrity failures retain the
 snapshot-relative path, snapshot id, and object key when the committed manifest
 provides that context. Decrypted manifests with invalid entry paths, duplicate
 entry paths, non-file chunk references, regular-file size/chunk-length
 mismatches, or non-directory ancestors fail as `snapshot_manifest_invalid`
 integrity errors with snapshot id, object key, and path context when available.
-Configurable subset checks are not implemented yet.
 
 `ferry snapshots` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

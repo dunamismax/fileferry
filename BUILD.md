@@ -9,7 +9,7 @@ and verification.
 Treat unchecked boxes as plan. Move stable material into `docs/`, `README.md`,
 or runbooks as the implementation matures.
 
-Last reviewed: 2026-05-18.
+Last reviewed: 2026-05-19.
 
 ---
 
@@ -52,13 +52,15 @@ Last reviewed: 2026-05-18.
 - `ferry check` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
   manifests and chunk indexes, reads/decompresses every referenced chunk, and
-  verifies keyed chunk identities. Runtime check failures in JSON and JSONL
-  modes emit stable machine-readable failure envelopes with object keys,
-  including encrypted-object authentication failures, and
-  `CheckFinding`-shaped integrity details where the failing core error carries
-  enough context. Missing objects referenced by committed repository metadata
-  are reported as integrity failures instead of uninitialized-repository
-  failures. Configurable subset checks are not implemented yet.
+  verifies keyed chunk identities. It also accepts
+  `--read-data-subset <N|PERCENT>` for deterministic count-based or
+  percentage-based referenced-chunk subsets after committed metadata has been
+  authenticated and validated. Runtime check failures in JSON and JSONL modes
+  emit stable machine-readable failure envelopes with object keys, including
+  encrypted-object authentication failures, and `CheckFinding`-shaped
+  integrity details where the failing core error carries enough context.
+  Missing objects referenced by committed repository metadata are reported as
+  integrity failures instead of uninitialized-repository failures.
   Manifest/index chunk-reference mismatches and chunk decompression failures
   now retain snapshot-relative path, snapshot id, and object-key context where
   committed metadata provides it. Invalid decrypted manifest entry paths,
@@ -118,14 +120,177 @@ The repo is still pre-v1. Restore is wired into the CLI for initialized local
 repositories, directory entries, regular-file contents, Unix symlinks, and
 modified timestamps for restored regular files and directories, but broader
 metadata application and S3-compatible repository bootstrap/restore are not
-complete. `ferry check` has a fixed full referenced-chunk verification path,
-but configurable subset checks are not complete. Describe backup, restore,
-check, repository, storage, crypto, or platform behavior only to the level
-backed by code, tests, and platform evidence.
+complete. `ferry check` supports full referenced-chunk verification and
+deterministic count/percentage referenced-chunk subsets for initialized local
+repositories. Describe backup, restore, check, repository, storage, crypto, or
+platform behavior only to the level backed by code, tests, and platform
+evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
 application.
+
+---
+
+## Active Milestones
+
+This section is the current execution queue. Agents should prefer completing
+one active milestone end to end over making many small adjacent improvements.
+Do not spend another pass on restore/check polish unless it directly supports
+one of these milestones or fixes a verified bug.
+
+If a milestone is too large for one work session, split it into explicit
+sub-milestones in this section before coding. Each sub-milestone needs its own
+definition of done and non-goals. Only check boxes elsewhere in this file when
+the completed implementation and verification satisfy the full stated scope.
+
+### Milestone 1 - Configurable Check Subsets
+
+Goal: Implement `ferry check --read-data-subset <N|PERCENT>` end to end for
+initialized local repositories.
+
+Definition of done:
+
+- CLI parses, validates, and documents `--read-data-subset`.
+- Core supports full checks and deterministic subset checks over referenced
+  chunks.
+- Subset selection is stable for the same repository state and does not depend
+  on object-store listing order.
+- JSON and JSONL report `read_data_mode` and `read_data_subset` accurately.
+- Invalid subset arguments fail with exit code `2`.
+- Corruption, tampering, decompression, identity, and missing-object failures
+  still fail with exit code `6`.
+- Tests cover full check behavior, count subset, percentage subset, invalid
+  subset arguments, deterministic selection, and at least one subset integrity
+  failure.
+- `docs/cli-contract.md` and this file reflect only the implemented behavior.
+
+Non-goals:
+
+- Repair.
+- `doctor`.
+- S3-specific check behavior.
+- Probabilistic or background checking.
+- Changing the repository format.
+
+### Milestone 2 - S3-Compatible Init
+
+Goal: Make `ferry init s3://...` create encrypted S3-compatible repositories
+through the existing storage abstraction.
+
+Definition of done:
+
+- CLI accepts S3-compatible repository URLs for `init`.
+- Required endpoint, region, bucket, prefix, credential, and environment
+  behavior is documented.
+- Secrets and repository URLs are redacted in human, JSON, JSONL, debug, and
+  error output.
+- Init writes the same encrypted bootstrap model used by local repositories.
+- Existing unsupported-format and wrong-password behavior remains unchanged.
+- Tests use a fake store, emulator, or gated isolated integration path that
+  cannot touch non-test repositories.
+- Backblaze B2 development behavior follows
+  `docs/backblaze-b2-dev-storage.md` when live credentials are used.
+- `README.md`, docs, and this file do not claim S3 backup, restore, check, or
+  v1 support unless those paths are implemented and verified.
+
+Non-goals:
+
+- S3 backup or restore unless completed end to end in the same milestone.
+- Broad cloud-provider support.
+- Multipart upload lifecycle changes.
+- Release support claims.
+
+### Milestone 3 - Forget Without Prune
+
+Goal: Implement safe `ferry forget` planning and snapshot forget markers
+without deleting repository objects.
+
+Definition of done:
+
+- CLI exposes `ferry forget` with documented dry-run behavior.
+- Retention selection uses `fileferry-policy` keep rules where implemented.
+- Forget writes explicit repository state or markers only when not in dry-run.
+- Forget does not delete chunks, manifests, indexes, or commit objects unless
+  prune is implemented and verified separately.
+- JSON and JSONL report candidate snapshots, kept snapshots, forgotten
+  snapshots, dry-run status, and item-level reasons.
+- Human output writes diagnostics to stderr and does not put progress in
+  stdout data modes.
+- No-match behavior and invalid policy arguments have stable exit codes.
+- Tests cover tag rules, count rules, dry-run, no-match behavior,
+  non-interactive operation, JSON/JSONL envelopes, and repository state after
+  forget.
+- Docs clearly state that object deletion is not implemented until prune lands.
+
+Non-goals:
+
+- Object deletion.
+- Two-phase prune sweep.
+- Storage reclamation claims.
+- Automatic repair.
+
+### Milestone 4 - Local Backend Interruption And Corruption Evidence
+
+Goal: Turn local backend reliability from partially tested behavior into
+documented evidence for v1 planning.
+
+Definition of done:
+
+- Local repository tests cover interrupted or partial writes where practical.
+- Tests cover missing objects, stale temporary objects, malformed objects,
+  permission errors, and immutable-write conflicts through command or core
+  boundaries.
+- Failures map to documented exit-code families.
+- JSON/JSONL failure envelopes preserve safe object-key/path context where
+  available.
+- `docs/operations.md` or a dedicated local-backend runbook documents the
+  tested evidence without claiming platform-wide support.
+
+Non-goals:
+
+- S3-compatible backend claims.
+- Full platform support claims.
+- Repair or automatic cleanup beyond implemented behavior.
+
+### Milestone 5 - Key Management First Slice
+
+Goal: Implement the smallest useful key-management command slice without
+weakening repository encryption.
+
+Definition of done:
+
+- Choose one command first: `ferry key add`, `ferry key remove`, `ferry key
+  rotate`, or `ferry key export-recovery`.
+- Document the exact command semantics before implementation if the existing
+  security docs are not specific enough.
+- CLI supports human, JSON, and JSONL-safe output.
+- Every prompt has a non-interactive alternative.
+- Tests cover success, wrong password/key, malformed repository state,
+  redaction, and exit-code mapping.
+- Security docs explain what the command does not rewrite or recover.
+
+Non-goals:
+
+- Completing all key-management commands in one pass unless each is fully
+  implemented and tested.
+- Rewriting existing encrypted backup data unless explicitly designed,
+  documented, and verified.
+- Silent weakening or bypassing of KDF/key-slot behavior.
+
+## Current Deprioritized Polish
+
+Do not choose these as primary work unless a test proves a bug or the work is
+required by an active milestone:
+
+- More restore edge-case diagnostics around already-covered destination
+  preflight behavior.
+- More check failure-envelope polish where object-key/path/snapshot context is
+  already available.
+- Wording-only documentation edits that do not unblock an active milestone.
+- Refactors that do not remove a blocker for an active milestone.
+- Broad platform, S3, metadata, prune, repair, release, or v1 claims without
+  implementation and verification.
 
 ---
 
@@ -392,7 +557,7 @@ Minimum v1 bar:
 - [x] `ferry restore` restores by snapshot id, tag, path, and `latest`.
 - [x] `ferry snapshots` and `ferry ls` have human, JSON, and JSONL-safe
       behavior where appropriate.
-- [ ] `ferry check` verifies metadata and configurable data subsets.
+- [x] `ferry check` verifies metadata and configurable data subsets.
 - [ ] `ferry forget` and `ferry prune` implement retention and two-phase
       deletion safely.
 - [ ] Key add/remove/rotate/export-recovery paths exist and are tested.
@@ -513,7 +678,7 @@ where documented verification passes on a clean checkout.
 ### Phase 8 - Check, Repair Guidance, And Doctor
 
 - [x] Implement repository metadata check.
-- [ ] Implement configurable data subset checks.
+- [x] Implement configurable data subset checks.
 - [x] Implement full read-data check.
 - [x] Add deterministic corruption reports.
 - [ ] Add `doctor` for environment, config, backend, and permission issues.
@@ -633,6 +798,30 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone 1 configurable check subsets for
+  initialized local repositories. `ferry check` now accepts
+  `--read-data-subset <N|PERCENT>`, validates counts and percentages as usage
+  errors, authenticates all committed metadata before data reads, and selects
+  deterministic referenced-chunk subsets from sorted chunk identities so the
+  selected subset does not depend on object-store listing order. JSON and
+  JSONL success output now report `read_data_mode: "subset"` and the requested
+  `read_data_subset` for subset checks while full checks keep
+  `read_data_mode: "full"` and `read_data_subset: null`; subset integrity
+  failures still map to exit code `6`. Documented the implemented local check
+  subset behavior in `docs/cli-contract.md` and updated README/BUILD status
+  without adding S3, repair, doctor, or background-check claims. Verified with
+  `cargo test -p fileferry-core check_repository_`, `cargo test -p
+  fileferry-cli check_read_data_subset`, `cargo test -p fileferry-core -p
+  fileferry-cli`, `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check`.
+- 2026-05-19 - Reworked `BUILD.md` as a sharper execution queue for future
+  agents without changing implementation status or checking off feature work.
+  Added Active Milestones with definitions of done and non-goals for
+  configurable check subsets, S3-compatible init, forget without prune, local
+  backend interruption/corruption evidence, and the first key-management
+  command slice. Added a Current Deprioritized Polish section so future passes
+  prefer milestone completion over repeated small restore/check polish. Verified
+  with `git diff --check`.
 - 2026-05-19 - Tightened path-scoped Unix symlink restore and check identity
   diagnostics without expanding metadata or platform claims. Path-scoped
   symlink restores now create missing destination parent directories after
