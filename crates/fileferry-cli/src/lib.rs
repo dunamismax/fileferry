@@ -5,7 +5,7 @@ use fileferry_core::{
     CheckRepositoryOptions, CoreError, MetadataStatus, RestoreDestinationAction,
     RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection,
     add_repository_key_slot, create_repository, list_snapshot_entries, open_repository,
-    select_snapshot, snapshot_summaries,
+    remove_repository_key_slot, select_snapshot, snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
 use fileferry_platform::{EntryKind, MetadataValue};
@@ -221,6 +221,13 @@ pub enum KeyCommand {
         #[arg(long = "new-password-file", value_name = "FILE")]
         new_password_file: Option<PathBuf>,
     },
+
+    /// Mark an added passphrase key slot removed.
+    Remove {
+        /// Added key-slot id to remove.
+        #[arg(value_parser = parse_key_slot_id)]
+        key_slot_id: String,
+    },
 }
 
 impl Command {
@@ -236,6 +243,9 @@ impl Command {
             Self::Key {
                 command: KeyCommand::Add { .. },
             } => "key add",
+            Self::Key {
+                command: KeyCommand::Remove { .. },
+            } => "key remove",
             Self::Restore { .. } => "restore",
             Self::Version => "version",
         }
@@ -360,11 +370,14 @@ fn core_exit_code(error: &CoreError) -> i32 {
         CoreError::RepositoryUnlock { .. } => 4,
         CoreError::SnapshotNotFound { .. }
         | CoreError::ForgetNoSnapshotsMatched
+        | CoreError::KeySlotNotFound { .. }
         | CoreError::SnapshotPathNotFound { .. } => 7,
         CoreError::RepositoryBootstrapDecode { .. }
         | CoreError::InvalidRepositoryBootstrap { .. }
         | CoreError::KeySlotDecode { .. }
         | CoreError::InvalidKeySlot { .. }
+        | CoreError::KeySlotRemovalDecode { .. }
+        | CoreError::InvalidKeySlotRemoval { .. }
         | CoreError::InvalidSnapshotManifest { .. }
         | CoreError::CommitDecode { .. }
         | CoreError::InvalidCommitMarker { .. }
@@ -380,6 +393,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidChunkLength { .. }
         | CoreError::MissingChunkIndexEntry { .. } => 6,
         CoreError::Encryption { .. } => 6,
+        CoreError::KeySlotRemovalWouldLockOut { .. } => 4,
         CoreError::ObjectKey { .. }
         | CoreError::Serialization { .. }
         | CoreError::SystemClock { .. }
@@ -635,6 +649,17 @@ struct KeyAddData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct KeyRemoveData {
+    repository_id: String,
+    removed_key_slot_id: String,
+    key_slots: usize,
+    removal_marker_object: String,
+    removal_marker_created: bool,
+    deleted_key_slot_objects: bool,
+    reencrypted_repository_objects: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct KdfSummary {
     algorithm: &'static str,
     memory_cost_kib: u32,
@@ -879,6 +904,12 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             let config = resolve_config(&cli.globals)?;
             key_add(mode, &config, new_password_file)
         }
+        Command::Key {
+            command: KeyCommand::Remove { key_slot_id },
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            key_remove(mode, &config, key_slot_id)
+        }
         Command::Restore {
             snapshot,
             tag,
@@ -1076,6 +1107,12 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::InvalidRepositoryBootstrap { .. } => "repository_bootstrap_invalid",
         CoreError::KeySlotDecode { .. } => "repository_key_slot_decode_failed",
         CoreError::InvalidKeySlot { .. } => "repository_key_slot_invalid",
+        CoreError::KeySlotRemovalDecode { .. } => "repository_key_slot_removal_decode_failed",
+        CoreError::InvalidKeySlotRemoval { .. } => "repository_key_slot_removal_invalid",
+        CoreError::KeySlotNotFound { .. } => "repository_key_slot_not_found",
+        CoreError::KeySlotRemovalWouldLockOut { .. } => {
+            "repository_key_slot_removal_would_lock_out"
+        }
         CoreError::UnsupportedRepositoryFormat { .. } => "repository_format_unsupported",
         CoreError::UnsupportedRepositoryFeatures => "repository_features_unsupported",
         CoreError::RepositoryUnlock { .. } => "repository_unlock_failed",
@@ -1221,6 +1258,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         | CoreError::MetadataDecode { key, .. }
         | CoreError::KeySlotDecode { key, .. }
         | CoreError::InvalidKeySlot { key, .. }
+        | CoreError::KeySlotRemovalDecode { key, .. }
+        | CoreError::InvalidKeySlotRemoval { key, .. }
         | CoreError::MetadataIdentityMismatch {
             object_key: key, ..
         }
@@ -1578,6 +1617,40 @@ fn key_add(
         format!(
             "Added key slot {} to repository {}\nkey_slots={}\nreencrypted_repository_objects=false\n",
             data.key_slot_id, data.repository_id, data.key_slots
+        )
+    })
+}
+
+fn key_remove(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    key_slot_id: String,
+) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let current_passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let result = runtime.block_on(remove_repository_key_slot(
+        &repository.store,
+        &current_passphrase,
+        &key_slot_id,
+    ))?;
+    let data = KeyRemoveData {
+        repository_id: result.repository_id,
+        removed_key_slot_id: result.removed_key_slot_id,
+        key_slots: result.key_slots,
+        removal_marker_object: result.removal_marker_object,
+        removal_marker_created: result.removal_marker_created,
+        deleted_key_slot_objects: false,
+        reencrypted_repository_objects: false,
+    };
+
+    emit_command(mode, "key remove", data, |data| {
+        format!(
+            "Removed key slot {} from repository {}\nkey_slots={}\nremoval_marker_object={}\ndeleted_key_slot_objects=false\nreencrypted_repository_objects=false\n",
+            data.removed_key_slot_id,
+            data.repository_id,
+            data.key_slots,
+            data.removal_marker_object
         )
     })
 }
@@ -2223,6 +2296,13 @@ fn parse_read_data_subset(value: &str) -> Result<CheckReadDataSubset, String> {
         .parse::<usize>()
         .map_err(|_| "count subset must be a positive integer or percent like 5%".to_owned())?;
     CheckReadDataSubset::count(count).map_err(|error| error.to_string())
+}
+
+fn parse_key_slot_id(value: &str) -> Result<String, String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("key slot id must be 64 hexadecimal characters".to_owned());
+    }
+    Ok(value.to_owned())
 }
 
 fn retention_policy_from_args(

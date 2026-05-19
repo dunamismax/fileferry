@@ -315,6 +315,235 @@ fn key_add_failures_are_structured_redacted_and_mapped_to_exit_codes() {
 }
 
 #[test]
+fn key_remove_marks_added_slot_without_deleting_key_slot_object() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let added_passphrase = "added-passphrase";
+    init_repo(&repo_url, passphrase);
+    let add_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let add: Value = serde_json::from_slice(&add_output).expect("key add json");
+    let key_slot_id = add["data"]["key_slot_id"].as_str().expect("slot id");
+
+    let remove_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "remove", key_slot_id])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let remove_text = String::from_utf8(remove_output.clone()).expect("key remove utf8");
+    let remove: Value = serde_json::from_slice(&remove_output).expect("key remove json");
+    assert_eq!(remove["command"], "key remove");
+    assert_eq!(remove["status"], "success");
+    assert_eq!(remove["data"]["removed_key_slot_id"], key_slot_id);
+    assert_eq!(remove["data"]["key_slots"], 1);
+    assert_eq!(
+        remove["data"]["removal_marker_object"],
+        format!("key-slot-removals/{key_slot_id}")
+    );
+    assert_eq!(remove["data"]["removal_marker_created"], true);
+    assert_eq!(remove["data"]["deleted_key_slot_objects"], false);
+    assert_eq!(remove["data"]["reencrypted_repository_objects"], false);
+    assert!(!remove_text.contains(passphrase));
+    assert!(!remove_text.contains(added_passphrase));
+    assert_eq!(file_count_under(&repo.join("key-slots")), 1);
+    assert_eq!(file_count_under(&repo.join("key-slot-removals")), 1);
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("");
+
+    let removed_unlock = fileferry()
+        .env("FILEFERRY_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let removed_unlock: Value =
+        serde_json::from_slice(&removed_unlock).expect("removed unlock json");
+    assert_eq!(removed_unlock["data"]["code"], "repository_unlock_failed");
+}
+
+#[test]
+fn key_remove_supports_jsonl_and_is_idempotent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let added_passphrase = "added-passphrase";
+    init_repo(&repo_url, passphrase);
+    let add_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let add: Value = serde_json::from_slice(&add_output).expect("key add json");
+    let key_slot_id = add["data"]["key_slot_id"].as_str().expect("slot id");
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "key", "remove", key_slot_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("deleted_key_slot_objects=false"))
+        .stderr("");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "key", "remove", key_slot_id])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let started: Value = serde_json::from_slice(lines[0]).expect("started event");
+    let completed: Value = serde_json::from_slice(lines[1]).expect("completed event");
+    assert_eq!(started["event"], "command_started");
+    assert_eq!(started["command"], "key remove");
+    assert_eq!(completed["event"], "command_completed");
+    assert_eq!(completed["command"], "key remove");
+    assert_eq!(completed["data"]["key_slots"], 1);
+    assert_eq!(completed["data"]["removal_marker_created"], false);
+}
+
+#[test]
+fn key_remove_failures_are_structured_redacted_and_mapped_to_exit_codes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let added_passphrase = "added-passphrase";
+    init_repo(&repo_url, passphrase);
+    let add_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let add: Value = serde_json::from_slice(&add_output).expect("key add json");
+    let key_slot_id = add["data"]["key_slot_id"]
+        .as_str()
+        .expect("slot id")
+        .to_owned();
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "key", "remove", "not-a-slot-id"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "key slot id must be 64 hexadecimal characters",
+        ));
+
+    let wrong_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-current-passphrase")
+        .args(["--repo", &repo_url, "--json", "key", "remove", &key_slot_id])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_text = String::from_utf8(wrong_output.clone()).expect("wrong utf8");
+    let wrong: Value = serde_json::from_slice(&wrong_output).expect("wrong json");
+    assert_eq!(wrong["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong["data"]["exit_code"], 4);
+    assert!(!wrong_text.contains("wrong-current-passphrase"));
+    assert_eq!(file_count_under(&repo.join("key-slot-removals")), 0);
+
+    let lockout_output = fileferry()
+        .env("FILEFERRY_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "remove", &key_slot_id])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lockout_text = String::from_utf8(lockout_output.clone()).expect("lockout utf8");
+    let lockout: Value = serde_json::from_slice(&lockout_output).expect("lockout json");
+    assert_eq!(
+        lockout["data"]["code"],
+        "repository_key_slot_removal_would_lock_out"
+    );
+    assert_eq!(lockout["data"]["exit_code"], 4);
+    assert!(!lockout_text.contains(added_passphrase));
+    assert_eq!(file_count_under(&repo.join("key-slot-removals")), 0);
+
+    let missing = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let missing_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "remove", missing])
+        .assert()
+        .code(7)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let missing: Value = serde_json::from_slice(&missing_output).expect("missing json");
+    assert_eq!(missing["data"]["code"], "repository_key_slot_not_found");
+    assert_eq!(missing["data"]["exit_code"], 7);
+
+    let malformed_marker = repo.join(format!("key-slot-removals/{key_slot_id}"));
+    fs::create_dir_all(malformed_marker.parent().expect("marker parent"))
+        .expect("create key-slot-removals");
+    fs::write(&malformed_marker, b"not-json").expect("write malformed marker");
+    let malformed_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "remove", &key_slot_id])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let malformed: Value = serde_json::from_slice(&malformed_output).expect("malformed json");
+    assert_eq!(
+        malformed["data"]["code"],
+        "repository_key_slot_removal_decode_failed"
+    );
+    assert_eq!(malformed["data"]["exit_code"], 6);
+    assert_eq!(
+        malformed["data"]["object_key"],
+        format!("key-slot-removals/{key_slot_id}")
+    );
+}
+
+#[test]
 fn forget_dry_run_reports_plan_without_writing_markers() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

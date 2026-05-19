@@ -62,6 +62,14 @@ Current implementation status:
   keyed master-key check used to reject slots that decrypt to a different
   repository master key. Added key slots do not rewrite existing repository
   objects or the original bootstrap key slot.
+- `ferry key remove` for initialized local repositories writes immutable
+  `key-slot-removals/<key-slot-id>` JSON marker objects for externally added
+  key slots. These markers contain the slot id, repository id, format version,
+  target key-slot object name, removal timestamp, and a keyed removal check
+  derived from the repository master key. Removal markers hide matching
+  external key slots during unlock after the marker check verifies. They do
+  not delete `key-slots/<key-slot-id>` objects and do not rewrite the
+  bootstrap key slot or encrypted repository objects.
 - `ferry snapshots` and `ferry ls` read the bootstrap, unlock the master key
   from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then authenticate
   encrypted manifests before returning snapshot metadata.
@@ -76,6 +84,7 @@ Format v0 object names:
 ```text
 bootstrap
 key-slots/<key-slot-id>
+key-slot-removals/<key-slot-id>
 objects/chunk/<prefix>/<random-or-content-id>
 objects/manifest/<prefix>/<manifest-id>
 objects/index/<prefix>/<index-id>

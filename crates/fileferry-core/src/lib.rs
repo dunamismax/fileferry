@@ -210,6 +210,27 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("repository key-slot removal marker {key} could not be decoded")]
+    KeySlotRemovalDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("repository key-slot removal marker {key} is invalid: {reason}")]
+    InvalidKeySlotRemoval {
+        key: ObjectKey,
+        reason: &'static str,
+    },
+
+    #[error("repository key slot {key_slot_id} was not found")]
+    KeySlotNotFound { key_slot_id: String },
+
+    #[error(
+        "key slot {key_slot_id} cannot be removed because the supplied passphrase does not prove a remaining unlock path"
+    )]
+    KeySlotRemovalWouldLockOut { key_slot_id: String },
+
     #[error("repository format version {format_version} is not supported")]
     UnsupportedRepositoryFormat { format_version: u16 },
 
@@ -529,12 +550,14 @@ pub const REPOSITORY_FORMAT_VERSION_V0: u16 = fileferry_crypto::FORMAT_VERSION_V
 const REPOSITORY_ID_BYTES: usize = 32;
 const KEY_SLOT_ID_BYTES: usize = 32;
 const KEY_SLOT_PREFIX: &str = "key-slots";
+const KEY_SLOT_REMOVAL_PREFIX: &str = "key-slot-removals";
 
 #[derive(Debug)]
 pub struct OpenedRepository {
     pub repository_id: String,
     pub master_key: MasterKey,
     pub key_slots: usize,
+    pub unlocked_key_slot_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -551,6 +574,15 @@ pub struct KeyAddResult {
     pub key_slot_id: String,
     pub key_slots: usize,
     pub kdf: KdfParams,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct KeyRemoveResult {
+    pub repository_id: String,
+    pub removed_key_slot_id: String,
+    pub key_slots: usize,
+    pub removal_marker_object: String,
+    pub removal_marker_created: bool,
 }
 
 pub async fn create_repository(
@@ -600,6 +632,7 @@ pub async fn create_repository(
                 repository_id,
                 master_key,
                 key_slots: 1,
+                unlocked_key_slot_id: None,
             },
             format_version: REPOSITORY_FORMAT_VERSION_V0,
             key_slots: 1,
@@ -622,17 +655,22 @@ pub async fn open_repository(
 ) -> CoreResult<OpenedRepository> {
     let bootstrap = load_repository_bootstrap(store).await?;
     let slots = repository_key_slots(store, &bootstrap).await?;
-    let key_slots = slots.len();
 
-    for slot in slots {
+    for slot in &slots {
         let key_slot = slot.stored.to_key_slot()?;
         match unlock_master_key(passphrase, &key_slot) {
             Ok(master_key) => {
                 slot.verify_master_key(&master_key, &bootstrap.repository_id)?;
+                if slot.is_removed(&master_key, &bootstrap.repository_id)? {
+                    continue;
+                }
+                let key_slots =
+                    visible_key_slot_count(&slots, &master_key, &bootstrap.repository_id)?;
                 return Ok(OpenedRepository {
                     repository_id: bootstrap.repository_id.clone(),
                     master_key,
                     key_slots,
+                    unlocked_key_slot_id: slot.key_slot_id.clone(),
                 });
             }
             Err(CryptoError::Decryption) => {}
@@ -685,6 +723,89 @@ pub async fn add_repository_key_slot(
     })
 }
 
+pub async fn remove_repository_key_slot(
+    store: &dyn ObjectStore,
+    current_passphrase: &SecretString,
+    key_slot_id: &str,
+) -> CoreResult<KeyRemoveResult> {
+    validate_key_slot_id(key_slot_id)?;
+    let removal_key = key_slot_removal_object_key(key_slot_id)?;
+    let opened = open_repository(store, current_passphrase).await?;
+
+    if let Some(marker) = read_key_slot_removal_marker_if_present(
+        store,
+        &removal_key,
+        key_slot_id,
+        &opened.repository_id,
+    )
+    .await?
+    {
+        marker.verify(&removal_key, &opened.master_key, &opened.repository_id)?;
+        return Ok(KeyRemoveResult {
+            repository_id: opened.repository_id,
+            removed_key_slot_id: key_slot_id.to_owned(),
+            key_slots: opened.key_slots,
+            removal_marker_object: removal_key.as_str().to_owned(),
+            removal_marker_created: false,
+        });
+    }
+
+    let key_slot_key = key_slot_object_key(key_slot_id)?;
+    let bytes = store
+        .get(&key_slot_key)
+        .await
+        .map_err(|source| match source {
+            StorageError::ObjectNotFound { .. } => CoreError::KeySlotNotFound {
+                key_slot_id: key_slot_id.to_owned(),
+            },
+            source => CoreError::Storage { source },
+        })?;
+    let external: StoredExternalKeySlot =
+        serde_json::from_slice(&bytes).map_err(|source| CoreError::KeySlotDecode {
+            key: key_slot_key.clone(),
+            source,
+        })?;
+    external.validate(&key_slot_key, &opened.repository_id)?;
+
+    if opened.unlocked_key_slot_id.as_deref() == Some(key_slot_id) {
+        return Err(CoreError::KeySlotRemovalWouldLockOut {
+            key_slot_id: key_slot_id.to_owned(),
+        });
+    }
+
+    let removed_at_unix_seconds = current_unix_seconds()?;
+    let marker = StoredKeySlotRemoval {
+        schema_version: 0,
+        magic: REPOSITORY_MAGIC.to_owned(),
+        format_version: REPOSITORY_FORMAT_VERSION_V0,
+        repository_id: opened.repository_id.clone(),
+        key_slot_id: key_slot_id.to_owned(),
+        key_slot_object: key_slot_key.as_str().to_owned(),
+        removed_at_unix_seconds,
+        master_key_removal_check: master_key_removal_check(
+            &opened.master_key,
+            &opened.repository_id,
+            key_slot_id,
+        )?,
+    };
+    let marker_bytes =
+        serde_json::to_vec_pretty(&marker).map_err(|source| CoreError::Serialization { source })?;
+    let created = store
+        .put_if_absent(&removal_key, &marker_bytes)
+        .await
+        .map_err(|source| CoreError::Storage { source })?
+        == PutStatus::Created;
+    let reopened = open_repository(store, current_passphrase).await?;
+
+    Ok(KeyRemoveResult {
+        repository_id: reopened.repository_id,
+        removed_key_slot_id: key_slot_id.to_owned(),
+        key_slots: reopened.key_slots,
+        removal_marker_object: removal_key.as_str().to_owned(),
+        removal_marker_created: created,
+    })
+}
+
 fn bootstrap_object_key() -> CoreResult<ObjectKey> {
     ObjectKey::new("bootstrap").map_err(|source| CoreError::ObjectKey { source })
 }
@@ -696,6 +817,30 @@ fn key_slot_object_key(key_slot_id: &str) -> CoreResult<ObjectKey> {
 
 fn key_slot_prefix() -> CoreResult<ObjectKeyPrefix> {
     ObjectKeyPrefix::new(KEY_SLOT_PREFIX).map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn key_slot_removal_object_key(key_slot_id: &str) -> CoreResult<ObjectKey> {
+    ObjectKey::new(format!("{KEY_SLOT_REMOVAL_PREFIX}/{key_slot_id}"))
+        .map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn key_slot_removal_prefix() -> CoreResult<ObjectKeyPrefix> {
+    ObjectKeyPrefix::new(KEY_SLOT_REMOVAL_PREFIX).map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn validate_key_slot_id(key_slot_id: &str) -> CoreResult<()> {
+    if !key_slot_id_is_valid(key_slot_id) {
+        return Err(CoreError::InvalidKeySlot {
+            key: key_slot_object_key("invalid")?,
+            reason: "key slot id is invalid",
+        });
+    }
+    Ok(())
+}
+
+fn key_slot_id_is_valid(key_slot_id: &str) -> bool {
+    key_slot_id.len() == KEY_SLOT_ID_BYTES * 2
+        && key_slot_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -759,6 +904,8 @@ struct RepositoryKeySlot {
     key_slot_id: Option<String>,
     stored: StoredKeySlot,
     master_key_check: Option<String>,
+    removal: Option<StoredKeySlotRemoval>,
+    removal_key: Option<ObjectKey>,
 }
 
 impl RepositoryKeySlot {
@@ -779,6 +926,28 @@ impl RepositoryKeySlot {
         }
         Ok(())
     }
+
+    fn is_removed(&self, master_key: &MasterKey, repository_id: &str) -> CoreResult<bool> {
+        let (Some(removal), Some(removal_key)) = (&self.removal, &self.removal_key) else {
+            return Ok(false);
+        };
+        removal.verify(removal_key, master_key, repository_id)?;
+        Ok(true)
+    }
+}
+
+fn visible_key_slot_count(
+    slots: &[RepositoryKeySlot],
+    master_key: &MasterKey,
+    repository_id: &str,
+) -> CoreResult<usize> {
+    let mut visible = 0;
+    for slot in slots {
+        if !slot.is_removed(master_key, repository_id)? {
+            visible += 1;
+        }
+    }
+    Ok(visible)
 }
 
 async fn repository_key_slots(
@@ -794,8 +963,11 @@ async fn repository_key_slots(
             key_slot_id: None,
             stored,
             master_key_check: None,
+            removal: None,
+            removal_key: None,
         })
         .collect::<Vec<_>>();
+    let removals = repository_key_slot_removals(store, &bootstrap.repository_id).await?;
 
     let mut external_keys = store
         .list_prefix(&key_slot_prefix()?)
@@ -816,13 +988,88 @@ async fn repository_key_slots(
         external.validate(&key, &bootstrap.repository_id)?;
         slots.push(RepositoryKeySlot {
             object_key: Some(key),
-            key_slot_id: Some(external.key_slot_id),
+            key_slot_id: Some(external.key_slot_id.clone()),
             stored: external.key_slot,
             master_key_check: Some(external.master_key_check),
+            removal: removals
+                .get(&external.key_slot_id)
+                .map(|(_, marker)| marker.clone()),
+            removal_key: removals
+                .get(&external.key_slot_id)
+                .map(|(key, _)| key.clone()),
         });
     }
 
     Ok(slots)
+}
+
+async fn repository_key_slot_removals(
+    store: &dyn ObjectStore,
+    repository_id: &str,
+) -> CoreResult<BTreeMap<String, (ObjectKey, StoredKeySlotRemoval)>> {
+    let mut removal_keys = store
+        .list_prefix(&key_slot_removal_prefix()?)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    removal_keys.sort();
+
+    let mut removals = BTreeMap::new();
+    for key in removal_keys {
+        let key_slot_id = key
+            .as_str()
+            .strip_prefix(&format!("{KEY_SLOT_REMOVAL_PREFIX}/"))
+            .ok_or_else(|| CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "key-slot removal marker is outside the removal prefix",
+            })?
+            .to_owned();
+        let marker = read_key_slot_removal_marker(store, &key, &key_slot_id, repository_id).await?;
+        removals.insert(marker.key_slot_id.clone(), (key, marker));
+    }
+
+    Ok(removals)
+}
+
+async fn read_key_slot_removal_marker_if_present(
+    store: &dyn ObjectStore,
+    marker_key: &ObjectKey,
+    key_slot_id: &str,
+    repository_id: &str,
+) -> CoreResult<Option<StoredKeySlotRemoval>> {
+    let bytes = match store.get(marker_key).await {
+        Ok(bytes) => bytes,
+        Err(StorageError::ObjectNotFound { .. }) => return Ok(None),
+        Err(source) => return Err(CoreError::Storage { source }),
+    };
+    decode_key_slot_removal_marker(&bytes, marker_key, key_slot_id, repository_id).map(Some)
+}
+
+async fn read_key_slot_removal_marker(
+    store: &dyn ObjectStore,
+    marker_key: &ObjectKey,
+    key_slot_id: &str,
+    repository_id: &str,
+) -> CoreResult<StoredKeySlotRemoval> {
+    let bytes = store
+        .get(marker_key)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    decode_key_slot_removal_marker(&bytes, marker_key, key_slot_id, repository_id)
+}
+
+fn decode_key_slot_removal_marker(
+    bytes: &[u8],
+    marker_key: &ObjectKey,
+    key_slot_id: &str,
+    repository_id: &str,
+) -> CoreResult<StoredKeySlotRemoval> {
+    let marker: StoredKeySlotRemoval =
+        serde_json::from_slice(bytes).map_err(|source| CoreError::KeySlotRemovalDecode {
+            key: marker_key.clone(),
+            source,
+        })?;
+    marker.validate(marker_key, key_slot_id, repository_id)?;
+    Ok(marker)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -833,6 +1080,100 @@ struct StoredExternalKeySlot {
     key_slot_id: String,
     key_slot: StoredKeySlot,
     master_key_check: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredKeySlotRemoval {
+    schema_version: u16,
+    magic: String,
+    format_version: u16,
+    repository_id: String,
+    key_slot_id: String,
+    key_slot_object: String,
+    removed_at_unix_seconds: u64,
+    master_key_removal_check: String,
+}
+
+impl StoredKeySlotRemoval {
+    fn validate(&self, key: &ObjectKey, key_slot_id: &str, repository_id: &str) -> CoreResult<()> {
+        if self.schema_version != 0 {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "unsupported key-slot removal marker schema version",
+            });
+        }
+        if self.magic != REPOSITORY_MAGIC {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "repository magic is not recognized",
+            });
+        }
+        if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+            return Err(CoreError::UnsupportedRepositoryFormat {
+                format_version: self.format_version,
+            });
+        }
+        if self.repository_id != repository_id {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "repository id does not match bootstrap",
+            });
+        }
+        if self.key_slot_id != key_slot_id {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "key slot id does not match removal marker object key",
+            });
+        }
+        if !key_slot_id_is_valid(&self.key_slot_id) {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "key slot id is invalid",
+            });
+        }
+        let expected_key = key_slot_removal_object_key(&self.key_slot_id)?;
+        if &expected_key != key {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "key slot id does not match removal marker object key",
+            });
+        }
+        let expected_key_slot_object = key_slot_object_key(&self.key_slot_id)?;
+        if self.key_slot_object != expected_key_slot_object.as_str() {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "key slot object does not match key slot id",
+            });
+        }
+        if self.master_key_removal_check.len() != 64
+            || !self
+                .master_key_removal_check
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "master key removal check is invalid",
+            });
+        }
+        Ok(())
+    }
+
+    fn verify(
+        &self,
+        key: &ObjectKey,
+        master_key: &MasterKey,
+        repository_id: &str,
+    ) -> CoreResult<()> {
+        let expected = master_key_removal_check(master_key, repository_id, &self.key_slot_id)?;
+        if self.master_key_removal_check != expected {
+            return Err(CoreError::InvalidKeySlotRemoval {
+                key: key.clone(),
+                reason: "key-slot removal marker failed authentication",
+            });
+        }
+        Ok(())
+    }
 }
 
 impl StoredExternalKeySlot {
@@ -854,12 +1195,7 @@ impl StoredExternalKeySlot {
                 reason: "repository id does not match bootstrap",
             });
         }
-        if self.key_slot_id.len() != KEY_SLOT_ID_BYTES * 2
-            || !self
-                .key_slot_id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        {
+        if !key_slot_id_is_valid(&self.key_slot_id) {
             return Err(CoreError::InvalidKeySlot {
                 key: key.clone(),
                 reason: "key slot id is invalid",
@@ -3489,6 +3825,24 @@ fn master_key_check(
     .map_err(|source| CoreError::Encryption { source })
 }
 
+fn master_key_removal_check(
+    master_key: &MasterKey,
+    repository_id: &str,
+    key_slot_id: &str,
+) -> CoreResult<String> {
+    let mut bytes = Vec::with_capacity("key-slot-removal".len() + 1 + key_slot_id.len());
+    bytes.extend_from_slice(b"key-slot-removal\0");
+    bytes.extend_from_slice(key_slot_id.as_bytes());
+    keyed_content_id(
+        master_key,
+        KeyPurpose::KeySlot,
+        repository_id.as_bytes(),
+        &bytes,
+    )
+    .map(|id| hex_bytes(&id))
+    .map_err(|source| CoreError::Encryption { source })
+}
+
 fn check_read_error(error: CoreError, expected_key: ObjectKey) -> CoreError {
     match error {
         CoreError::Storage {
@@ -3903,6 +4257,116 @@ mod tests {
             .expect("open repository with added passphrase");
         assert_eq!(opened.repository_id, created.repository.repository_id);
         assert_eq!(opened.key_slots, 2);
+    }
+
+    #[tokio::test]
+    async fn repository_key_remove_marks_added_slot_removed_without_deleting_slot_object() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let added = SecretString::from("added passphrase");
+        let created = create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let added_slot = add_repository_key_slot(&store, &original, &added, KdfParams::for_tests())
+            .await
+            .expect("add key slot");
+        let key_slot_key = key_slot_object_key(&added_slot.key_slot_id).expect("key slot key");
+        let removal_key =
+            key_slot_removal_object_key(&added_slot.key_slot_id).expect("removal key");
+
+        let removed = remove_repository_key_slot(&store, &original, &added_slot.key_slot_id)
+            .await
+            .expect("remove key slot");
+
+        assert_eq!(removed.repository_id, created.repository.repository_id);
+        assert_eq!(removed.removed_key_slot_id, added_slot.key_slot_id);
+        assert_eq!(removed.key_slots, 1);
+        assert!(removed.removal_marker_created);
+        assert_eq!(removed.removal_marker_object, removal_key.as_str());
+        assert!(
+            store
+                .exists(&key_slot_key)
+                .await
+                .expect("key slot object still exists")
+        );
+        assert!(
+            store
+                .exists(&removal_key)
+                .await
+                .expect("removal marker exists")
+        );
+
+        let opened = open_repository(&store, &original)
+            .await
+            .expect("remaining passphrase unlocks");
+        assert_eq!(opened.key_slots, 1);
+        let removed_unlock = open_repository(&store, &added)
+            .await
+            .expect_err("removed passphrase no longer unlocks");
+        assert!(matches!(removed_unlock, CoreError::RepositoryUnlock { .. }));
+
+        let removed_again = remove_repository_key_slot(&store, &original, &added_slot.key_slot_id)
+            .await
+            .expect("repeat removal is idempotent");
+        assert_eq!(removed_again.key_slots, 1);
+        assert!(!removed_again.removal_marker_created);
+    }
+
+    #[tokio::test]
+    async fn repository_key_remove_requires_proven_remaining_unlock_path() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let added = SecretString::from("added passphrase");
+        create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let added_slot = add_repository_key_slot(&store, &original, &added, KdfParams::for_tests())
+            .await
+            .expect("add key slot");
+
+        let error = remove_repository_key_slot(&store, &added, &added_slot.key_slot_id)
+            .await
+            .expect_err("removing currently used slot without another proof fails");
+
+        assert!(matches!(
+            error,
+            CoreError::KeySlotRemovalWouldLockOut { key_slot_id }
+                if key_slot_id == added_slot.key_slot_id
+        ));
+        assert!(
+            !store
+                .exists(&key_slot_removal_object_key(&added_slot.key_slot_id).expect("removal key"))
+                .await
+                .expect("removal marker absent")
+        );
+        open_repository(&store, &added)
+            .await
+            .expect("added passphrase still unlocks after refused removal");
+    }
+
+    #[tokio::test]
+    async fn repository_key_remove_reports_missing_slot_id() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let missing = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let error = remove_repository_key_slot(&store, &original, missing)
+            .await
+            .expect_err("missing key slot fails");
+
+        assert!(matches!(
+            error,
+            CoreError::KeySlotNotFound { key_slot_id } if key_slot_id == missing
+        ));
     }
 
     #[tokio::test]

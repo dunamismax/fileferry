@@ -193,8 +193,13 @@ key add
   data.reencrypted_repository_objects: boolean
 
 key remove
+  data.repository_id: string
   data.removed_key_slot_id: string
   data.key_slots: integer
+  data.removal_marker_object: string
+  data.removal_marker_created: boolean
+  data.deleted_key_slot_objects: boolean
+  data.reencrypted_repository_objects: boolean
 
 key rotate
   data.added_key_slot_id: string
@@ -599,6 +604,21 @@ rewrite encrypted chunks, manifests, indexes, commit markers, forget markers,
 or policy/config objects, and does not recover a lost master key. Wrong
 existing passphrases fail with exit code `4`; malformed key-slot or bootstrap
 state fails closed as an integrity failure with exit code `6`.
+
+`ferry key remove <KEY_SLOT_ID>` opens an initialized local repository with
+the current passphrase from `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`, then writes one immutable
+`key-slot-removals/<key-slot-id>` marker for an externally added key slot. It
+does not delete `key-slots/<key-slot-id>` objects, remove the original
+bootstrap key slot, create a new master key, rewrite encrypted repository
+objects, or recover lost keys. The supplied current passphrase must prove a
+remaining non-removed unlock path before a marker is written; otherwise the
+command fails closed with exit code `4`. Missing key-slot ids fail with exit
+code `7`; malformed key-slot or key-slot removal marker state fails as an
+integrity failure with exit code `6`. Output includes the repository id,
+removed key-slot id, visible key-slot count, removal marker object,
+`removal_marker_created`, `deleted_key_slot_objects: false`, and
+`reencrypted_repository_objects: false`.
 S3-compatible key management is not implemented yet.
 
 ## Local Backend Failure Evidence

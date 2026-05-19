@@ -88,6 +88,18 @@ Last reviewed: 2026-05-19.
   objects, and does not recover lost keys. Human, JSON, and JSONL-safe output
   report the new key-slot id, total visible key-slot count, KDF parameters,
   and `reencrypted_repository_objects: false`.
+- `ferry key remove <KEY_SLOT_ID>` opens initialized local repositories,
+  unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, and writes
+  one immutable `key-slot-removals/<key-slot-id>` marker for an externally
+  added key slot only after the supplied current passphrase proves a remaining
+  non-removed unlock path. It does not delete `key-slots/<key-slot-id>`
+  objects, remove the original bootstrap key slot, create a new master key,
+  rewrite chunks, manifests, indexes, commit markers, forget markers, or
+  policy/config objects, re-encrypt repository objects, or recover lost keys.
+  Human, JSON, and JSONL-safe output report the removed key-slot id, total
+  visible key-slot count, marker object, marker creation status, and explicit
+  `deleted_key_slot_objects: false` and
+  `reencrypted_repository_objects: false`.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -152,11 +164,13 @@ not complete. `ferry check` supports full referenced-chunk verification and
 deterministic count/percentage referenced-chunk subsets for initialized local
 repositories. `ferry forget` is marker-only for initialized local repositories;
 it hides forgotten snapshots from normal snapshot discovery but does not
-delete objects or reclaim storage. `ferry key add` is implemented for
-initialized local repositories only; other key-management commands and
-S3-compatible key management are not implemented. Describe backup, restore,
-check, forget, key management, repository, storage, crypto, or platform
-behavior only to the level backed by code, tests, and platform evidence.
+delete objects or reclaim storage. `ferry key add` and `ferry key remove` are
+implemented for initialized local repositories only; `key remove` is limited
+to marker-based removal of externally added key slots. Key rotate, recovery
+export, full repository rekey, bootstrap-slot removal, and S3-compatible key
+management are not implemented. Describe backup, restore, check, forget, key
+management, repository, storage, crypto, or platform behavior only to the
+level backed by code, tests, and platform evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
@@ -318,6 +332,44 @@ Non-goals:
 - Rewriting existing encrypted backup data unless explicitly designed,
   documented, and verified.
 - Silent weakening or bypassing of KDF/key-slot behavior.
+
+### Milestone 6 - Key Remove First Slice
+
+Goal: Implement `ferry key remove <KEY_SLOT_ID>` for initialized local
+repositories without deleting key material or making silent lockout possible.
+
+Status: Complete as of 2026-05-19 for marker-based removal of externally
+added key slots in initialized local repositories.
+
+Definition of done:
+
+- CLI exposes `ferry key remove <KEY_SLOT_ID>` for local repositories with
+  human, JSON, and JSONL-safe output.
+- Removal is marker-based and writes an immutable
+  `key-slot-removals/<key-slot-id>` object instead of deleting
+  `key-slots/<key-slot-id>` objects.
+- The command removes only externally added key slots; the original bootstrap
+  key slot is not removable in this slice.
+- The repository must first unlock with `FILEFERRY_PASSWORD` or
+  `FILEFERRY_PASSWORD_FILE`.
+- At least one remaining non-removed unlock path is proven with the supplied
+  current passphrase before a removal marker is written.
+- Removed key slots no longer unlock the repository, while a proven remaining
+  passphrase still unlocks it.
+- Tests cover success, JSON/JSONL output, removed-slot rejection, wrong
+  password/key behavior, missing key-slot ids, malformed removal markers,
+  lockout prevention, redaction, and exit-code mapping.
+- `docs/security.md`, `docs/repository-format.md`, `docs/cli-contract.md`,
+  and this file reflect only the implemented behavior.
+
+Non-goals:
+
+- Physical deletion of key-slot objects.
+- Removing the original bootstrap key slot.
+- Full repository rekey or re-encryption.
+- S3-compatible key management.
+- Recovery export, key rotation, prune, repair, or broad key-management
+  completion.
 
 ## Current Deprioritized Polish
 
@@ -737,7 +789,7 @@ where documented verification passes on a clean checkout.
 ### Phase 10 - Key Management
 
 - [x] Implement `key add`.
-- [ ] Implement `key remove`.
+- [x] Implement `key remove`.
 - [ ] Implement `key rotate`.
 - [ ] Implement `key export-recovery`.
 - [ ] Document operational recovery procedures.
@@ -839,6 +891,24 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone 6 key remove first slice for initialized
+  local repositories by implementing `ferry key remove <KEY_SLOT_ID>` for
+  externally added key slots. The command unlocks with `FILEFERRY_PASSWORD` or
+  `FILEFERRY_PASSWORD_FILE`, proves the supplied passphrase still unlocks a
+  remaining non-removed slot before writing removal state, and writes one
+  immutable `key-slot-removals/<key-slot-id>` marker. Removed slots no longer
+  unlock after the marker verifies, while the proven remaining passphrase
+  still unlocks. The command does not delete `key-slots/<key-slot-id>`
+  objects, remove the original bootstrap slot, create a new master key,
+  rewrite or re-encrypt repository objects, recover lost keys, or implement
+  S3-compatible key management. Added human/JSON/JSONL-safe CLI output,
+  idempotent marker handling, structured failure mapping for wrong passwords,
+  missing slot ids, malformed removal markers, and lockout prevention, plus
+  security, repository-format, CLI contract, README, and build-plan docs.
+  Verified with `cargo test -p fileferry-core repository_key_remove
+  --no-fail-fast`, `cargo test -p fileferry-cli key_remove --no-fail-fast`,
+  `cargo test -p fileferry-core`, `cargo test -p fileferry-cli`, `just fmt`,
+  `just check`, `just test`, `just build`, and `git diff --check`.
 - 2026-05-19 - Completed Milestone 5 key management first slice for
   initialized local repositories by implementing `ferry key add`. The command
   unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, accepts the

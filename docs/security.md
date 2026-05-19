@@ -156,6 +156,30 @@ or policy/config objects, and does not recover a lost master key. If no
 existing unlock path works, the command fails closed without writing a new key
 slot.
 
+## Key Remove
+
+`ferry key remove <KEY_SLOT_ID>` removes one externally added passphrase
+unlock path for an initialized local repository. The command must first unlock
+the repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`.
+
+Removal is marker-based. The command writes an immutable
+`key-slot-removals/<key-slot-id>` marker and does not delete the original
+`key-slots/<key-slot-id>` object. The marker carries a keyed removal check
+derived from the repository master key, repository id, and key-slot id, so a
+marker is accepted only after the candidate slot decrypts to the repository
+master key and the marker check verifies.
+
+This slice removes only externally added key slots. The original bootstrap key
+slot is not removable. Before writing a removal marker, the command proves
+that the supplied current passphrase unlocks a remaining non-removed slot. If
+the supplied passphrase only proves the slot being removed, the command fails
+closed without writing removal state.
+
+`key remove` does not create a new repository master key, does not re-encrypt
+or rewrite chunks, manifests, indexes, snapshot commit markers, forget
+markers, policy/config objects, or the original bootstrap slot, and does not
+recover lost keys.
+
 ## Recovery Export
 
 Recovery export is not implemented yet. Format v0 design target:

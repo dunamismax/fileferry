@@ -355,12 +355,13 @@ storage groundwork, and core backup/restore/check primitives. The CLI
 currently exposes `version`, `completion`, local and S3-compatible repository
 `init`, and local repository `backup`, `restore`, `snapshots`, `ls`, and
 `check`; it also exposes local repository `forget` as marker-only retention
-state without object deletion and `ferry key add` as an append-only passphrase
-key-slot addition command for initialized local repositories. Restore
-currently covers directory entries, regular-file contents, Unix symlinks, and
-modified timestamps for restored regular files and directories from
-initialized local repositories. S3-compatible backup, restore, snapshots, ls,
-check, forget, and key management are not implemented yet. Other metadata
+state without object deletion, `ferry key add` as an append-only passphrase
+key-slot addition command, and `ferry key remove` as marker-based external
+key-slot removal for initialized local repositories. Restore currently covers
+directory entries, regular-file contents, Unix symlinks, and modified
+timestamps for restored regular files and directories from initialized local
+repositories. S3-compatible backup, restore, snapshots, ls, check, forget,
+and key management are not implemented yet. Other metadata
 application is not implemented yet. Check failures in JSON and JSONL modes now
 emit machine-readable failure envelopes with stable codes and object-key
 context where available.
@@ -370,8 +371,12 @@ evaluates retention keep rules, supports dry-run, writes forget markers only
 when not in dry-run, and does not reclaim storage until prune is implemented
 separately. `ferry key add` writes one immutable additional key slot for the
 existing repository master key; it does not re-encrypt repository objects or
-recover lost keys. Broader metadata application is not implemented yet. The
-repository format is still not frozen.
+recover lost keys. `ferry key remove` writes one immutable
+`key-slot-removals/<key-slot-id>` marker for an externally added key slot; it
+does not delete key-slot objects, remove the original bootstrap slot, rekey,
+re-encrypt repository objects, or recover lost keys. Broader metadata
+application is not implemented yet. The repository format is still not
+frozen.
 
 The normal local gate is:
 
