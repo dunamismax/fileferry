@@ -138,6 +138,24 @@ Unlock flow:
 4. Fail closed if derivation fails, authentication fails, or the plaintext is
    not exactly 32 bytes.
 
+## Key Add
+
+`ferry key add` adds one new passphrase unlock path for an initialized local
+repository. The command must first unlock the repository with the existing
+passphrase from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`. The new
+passphrase comes from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`FILEFERRY_NEW_PASSWORD_FILE`.
+
+The command creates a new key slot that wraps the existing repository master
+key. It writes that slot as an immutable `key-slots/<key-slot-id>` object and
+does not rewrite the original bootstrap key slot.
+
+`key add` does not create a new repository master key, does not re-encrypt or
+rewrite chunks, manifests, indexes, snapshot commit markers, forget markers,
+or policy/config objects, and does not recover a lost master key. If no
+existing unlock path works, the command fails closed without writing a new key
+slot.
+
 ## Recovery Export
 
 Recovery export is not implemented yet. Format v0 design target:

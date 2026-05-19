@@ -55,6 +55,13 @@ Current implementation status:
 - The key-slot fields are plaintext only to the extent required for
   passphrase unlock; the repository master key remains encrypted and
   authenticated.
+- `ferry key add` for initialized local repositories writes additional
+  passphrase key slots as immutable `key-slots/<key-slot-id>` JSON objects.
+  These objects contain the non-sensitive slot id, repository id, format
+  version, KDF parameters, salt, nonce, encrypted master-key bytes, and a
+  keyed master-key check used to reject slots that decrypt to a different
+  repository master key. Added key slots do not rewrite existing repository
+  objects or the original bootstrap key slot.
 - `ferry snapshots` and `ferry ls` read the bootstrap, unlock the master key
   from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then authenticate
   encrypted manifests before returning snapshot metadata.
@@ -68,6 +75,7 @@ Format v0 object names:
 
 ```text
 bootstrap
+key-slots/<key-slot-id>
 objects/chunk/<prefix>/<random-or-content-id>
 objects/manifest/<prefix>/<manifest-id>
 objects/index/<prefix>/<index-id>

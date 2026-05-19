@@ -194,6 +194,7 @@ pub enum KeyPurpose {
     PolicyConfig,
     UploadState,
     PruneMark,
+    KeySlot,
 }
 
 impl KeyPurpose {
@@ -206,6 +207,7 @@ impl KeyPurpose {
             Self::PolicyConfig => b"policy-config",
             Self::UploadState => b"upload-state",
             Self::PruneMark => b"prune-mark",
+            Self::KeySlot => b"key-slot",
         }
     }
 }

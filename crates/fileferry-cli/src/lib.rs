@@ -4,9 +4,10 @@ use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, BackupRequest, CheckReadDataSubset,
     CheckRepositoryOptions, CoreError, MetadataStatus, RestoreDestinationAction,
     RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection,
-    create_repository, list_snapshot_entries, open_repository, select_snapshot, snapshot_summaries,
+    add_repository_key_slot, create_repository, list_snapshot_entries, open_repository,
+    select_snapshot, snapshot_summaries,
 };
-use fileferry_crypto::KdfParams;
+use fileferry_crypto::{KdfAlgorithm, KdfParams};
 use fileferry_platform::{EntryKind, MetadataValue};
 use fileferry_policy::{
     PolicyError, RetentionAction, RetentionCount, RetentionDecision, RetentionPlan,
@@ -171,6 +172,12 @@ pub enum Command {
         keep_tags: Vec<String>,
     },
 
+    /// Manage repository unlock keys.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
+
     /// Restore entries from a committed snapshot.
     Restore {
         /// Snapshot id to restore.
@@ -206,6 +213,16 @@ pub enum Command {
     Version,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum KeyCommand {
+    /// Add a passphrase key slot for the existing repository master key.
+    Add {
+        /// File containing the new passphrase to add.
+        #[arg(long = "new-password-file", value_name = "FILE")]
+        new_password_file: Option<PathBuf>,
+    },
+}
+
 impl Command {
     fn name(&self) -> &'static str {
         match self {
@@ -216,6 +233,9 @@ impl Command {
             Self::Ls { .. } => "ls",
             Self::Check { .. } => "check",
             Self::Forget { .. } => "forget",
+            Self::Key {
+                command: KeyCommand::Add { .. },
+            } => "key add",
             Self::Restore { .. } => "restore",
             Self::Version => "version",
         }
@@ -269,8 +289,20 @@ pub enum RepositoryError {
     #[error("FILEFERRY_PASSWORD or FILEFERRY_PASSWORD_FILE is required for repository access")]
     MissingPassword,
 
+    #[error(
+        "--new-password-file, FILEFERRY_NEW_PASSWORD, or FILEFERRY_NEW_PASSWORD_FILE is required for key add"
+    )]
+    MissingNewPassword,
+
     #[error("password file {path} could not be read: {source}")]
     PasswordFileRead {
+        path: Redacted,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("new password file {path} could not be read: {source}")]
+    NewPasswordFileRead {
         path: Redacted,
         #[source]
         source: io::Error,
@@ -306,7 +338,9 @@ impl RepositoryError {
         match self {
             Self::MissingRepository
             | Self::MissingPassword
+            | Self::MissingNewPassword
             | Self::PasswordFileRead { .. }
+            | Self::NewPasswordFileRead { .. }
             | Self::InvalidFileRepositoryUrl { .. }
             | Self::InvalidS3RepositoryUrl { .. }
             | Self::MissingS3Environment { .. }
@@ -329,6 +363,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::SnapshotPathNotFound { .. } => 7,
         CoreError::RepositoryBootstrapDecode { .. }
         | CoreError::InvalidRepositoryBootstrap { .. }
+        | CoreError::KeySlotDecode { .. }
+        | CoreError::InvalidKeySlot { .. }
         | CoreError::InvalidSnapshotManifest { .. }
         | CoreError::CommitDecode { .. }
         | CoreError::InvalidCommitMarker { .. }
@@ -590,6 +626,36 @@ struct InitData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct KeyAddData {
+    repository_id: String,
+    key_slot_id: String,
+    key_slots: usize,
+    kdf: KdfSummary,
+    reencrypted_repository_objects: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct KdfSummary {
+    algorithm: &'static str,
+    memory_cost_kib: u32,
+    time_cost: u32,
+    parallelism: u32,
+}
+
+impl From<KdfParams> for KdfSummary {
+    fn from(params: KdfParams) -> Self {
+        Self {
+            algorithm: match params.algorithm {
+                KdfAlgorithm::Argon2idV19 => "argon2id_v19",
+            },
+            memory_cost_kib: params.memory_cost_kib,
+            time_cost: params.time_cost,
+            parallelism: params.parallelism,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct BackupData {
     snapshot_id: String,
     repository_id: String,
@@ -807,6 +873,12 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             )?;
             forget(mode, &config, policy, dry_run)
         }
+        Command::Key {
+            command: KeyCommand::Add { new_password_file },
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            key_add(mode, &config, new_password_file)
+        }
         Command::Restore {
             snapshot,
             tag,
@@ -944,7 +1016,11 @@ fn failure_code(error: &CliError) -> &'static str {
         CliError::Repository(error) => match error {
             RepositoryError::MissingRepository => "repository_url_missing",
             RepositoryError::MissingPassword => "repository_password_missing",
+            RepositoryError::MissingNewPassword => "repository_new_password_missing",
             RepositoryError::PasswordFileRead { .. } => "repository_password_file_read_failed",
+            RepositoryError::NewPasswordFileRead { .. } => {
+                "repository_new_password_file_read_failed"
+            }
             RepositoryError::UnsupportedRepository { .. } => "repository_url_unsupported",
             RepositoryError::InvalidFileRepositoryUrl { .. } => "repository_file_url_invalid",
             RepositoryError::InvalidS3RepositoryUrl { .. } => "repository_s3_url_invalid",
@@ -998,6 +1074,8 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
         CoreError::RepositoryNotInitialized => "repository_not_initialized",
         CoreError::InvalidRepositoryBootstrap { .. } => "repository_bootstrap_invalid",
+        CoreError::KeySlotDecode { .. } => "repository_key_slot_decode_failed",
+        CoreError::InvalidKeySlot { .. } => "repository_key_slot_invalid",
         CoreError::UnsupportedRepositoryFormat { .. } => "repository_format_unsupported",
         CoreError::UnsupportedRepositoryFeatures => "repository_features_unsupported",
         CoreError::RepositoryUnlock { .. } => "repository_unlock_failed",
@@ -1077,6 +1155,7 @@ fn failure_path(error: &CliError) -> Option<String> {
         },
         CliError::Repository(error) => match error {
             RepositoryError::PasswordFileRead { path, .. } => Some(path.to_string()),
+            RepositoryError::NewPasswordFileRead { path, .. } => Some(path.to_string()),
             _ => None,
         },
         CliError::Core(error) => core_failure_path(error),
@@ -1140,6 +1219,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         CoreError::ObjectDecode { key, .. }
         | CoreError::ObjectAuthentication { key, .. }
         | CoreError::MetadataDecode { key, .. }
+        | CoreError::KeySlotDecode { key, .. }
+        | CoreError::InvalidKeySlot { key, .. }
         | CoreError::MetadataIdentityMismatch {
             object_key: key, ..
         }
@@ -1467,6 +1548,37 @@ fn init_repository(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, 
                 data.repository_id, data.repository_url
             )
         }
+    })
+}
+
+fn key_add(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    new_password_file: Option<PathBuf>,
+) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let current_passphrase = repository_passphrase()?;
+    let new_passphrase = new_repository_passphrase(new_password_file.as_deref())?;
+    let runtime = tokio_runtime()?;
+    let result = runtime.block_on(add_repository_key_slot(
+        &repository.store,
+        &current_passphrase,
+        &new_passphrase,
+        KdfParams::default(),
+    ))?;
+    let data = KeyAddData {
+        repository_id: result.repository_id,
+        key_slot_id: result.key_slot_id,
+        key_slots: result.key_slots,
+        kdf: KdfSummary::from(result.kdf),
+        reencrypted_repository_objects: false,
+    };
+
+    emit_command(mode, "key add", data, |data| {
+        format!(
+            "Added key slot {} to repository {}\nkey_slots={}\nreencrypted_repository_objects=false\n",
+            data.key_slot_id, data.repository_id, data.key_slots
+        )
     })
 }
 
@@ -2034,6 +2146,33 @@ fn repository_passphrase() -> Result<SecretString, RepositoryError> {
     }
 
     Err(RepositoryError::MissingPassword)
+}
+
+fn new_repository_passphrase(path: Option<&Path>) -> Result<SecretString, RepositoryError> {
+    if let Some(path) = path {
+        return read_new_password_file(path);
+    }
+
+    if let Ok(value) = env::var("FILEFERRY_NEW_PASSWORD") {
+        return Ok(SecretString::from(value));
+    }
+
+    if let Some(path) = env::var_os("FILEFERRY_NEW_PASSWORD_FILE").map(PathBuf::from) {
+        return read_new_password_file(&path);
+    }
+
+    Err(RepositoryError::MissingNewPassword)
+}
+
+fn read_new_password_file(path: &Path) -> Result<SecretString, RepositoryError> {
+    let content =
+        fs::read_to_string(path).map_err(|source| RepositoryError::NewPasswordFileRead {
+            path: Redacted::new(path.display().to_string()),
+            source,
+        })?;
+    Ok(SecretString::from(
+        content.trim_end_matches(['\r', '\n']).to_owned(),
+    ))
 }
 
 fn tokio_runtime() -> Result<tokio::runtime::Runtime, RepositoryError> {

@@ -15,6 +15,8 @@ fn fileferry() -> Command {
         "FILEFERRY_REPOSITORY",
         "FILEFERRY_PASSWORD",
         "FILEFERRY_PASSWORD_FILE",
+        "FILEFERRY_NEW_PASSWORD",
+        "FILEFERRY_NEW_PASSWORD_FILE",
         "FILEFERRY_S3_ENDPOINT",
         "FILEFERRY_S3_REGION",
         "FILEFERRY_S3_ACCESS_KEY_ID",
@@ -144,6 +146,171 @@ fn init_creates_encrypted_local_repository_and_snapshots_lists_it() {
             .expect("snapshot array")
             .len(),
         0
+    );
+}
+
+#[test]
+fn key_add_adds_passphrase_slot_and_new_passphrase_unlocks_repository() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let added_passphrase = "added-passphrase";
+    init_repo(&repo_url, passphrase);
+    let bootstrap_before = fs::read(repo.join("bootstrap")).expect("bootstrap before");
+
+    let key_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let key_text = String::from_utf8(key_output.clone()).expect("key add utf8");
+    let key: Value = serde_json::from_slice(&key_output).expect("key add json");
+    assert_eq!(key["command"], "key add");
+    assert_eq!(key["status"], "success");
+    assert_eq!(key["data"]["key_slots"], 2);
+    assert_eq!(key["data"]["reencrypted_repository_objects"], false);
+    assert_eq!(key["data"]["kdf"]["algorithm"], "argon2id_v19");
+    assert!(
+        !key["data"]["key_slot_id"]
+            .as_str()
+            .expect("slot id")
+            .is_empty()
+    );
+    assert!(!key_text.contains(passphrase));
+    assert!(!key_text.contains(added_passphrase));
+    assert_eq!(
+        fs::read(repo.join("bootstrap")).expect("bootstrap after"),
+        bootstrap_before
+    );
+    assert_eq!(file_count_under(&repo.join("key-slots")), 1);
+
+    let snapshots_output = fileferry()
+        .env("FILEFERRY_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(snapshots["status"], "success");
+}
+
+#[test]
+fn key_add_supports_jsonl_and_new_password_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let new_password_file = temp.path().join("new-password.txt");
+    let passphrase = "test-passphrase";
+    fs::write(&new_password_file, "added-passphrase\n").expect("write new password file");
+    init_repo(&repo_url, passphrase);
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "key",
+            "add",
+            "--new-password-file",
+            new_password_file.to_str().expect("new password file path"),
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let started: Value = serde_json::from_slice(lines[0]).expect("started event");
+    let completed: Value = serde_json::from_slice(lines[1]).expect("completed event");
+    assert_eq!(started["event"], "command_started");
+    assert_eq!(started["command"], "key add");
+    assert_eq!(completed["event"], "command_completed");
+    assert_eq!(completed["command"], "key add");
+    assert_eq!(completed["data"]["key_slots"], 2);
+}
+
+#[test]
+fn key_add_failures_are_structured_redacted_and_mapped_to_exit_codes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let added_passphrase = "added-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let missing_new_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let missing_new: Value =
+        serde_json::from_slice(&missing_new_output).expect("missing new password json");
+    assert_eq!(
+        missing_new["data"]["code"],
+        "repository_new_password_missing"
+    );
+    assert_eq!(missing_new["data"]["exit_code"], 2);
+
+    let wrong_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-current-passphrase")
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_text = String::from_utf8(wrong_output.clone()).expect("wrong utf8");
+    let wrong: Value = serde_json::from_slice(&wrong_output).expect("wrong json");
+    assert_eq!(wrong["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong["data"]["exit_code"], 4);
+    assert!(!wrong_text.contains("wrong-current-passphrase"));
+    assert!(!wrong_text.contains(added_passphrase));
+    assert_eq!(file_count_under(&repo.join("key-slots")), 0);
+
+    let malformed_slot =
+        repo.join("key-slots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    fs::create_dir_all(malformed_slot.parent().expect("slot parent")).expect("create key slots");
+    fs::write(&malformed_slot, b"not-json").expect("write malformed key slot");
+    let malformed_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let malformed: Value = serde_json::from_slice(&malformed_output).expect("malformed json");
+    assert_eq!(
+        malformed["data"]["code"],
+        "repository_key_slot_decode_failed"
+    );
+    assert_eq!(malformed["data"]["exit_code"], 6);
+    assert_eq!(
+        malformed["data"]["object_key"],
+        "key-slots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     );
 }
 

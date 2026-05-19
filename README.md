@@ -355,19 +355,23 @@ storage groundwork, and core backup/restore/check primitives. The CLI
 currently exposes `version`, `completion`, local and S3-compatible repository
 `init`, and local repository `backup`, `restore`, `snapshots`, `ls`, and
 `check`; it also exposes local repository `forget` as marker-only retention
-state without object deletion. Restore currently covers directory entries,
-regular-file contents, Unix symlinks, and modified timestamps for restored
-regular files and directories from initialized local repositories.
-S3-compatible backup, restore, snapshots, ls, check, and forget are not
-implemented yet. Other metadata application is not implemented yet. Check
-failures in JSON and JSONL modes now emit machine-readable failure envelopes
-with stable codes and object-key context where available.
+state without object deletion and `ferry key add` as an append-only passphrase
+key-slot addition command for initialized local repositories. Restore
+currently covers directory entries, regular-file contents, Unix symlinks, and
+modified timestamps for restored regular files and directories from
+initialized local repositories. S3-compatible backup, restore, snapshots, ls,
+check, forget, and key management are not implemented yet. Other metadata
+application is not implemented yet. Check failures in JSON and JSONL modes now
+emit machine-readable failure envelopes with stable codes and object-key
+context where available.
 `ferry check --read-data-subset <N|PERCENT>` reads a deterministic subset of
 referenced chunk data for initialized local repositories. `ferry forget`
 evaluates retention keep rules, supports dry-run, writes forget markers only
 when not in dry-run, and does not reclaim storage until prune is implemented
-separately. Broader metadata application is not implemented yet. The repository
-format is still not frozen.
+separately. `ferry key add` writes one immutable additional key slot for the
+existing repository master key; it does not re-encrypt repository objects or
+recover lost keys. Broader metadata application is not implemented yet. The
+repository format is still not frozen.
 
 The normal local gate is:
 

@@ -54,6 +54,8 @@ FILEFERRY_PROFILE
 FILEFERRY_REPOSITORY
 FILEFERRY_PASSWORD
 FILEFERRY_PASSWORD_FILE
+FILEFERRY_NEW_PASSWORD
+FILEFERRY_NEW_PASSWORD_FILE
 FILEFERRY_LOG
 ```
 
@@ -184,9 +186,11 @@ prune
   data.recovery_state: "none" | "mark_written" | "sweep_completed"
 
 key add
+  data.repository_id: string
   data.key_slot_id: string
   data.key_slots: integer
   data.kdf: KdfSummary
+  data.reencrypted_repository_objects: boolean
 
 key remove
   data.removed_key_slot_id: string
@@ -450,6 +454,14 @@ check command_failed
   data.finding: CheckFinding, present when the check failure maps to a
     repository integrity finding
 
+key add command_started
+  status: "started"
+  data: null
+
+key add command_completed
+  status: "success"
+  data: KeyAdd data schema above
+
 version command_started
   status: "started"
   data: null
@@ -574,6 +586,20 @@ repository as uninitialized.
 `ferry ls` opens an initialized local repository, selects `latest` by default
 or accepts `--snapshot <ID>` / `--tag <TAG>`, and lists immediate entries at a
 snapshot-relative path. JSON output uses `"."` for the snapshot root path.
+
+`ferry key add` opens an initialized local repository with the existing
+passphrase from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then writes
+one immutable additional passphrase key-slot object. The new passphrase must
+come from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`FILEFERRY_NEW_PASSWORD_FILE`; the command does not prompt interactively.
+Output includes the repository id, new key-slot id, total visible key-slot
+count, KDF parameters, and `reencrypted_repository_objects: false`. The
+command does not create a new master key, rewrite the original bootstrap slot,
+rewrite encrypted chunks, manifests, indexes, commit markers, forget markers,
+or policy/config objects, and does not recover a lost master key. Wrong
+existing passphrases fail with exit code `4`; malformed key-slot or bootstrap
+state fails closed as an integrity failure with exit code `6`.
+S3-compatible key management is not implemented yet.
 
 ## Local Backend Failure Evidence
 

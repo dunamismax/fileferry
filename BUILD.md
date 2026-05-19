@@ -79,6 +79,15 @@ Last reviewed: 2026-05-19.
   JSON and JSONL output report candidate snapshots, kept snapshots, forgotten
   snapshots, item-level reasons, dry-run status, marker objects written, and
   explicit `object_deletion: false`.
+- `ferry key add` opens initialized local repositories, unlocks with
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, and writes one immutable
+  additional passphrase key-slot object from `--new-password-file`,
+  `FILEFERRY_NEW_PASSWORD`, or `FILEFERRY_NEW_PASSWORD_FILE`. It does not
+  create a new master key, rewrite the original bootstrap slot, rewrite
+  chunks, manifests, indexes, commit markers, forget markers, or policy/config
+  objects, and does not recover lost keys. Human, JSON, and JSONL-safe output
+  report the new key-slot id, total visible key-slot count, KDF parameters,
+  and `reencrypted_repository_objects: false`.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -143,9 +152,11 @@ not complete. `ferry check` supports full referenced-chunk verification and
 deterministic count/percentage referenced-chunk subsets for initialized local
 repositories. `ferry forget` is marker-only for initialized local repositories;
 it hides forgotten snapshots from normal snapshot discovery but does not
-delete objects or reclaim storage. Describe backup, restore, check, forget,
-repository, storage, crypto, or platform behavior only to the level backed by
-code, tests, and platform evidence.
+delete objects or reclaim storage. `ferry key add` is implemented for
+initialized local repositories only; other key-management commands and
+S3-compatible key management are not implemented. Describe backup, restore,
+check, forget, key management, repository, storage, crypto, or platform
+behavior only to the level backed by code, tests, and platform evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
@@ -284,6 +295,9 @@ Non-goals:
 
 Goal: Implement the smallest useful key-management command slice without
 weakening repository encryption.
+
+Status: Complete as of 2026-05-19 for `ferry key add` on initialized local
+repositories.
 
 Definition of done:
 
@@ -722,7 +736,7 @@ where documented verification passes on a clean checkout.
 
 ### Phase 10 - Key Management
 
-- [ ] Implement `key add`.
+- [x] Implement `key add`.
 - [ ] Implement `key remove`.
 - [ ] Implement `key rotate`.
 - [ ] Implement `key export-recovery`.
@@ -825,6 +839,21 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone 5 key management first slice for
+  initialized local repositories by implementing `ferry key add`. The command
+  unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, accepts the
+  new passphrase from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+  `FILEFERRY_NEW_PASSWORD_FILE`, and writes one immutable
+  `key-slots/<key-slot-id>` object wrapping the existing repository master key.
+  Added external key-slot discovery during repository unlock, a keyed
+  master-key check for added slots, human/JSON/JSONL-safe CLI output, redacted
+  failure envelopes, and documented that `key add` does not create a new
+  master key, rewrite the original bootstrap slot, re-encrypt repository
+  objects, recover lost keys, or implement S3-compatible key management.
+  Verified with `cargo test -p fileferry-core repository_key_add`, `cargo test
+  -p fileferry-cli key_add`, `cargo test -p fileferry-core`, `cargo test -p
+  fileferry-cli`, `cargo test -p fileferry-crypto`, `just fmt`, `just check`,
+  `just test`, and `just build`.
 - 2026-05-19 - Completed Milestone 4 local backend interruption and
   corruption evidence for initialized local repositories. Added CLI coverage
   proving stale `.fileferry-tmp` files and malformed uncommitted partial

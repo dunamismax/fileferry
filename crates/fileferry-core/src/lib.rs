@@ -5,8 +5,8 @@ use fastcdc::v2020::{
 };
 use fileferry_crypto::{
     AeadAlgorithm, CryptoError, EncryptedObject, KdfAlgorithm, KdfParams, KeyPurpose, KeySlot,
-    MasterKey, ObjectContext, ObjectKind, create_master_key, decrypt_object, encrypt_object,
-    keyed_content_id, random_bytes, unlock_master_key,
+    MasterKey, ObjectContext, ObjectKind, create_key_slot, create_master_key, decrypt_object,
+    encrypt_object, keyed_content_id, random_bytes, unlock_master_key,
 };
 use fileferry_platform::{
     EntryKind, EntryMetadata, MetadataValue, PlatformError, Timestamp, capture_metadata,
@@ -196,6 +196,19 @@ pub enum CoreError {
 
     #[error("repository bootstrap is invalid: {reason}")]
     InvalidRepositoryBootstrap { reason: &'static str },
+
+    #[error("repository key-slot object {key} could not be decoded")]
+    KeySlotDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("repository key-slot object {key} is invalid: {reason}")]
+    InvalidKeySlot {
+        key: ObjectKey,
+        reason: &'static str,
+    },
 
     #[error("repository format version {format_version} is not supported")]
     UnsupportedRepositoryFormat { format_version: u16 },
@@ -514,11 +527,14 @@ pub const DEFAULT_ZSTD_COMPRESSION_LEVEL: i32 = 3;
 pub const REPOSITORY_MAGIC: &str = "fileferry";
 pub const REPOSITORY_FORMAT_VERSION_V0: u16 = fileferry_crypto::FORMAT_VERSION_V0;
 const REPOSITORY_ID_BYTES: usize = 32;
+const KEY_SLOT_ID_BYTES: usize = 32;
+const KEY_SLOT_PREFIX: &str = "key-slots";
 
 #[derive(Debug)]
 pub struct OpenedRepository {
     pub repository_id: String,
     pub master_key: MasterKey,
+    pub key_slots: usize,
 }
 
 #[derive(Debug)]
@@ -527,6 +543,14 @@ pub struct RepositoryInitResult {
     pub format_version: u16,
     pub key_slots: usize,
     pub created: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct KeyAddResult {
+    pub repository_id: String,
+    pub key_slot_id: String,
+    pub key_slots: usize,
+    pub kdf: KdfParams,
 }
 
 pub async fn create_repository(
@@ -541,9 +565,9 @@ pub async fn create_repository(
     {
         let opened = open_repository(store, passphrase).await?;
         return Ok(RepositoryInitResult {
+            key_slots: opened.key_slots,
             repository: opened,
             format_version: REPOSITORY_FORMAT_VERSION_V0,
-            key_slots: 1,
             created: false,
         });
     }
@@ -575,6 +599,7 @@ pub async fn create_repository(
             repository: OpenedRepository {
                 repository_id,
                 master_key,
+                key_slots: 1,
             },
             format_version: REPOSITORY_FORMAT_VERSION_V0,
             key_slots: 1,
@@ -583,9 +608,9 @@ pub async fn create_repository(
     } else {
         let opened = open_repository(store, passphrase).await?;
         Ok(RepositoryInitResult {
+            key_slots: opened.key_slots,
             repository: opened,
             format_version: REPOSITORY_FORMAT_VERSION_V0,
-            key_slots: 1,
             created: false,
         })
     }
@@ -595,22 +620,19 @@ pub async fn open_repository(
     store: &dyn ObjectStore,
     passphrase: &SecretString,
 ) -> CoreResult<OpenedRepository> {
-    let key = bootstrap_object_key()?;
-    let bytes = store.get(&key).await.map_err(|source| match source {
-        StorageError::ObjectNotFound { .. } => CoreError::RepositoryNotInitialized,
-        source => CoreError::Storage { source },
-    })?;
-    let bootstrap: RepositoryBootstrap = serde_json::from_slice(&bytes)
-        .map_err(|source| CoreError::RepositoryBootstrapDecode { source })?;
-    bootstrap.validate()?;
+    let bootstrap = load_repository_bootstrap(store).await?;
+    let slots = repository_key_slots(store, &bootstrap).await?;
+    let key_slots = slots.len();
 
-    for stored_slot in &bootstrap.key_slots {
-        let key_slot = stored_slot.to_key_slot()?;
+    for slot in slots {
+        let key_slot = slot.stored.to_key_slot()?;
         match unlock_master_key(passphrase, &key_slot) {
             Ok(master_key) => {
+                slot.verify_master_key(&master_key, &bootstrap.repository_id)?;
                 return Ok(OpenedRepository {
-                    repository_id: bootstrap.repository_id,
+                    repository_id: bootstrap.repository_id.clone(),
                     master_key,
+                    key_slots,
                 });
             }
             Err(CryptoError::Decryption) => {}
@@ -623,8 +645,57 @@ pub async fn open_repository(
     })
 }
 
+pub async fn add_repository_key_slot(
+    store: &dyn ObjectStore,
+    current_passphrase: &SecretString,
+    new_passphrase: &SecretString,
+    kdf: KdfParams,
+) -> CoreResult<KeyAddResult> {
+    let opened = open_repository(store, current_passphrase).await?;
+    let key_slot = create_key_slot(&opened.master_key, new_passphrase, kdf)
+        .map_err(|source| CoreError::Encryption { source })?;
+    let key_slot_id = hex_bytes(&random_bytes::<KEY_SLOT_ID_BYTES>());
+    let object_key = key_slot_object_key(&key_slot_id)?;
+    let master_key_check =
+        master_key_check(&opened.master_key, &opened.repository_id, &key_slot_id)?;
+    let stored = StoredExternalKeySlot {
+        magic: REPOSITORY_MAGIC.to_owned(),
+        format_version: REPOSITORY_FORMAT_VERSION_V0,
+        repository_id: opened.repository_id.clone(),
+        key_slot_id: key_slot_id.clone(),
+        key_slot: StoredKeySlot::from_key_slot(&key_slot),
+        master_key_check,
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&stored).map_err(|source| CoreError::Serialization { source })?;
+    let created = match store
+        .put_if_absent(&object_key, &bytes)
+        .await
+        .map_err(|source| CoreError::Storage { source })?
+    {
+        PutStatus::Created => true,
+        PutStatus::AlreadyPresent => false,
+    };
+
+    Ok(KeyAddResult {
+        repository_id: opened.repository_id,
+        key_slot_id,
+        key_slots: opened.key_slots + usize::from(created),
+        kdf,
+    })
+}
+
 fn bootstrap_object_key() -> CoreResult<ObjectKey> {
     ObjectKey::new("bootstrap").map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn key_slot_object_key(key_slot_id: &str) -> CoreResult<ObjectKey> {
+    ObjectKey::new(format!("{KEY_SLOT_PREFIX}/{key_slot_id}"))
+        .map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn key_slot_prefix() -> CoreResult<ObjectKeyPrefix> {
+    ObjectKeyPrefix::new(KEY_SLOT_PREFIX).map_err(|source| CoreError::ObjectKey { source })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -665,6 +736,152 @@ impl RepositoryBootstrap {
         }
         if !self.features.is_empty() {
             return Err(CoreError::UnsupportedRepositoryFeatures);
+        }
+        Ok(())
+    }
+}
+
+async fn load_repository_bootstrap(store: &dyn ObjectStore) -> CoreResult<RepositoryBootstrap> {
+    let key = bootstrap_object_key()?;
+    let bytes = store.get(&key).await.map_err(|source| match source {
+        StorageError::ObjectNotFound { .. } => CoreError::RepositoryNotInitialized,
+        source => CoreError::Storage { source },
+    })?;
+    let bootstrap: RepositoryBootstrap = serde_json::from_slice(&bytes)
+        .map_err(|source| CoreError::RepositoryBootstrapDecode { source })?;
+    bootstrap.validate()?;
+    Ok(bootstrap)
+}
+
+#[derive(Clone, Debug)]
+struct RepositoryKeySlot {
+    object_key: Option<ObjectKey>,
+    key_slot_id: Option<String>,
+    stored: StoredKeySlot,
+    master_key_check: Option<String>,
+}
+
+impl RepositoryKeySlot {
+    fn verify_master_key(&self, master_key: &MasterKey, repository_id: &str) -> CoreResult<()> {
+        let (Some(object_key), Some(key_slot_id), Some(expected)) = (
+            self.object_key.as_ref(),
+            self.key_slot_id.as_ref(),
+            self.master_key_check.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        let actual = master_key_check(master_key, repository_id, key_slot_id)?;
+        if &actual != expected {
+            return Err(CoreError::InvalidKeySlot {
+                key: object_key.clone(),
+                reason: "key slot does not unlock this repository master key",
+            });
+        }
+        Ok(())
+    }
+}
+
+async fn repository_key_slots(
+    store: &dyn ObjectStore,
+    bootstrap: &RepositoryBootstrap,
+) -> CoreResult<Vec<RepositoryKeySlot>> {
+    let mut slots = bootstrap
+        .key_slots
+        .iter()
+        .cloned()
+        .map(|stored| RepositoryKeySlot {
+            object_key: None,
+            key_slot_id: None,
+            stored,
+            master_key_check: None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut external_keys = store
+        .list_prefix(&key_slot_prefix()?)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    external_keys.sort();
+
+    for key in external_keys {
+        let bytes = store
+            .get(&key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        let external: StoredExternalKeySlot =
+            serde_json::from_slice(&bytes).map_err(|source| CoreError::KeySlotDecode {
+                key: key.clone(),
+                source,
+            })?;
+        external.validate(&key, &bootstrap.repository_id)?;
+        slots.push(RepositoryKeySlot {
+            object_key: Some(key),
+            key_slot_id: Some(external.key_slot_id),
+            stored: external.key_slot,
+            master_key_check: Some(external.master_key_check),
+        });
+    }
+
+    Ok(slots)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredExternalKeySlot {
+    magic: String,
+    format_version: u16,
+    repository_id: String,
+    key_slot_id: String,
+    key_slot: StoredKeySlot,
+    master_key_check: String,
+}
+
+impl StoredExternalKeySlot {
+    fn validate(&self, key: &ObjectKey, repository_id: &str) -> CoreResult<()> {
+        if self.magic != REPOSITORY_MAGIC {
+            return Err(CoreError::InvalidKeySlot {
+                key: key.clone(),
+                reason: "repository magic is not recognized",
+            });
+        }
+        if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+            return Err(CoreError::UnsupportedRepositoryFormat {
+                format_version: self.format_version,
+            });
+        }
+        if self.repository_id != repository_id {
+            return Err(CoreError::InvalidKeySlot {
+                key: key.clone(),
+                reason: "repository id does not match bootstrap",
+            });
+        }
+        if self.key_slot_id.len() != KEY_SLOT_ID_BYTES * 2
+            || !self
+                .key_slot_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CoreError::InvalidKeySlot {
+                key: key.clone(),
+                reason: "key slot id is invalid",
+            });
+        }
+        let expected_key = key_slot_object_key(&self.key_slot_id)?;
+        if &expected_key != key {
+            return Err(CoreError::InvalidKeySlot {
+                key: key.clone(),
+                reason: "key slot id does not match object key",
+            });
+        }
+        if self.master_key_check.len() != 64
+            || !self
+                .master_key_check
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CoreError::InvalidKeySlot {
+                key: key.clone(),
+                reason: "master key check is invalid",
+            });
         }
         Ok(())
     }
@@ -3257,6 +3474,21 @@ fn content_id_for_metadata<T: Serialize>(
         .map_err(|source| CoreError::Encryption { source })
 }
 
+fn master_key_check(
+    master_key: &MasterKey,
+    repository_id: &str,
+    key_slot_id: &str,
+) -> CoreResult<String> {
+    keyed_content_id(
+        master_key,
+        KeyPurpose::KeySlot,
+        repository_id.as_bytes(),
+        key_slot_id.as_bytes(),
+    )
+    .map(|id| hex_bytes(&id))
+    .map_err(|source| CoreError::Encryption { source })
+}
+
 fn check_read_error(error: CoreError, expected_key: ObjectKey) -> CoreError {
     match error {
         CoreError::Storage {
@@ -3626,12 +3858,51 @@ mod tests {
             .await
             .expect("open repository");
         assert_eq!(opened.repository_id, created.repository.repository_id);
+        assert_eq!(opened.key_slots, 1);
 
         let reopened = create_repository(&store, &passphrase, KdfParams::for_tests())
             .await
             .expect("reopen existing repository");
         assert!(!reopened.created);
         assert_eq!(reopened.repository.repository_id, opened.repository_id);
+        assert_eq!(reopened.key_slots, 1);
+    }
+
+    #[tokio::test]
+    async fn repository_key_add_creates_additional_unlock_slot_without_rewriting_bootstrap() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let added = SecretString::from("added passphrase");
+        let bootstrap_key = bootstrap_object_key().expect("bootstrap key");
+        let created = create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let bootstrap_before = store.get(&bootstrap_key).await.expect("bootstrap before");
+
+        let result = add_repository_key_slot(&store, &original, &added, KdfParams::for_tests())
+            .await
+            .expect("add key slot");
+
+        assert_eq!(result.repository_id, created.repository.repository_id);
+        assert_eq!(result.key_slots, 2);
+        assert_eq!(
+            store.get(&bootstrap_key).await.expect("bootstrap after"),
+            bootstrap_before
+        );
+        assert!(
+            store
+                .exists(&key_slot_object_key(&result.key_slot_id).expect("key slot object key"))
+                .await
+                .expect("key slot exists")
+        );
+
+        let opened = open_repository(&store, &added)
+            .await
+            .expect("open repository with added passphrase");
+        assert_eq!(opened.repository_id, created.repository.repository_id);
+        assert_eq!(opened.key_slots, 2);
     }
 
     #[tokio::test]
