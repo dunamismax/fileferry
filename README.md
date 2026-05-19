@@ -352,12 +352,14 @@ V1 should not include:
 The repo contains the initial Rust workspace, crate boundaries, CLI shell, CI
 workflow, planning docs, tested crypto primitives, local and S3-compatible
 storage groundwork, and core backup/restore/check primitives. The CLI
-currently exposes `version`, `completion`, local repository `init`, `backup`,
-`restore`, `snapshots`, `ls`, and `check`; restore currently covers directory
-entries, regular-file contents, Unix symlinks, and modified timestamps for
-restored regular files and directories from initialized local repositories.
-Other metadata application is not implemented yet. Check failures in JSON and
-JSONL modes now emit
+currently exposes `version`, `completion`, local and S3-compatible repository
+`init`, and local repository `backup`, `restore`, `snapshots`, `ls`, and
+`check`; restore currently covers directory entries, regular-file contents,
+Unix symlinks, and modified timestamps for restored regular files and
+directories from initialized local repositories. S3-compatible backup,
+restore, snapshots, ls, and check are not implemented yet. Other metadata
+application is not implemented yet. Check failures in JSON and JSONL modes now
+emit
 machine-readable failure envelopes with stable codes and object-key context
 where available. `ferry check --read-data-subset <N|PERCENT>` reads a
 deterministic subset of referenced chunk data for initialized local

@@ -46,6 +46,18 @@ just test-s3
 The normal workspace test suite does not contact Backblaze unless
 `FILEFERRY_S3_INTEGRATION=1` is present.
 
+The CLI S3 init integration test uses the same bucket, endpoint, region,
+credential, and test-prefix variables, plus a separate opt-in gate:
+
+```sh
+export FILEFERRY_S3_INIT_INTEGRATION=1
+cargo test -p fileferry-cli init_s3_live_integration_when_env_is_enabled
+```
+
+The CLI test creates a unique `cli-init-...` repository prefix under
+`FILEFERRY_S3_TEST_PREFIX`, runs `ferry init`, verifies the JSON output is
+redacted, and deletes only the `bootstrap` object it created.
+
 ## Backblaze S3 Notes
 
 Backblaze documents S3-compatible endpoints as:
@@ -68,6 +80,18 @@ The current live test disables S3 conditional create for Backblaze B2 because
 Backblaze rejects the `If-None-Match` create-only `PutObject` header with
 `501 NotImplemented`. FileFerry reports that weaker capability instead of
 pretending the backend has race-safe conditional writes.
+
+For manual Backblaze CLI init tests, set
+`FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1` with the normal S3 environment:
+
+```sh
+FILEFERRY_PASSWORD='throwaway-passphrase' \
+FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1 \
+ferry --repo "s3://dunamismax-b2/${FILEFERRY_S3_TEST_PREFIX}/manual-init" init
+```
+
+Use only throwaway prefixes under `FILEFERRY_S3_TEST_PREFIX`. Do not run
+manual tests against production repositories or real user backup data.
 
 Bucket-restricted application keys may need `listAllBucketNames` for some SDKs
 or integrations. FileFerry's live test should still be scoped by

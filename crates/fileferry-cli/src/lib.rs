@@ -8,7 +8,10 @@ use fileferry_core::{
 };
 use fileferry_crypto::KdfParams;
 use fileferry_platform::{EntryKind, MetadataValue};
-use fileferry_storage::{LocalStore, StorageError};
+use fileferry_storage::{
+    LocalStore, ObjectKeyPrefix, ObjectStore, PolicyObjectStore, S3Store, S3StoreConfig,
+    StorageError, StoragePolicy,
+};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -83,7 +86,7 @@ pub enum Command {
         shell: Shell,
     },
 
-    /// Create an encrypted local repository.
+    /// Create an encrypted repository.
     Init,
 
     /// Create an encrypted snapshot from local source paths.
@@ -235,6 +238,18 @@ pub enum RepositoryError {
     #[error("file repository URL {value} is invalid; expected file:///absolute/path")]
     InvalidFileRepositoryUrl { value: Redacted },
 
+    #[error("S3 repository URL {value} is invalid: {reason}")]
+    InvalidS3RepositoryUrl {
+        value: Redacted,
+        reason: &'static str,
+    },
+
+    #[error("environment variable {name} is required for S3 repository access")]
+    MissingS3Environment { name: &'static str },
+
+    #[error("S3 backend configuration is invalid: {reason}")]
+    InvalidS3Config { reason: String },
+
     #[error("repository runtime could not be started: {source}")]
     Runtime {
         #[source]
@@ -248,7 +263,10 @@ impl RepositoryError {
             Self::MissingRepository
             | Self::MissingPassword
             | Self::PasswordFileRead { .. }
-            | Self::InvalidFileRepositoryUrl { .. } => 2,
+            | Self::InvalidFileRepositoryUrl { .. }
+            | Self::InvalidS3RepositoryUrl { .. }
+            | Self::MissingS3Environment { .. }
+            | Self::InvalidS3Config { .. } => 2,
             Self::UnsupportedRepository { .. } => 9,
             Self::Runtime { .. } => 1,
         }
@@ -581,6 +599,7 @@ struct RestoreMetadataWarning {
 #[serde(rename_all = "snake_case")]
 enum CliBackendKind {
     Local,
+    S3Compatible,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -822,6 +841,9 @@ fn failure_code(error: &CliError) -> &'static str {
             RepositoryError::PasswordFileRead { .. } => "repository_password_file_read_failed",
             RepositoryError::UnsupportedRepository { .. } => "repository_url_unsupported",
             RepositoryError::InvalidFileRepositoryUrl { .. } => "repository_file_url_invalid",
+            RepositoryError::InvalidS3RepositoryUrl { .. } => "repository_s3_url_invalid",
+            RepositoryError::MissingS3Environment { .. } => "repository_s3_environment_missing",
+            RepositoryError::InvalidS3Config { .. } => "repository_s3_config_invalid",
             RepositoryError::Runtime { .. } => "repository_runtime_failed",
         },
         CliError::Core(error) => core_failure_code(error),
@@ -1250,6 +1272,10 @@ fn validate_repository_url(value: &str) -> Result<(), ConfigError> {
 }
 
 pub fn redact_for_display(value: &str) -> String {
+    if value.starts_with("s3://") {
+        return "s3://<redacted>".to_owned();
+    }
+
     let mut redacted = value.to_owned();
 
     if let Some(scheme_end) = redacted.find("://") {
@@ -1292,11 +1318,11 @@ fn completion(shell: Shell) -> Result<Output, CliError> {
 }
 
 fn init_repository(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = init_repository_store(config)?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let result = runtime.block_on(create_repository(
-        &repository.store,
+        repository.store.as_ref(),
         &passphrase,
         KdfParams::default(),
     ))?;
@@ -1582,9 +1608,13 @@ fn restore(
     emit_restore_command(mode, data)
 }
 
-struct LocalRepository {
+struct InitRepository {
     url: String,
     backend: CliBackendKind,
+    store: Box<dyn ObjectStore>,
+}
+
+struct LocalRepository {
     store: LocalStore,
 }
 
@@ -1607,6 +1637,34 @@ fn load_repository_snapshots(
     Ok(LoadedRepositorySnapshots { manifests })
 }
 
+fn init_repository_store(config: &ResolvedConfig) -> Result<InitRepository, RepositoryError> {
+    let url = config
+        .repository_url
+        .as_deref()
+        .ok_or(RepositoryError::MissingRepository)?;
+
+    if url.starts_with("s3://") {
+        let s3_config = s3_repository_config(url, &S3RepositoryEnvironment::current())?;
+        let store = S3Store::new(s3_config).map_err(|_| RepositoryError::InvalidS3Config {
+            reason: "S3 client configuration failed".to_owned(),
+        })?;
+        let store = PolicyObjectStore::from_store(store, StoragePolicy::default());
+        return Ok(InitRepository {
+            url: url.to_owned(),
+            backend: CliBackendKind::S3Compatible,
+            store: Box::new(store),
+        });
+    }
+
+    let path = local_repository_path(url)?;
+
+    Ok(InitRepository {
+        url: url.to_owned(),
+        backend: CliBackendKind::Local,
+        store: Box::new(LocalStore::new(path)),
+    })
+}
+
 fn local_repository(config: &ResolvedConfig) -> Result<LocalRepository, RepositoryError> {
     let url = config
         .repository_url
@@ -1615,9 +1673,151 @@ fn local_repository(config: &ResolvedConfig) -> Result<LocalRepository, Reposito
     let path = local_repository_path(url)?;
 
     Ok(LocalRepository {
-        url: url.to_owned(),
-        backend: CliBackendKind::Local,
         store: LocalStore::new(path),
+    })
+}
+
+#[derive(Clone, Default)]
+struct S3RepositoryEnvironment {
+    endpoint: Option<String>,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    disable_conditional_create: bool,
+}
+
+impl std::fmt::Debug for S3RepositoryEnvironment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("S3RepositoryEnvironment")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field(
+                "access_key_id",
+                &self.access_key_id.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "secret_access_key",
+                &self.secret_access_key.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "disable_conditional_create",
+                &self.disable_conditional_create,
+            )
+            .finish()
+    }
+}
+
+impl S3RepositoryEnvironment {
+    fn current() -> Self {
+        Self {
+            endpoint: env::var("FILEFERRY_S3_ENDPOINT").ok(),
+            region: env::var("FILEFERRY_S3_REGION").ok(),
+            access_key_id: env::var("FILEFERRY_S3_ACCESS_KEY_ID").ok(),
+            secret_access_key: env::var("FILEFERRY_S3_SECRET_ACCESS_KEY").ok(),
+            disable_conditional_create: env::var("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE")
+                .ok()
+                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on")),
+        }
+    }
+}
+
+fn s3_repository_config(
+    value: &str,
+    environment: &S3RepositoryEnvironment,
+) -> Result<S3StoreConfig, RepositoryError> {
+    let parsed = parse_s3_repository_url(value)?;
+    let endpoint = required_s3_env(environment.endpoint.as_deref(), "FILEFERRY_S3_ENDPOINT")?;
+    let region = required_s3_env(environment.region.as_deref(), "FILEFERRY_S3_REGION")?;
+    let access_key_id = required_s3_env(
+        environment.access_key_id.as_deref(),
+        "FILEFERRY_S3_ACCESS_KEY_ID",
+    )?;
+    let secret_access_key = required_s3_env(
+        environment.secret_access_key.as_deref(),
+        "FILEFERRY_S3_SECRET_ACCESS_KEY",
+    )?;
+
+    S3StoreConfig::new(
+        parsed.bucket,
+        region,
+        endpoint,
+        SecretString::from(access_key_id.to_owned()),
+        SecretString::from(secret_access_key.to_owned()),
+        parsed.root_prefix,
+    )
+    .map(|config| config.with_conditional_create(!environment.disable_conditional_create))
+    .map_err(|error| match error {
+        StorageError::BackendConfig { reason, .. } => RepositoryError::InvalidS3Config { reason },
+        error => RepositoryError::InvalidS3Config {
+            reason: error.to_string(),
+        },
+    })
+}
+
+fn required_s3_env<'a>(
+    value: Option<&'a str>,
+    name: &'static str,
+) -> Result<&'a str, RepositoryError> {
+    let Some(value) = value else {
+        return Err(RepositoryError::MissingS3Environment { name });
+    };
+    if value.trim().is_empty() {
+        return Err(RepositoryError::MissingS3Environment { name });
+    }
+    Ok(value)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedS3RepositoryUrl {
+    bucket: String,
+    root_prefix: ObjectKeyPrefix,
+}
+
+fn parse_s3_repository_url(value: &str) -> Result<ParsedS3RepositoryUrl, RepositoryError> {
+    let Some(rest) = value.strip_prefix("s3://") else {
+        return Err(RepositoryError::InvalidS3RepositoryUrl {
+            value: Redacted::new(value),
+            reason: "expected s3://bucket[/prefix]",
+        });
+    };
+
+    if rest.contains('?') || rest.contains('#') {
+        return Err(RepositoryError::InvalidS3RepositoryUrl {
+            value: Redacted::new(value),
+            reason: "query strings and fragments are not supported",
+        });
+    }
+
+    let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+    if bucket.is_empty() {
+        return Err(RepositoryError::InvalidS3RepositoryUrl {
+            value: Redacted::new(value),
+            reason: "bucket must not be empty",
+        });
+    }
+
+    if bucket.contains('@') || bucket.contains(':') {
+        return Err(RepositoryError::InvalidS3RepositoryUrl {
+            value: Redacted::new(value),
+            reason: "credentials must be supplied through environment variables",
+        });
+    }
+
+    let root_prefix = if prefix.is_empty() {
+        ObjectKeyPrefix::root()
+    } else {
+        ObjectKeyPrefix::new(prefix.to_owned()).map_err(|_| {
+            RepositoryError::InvalidS3RepositoryUrl {
+                value: Redacted::new(value),
+                reason: "prefix must be relative, non-empty, and use FileFerry object-key characters",
+            }
+        })?
+    };
+
+    Ok(ParsedS3RepositoryUrl {
+        bucket: bucket.to_owned(),
+        root_prefix,
     })
 }
 
@@ -2485,6 +2685,61 @@ progress = "always"
         assert!(rendered.contains("https://<redacted>@example.com/repo?<redacted>"));
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("sensitive"));
+    }
+
+    #[test]
+    fn s3_repository_urls_are_parsed_without_leaking_credentials() {
+        let parsed = parse_s3_repository_url("s3://company-backups/laptops")
+            .expect("valid s3 repository url");
+
+        assert_eq!(parsed.bucket, "company-backups");
+        assert_eq!(parsed.root_prefix.as_str(), "laptops");
+        assert_eq!(
+            redact_for_display("s3://access:secret@example.com/bucket?token=sensitive"),
+            "s3://<redacted>"
+        );
+
+        let error =
+            parse_s3_repository_url("s3://access:secret@example.com/bucket?token=sensitive")
+                .expect_err("credentials and query are rejected");
+        let rendered = error.to_string();
+        assert!(rendered.contains("s3://<redacted>"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("sensitive"));
+    }
+
+    #[test]
+    fn s3_repository_config_uses_required_environment() {
+        let environment = S3RepositoryEnvironment {
+            endpoint: Some("https://s3.us-west-001.backblazeb2.com".to_owned()),
+            region: Some("us-west-001".to_owned()),
+            access_key_id: Some("application-key-id".to_owned()),
+            secret_access_key: Some("application-key".to_owned()),
+            disable_conditional_create: true,
+        };
+
+        let config = s3_repository_config("s3://dunamismax-b2/fileferry/dev", &environment)
+            .expect("s3 config");
+        let debug = format!("{config:?}");
+
+        assert_eq!(config.bucket(), "dunamismax-b2");
+        assert_eq!(config.region(), "us-west-001");
+        assert_eq!(config.endpoint(), "https://s3.us-west-001.backblazeb2.com");
+        assert_eq!(config.root_prefix().as_str(), "fileferry/dev");
+        assert!(!debug.contains("application-key-id"));
+        assert!(!debug.contains("application-key"));
+
+        let error = s3_repository_config(
+            "s3://dunamismax-b2/fileferry/dev",
+            &S3RepositoryEnvironment::default(),
+        )
+        .expect_err("missing env");
+        assert!(matches!(
+            error,
+            RepositoryError::MissingS3Environment {
+                name: "FILEFERRY_S3_ENDPOINT"
+            }
+        ));
     }
 
     #[test]

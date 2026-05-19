@@ -163,12 +163,45 @@ of the endpoint, such as `us-west-001`. The current Backblaze test disables
 conditional create because Backblaze returns `501 NotImplemented` for the
 `If-None-Match` create-only request header used by `object_store`.
 
+## S3-Compatible CLI Init
+
+`ferry init` accepts S3-compatible repository URLs in this form:
+
+```sh
+FILEFERRY_PASSWORD='test-passphrase' \
+FILEFERRY_S3_ENDPOINT='https://s3.us-west-001.backblazeb2.com' \
+FILEFERRY_S3_REGION='us-west-001' \
+FILEFERRY_S3_ACCESS_KEY_ID='<application-key-id>' \
+FILEFERRY_S3_SECRET_ACCESS_KEY='<application-key>' \
+ferry --repo 's3://dunamismax-b2/fileferry/dev/example-repo' init
+```
+
+The URL supplies the bucket (`dunamismax-b2`) and repository root prefix
+(`fileferry/dev/example-repo`). Credentials are supplied only through
+environment variables and must not be embedded in repository URLs. Query
+strings and fragments are rejected. Human, JSON, JSONL, and error output
+redacts S3 repository URLs as `s3://<redacted>` and does not emit S3
+credentials.
+
+Set `FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1` for the current Backblaze B2
+development path because Backblaze rejects the create-only `PutObject` header
+used by the default conditional-create mode. That fallback is idempotent for
+same-byte retries but is not race-safe for concurrent writers.
+
+The CLI has a separate gated live init test. It runs only when
+`FILEFERRY_S3_INIT_INTEGRATION=1` and the same S3 environment variables plus
+`FILEFERRY_S3_TEST_PREFIX` are set. The test appends a unique
+`cli-init-...` suffix under `FILEFERRY_S3_TEST_PREFIX`, initializes only that
+repository prefix, and deletes the `bootstrap` object it creates.
+
 ## Not Implemented Yet
 
 S3-compatible storage now has the initial object-store adapter and a live
-round-trip test gate. Common retry, timeout, backoff, and concurrency behavior
-exists in the policy wrapper. Before S3 storage is marked complete it still
-needs explicit provider capability checks, stale-or-surprising listing tests,
-missing-object tests, partial upload behavior, permission-error tests,
-multipart cleanup guidance, and provider evidence beyond the initial
-Backblaze-compatible round trip.
+round-trip test gate, and `ferry init` can create S3-compatible encrypted
+repository bootstraps. Common retry, timeout, backoff, and concurrency
+behavior exists in the policy wrapper. S3-compatible backup, restore,
+snapshots, ls, and check are not implemented yet. Before S3 storage is marked
+complete it still needs explicit provider capability checks,
+stale-or-surprising listing tests, missing-object tests, partial upload
+behavior, permission-error tests, multipart cleanup guidance, and provider
+evidence beyond the initial Backblaze-compatible round trip.

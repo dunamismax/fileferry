@@ -100,7 +100,7 @@ init
   data.repository_id: string
   data.repository_url: redacted string
   data.format_version: integer
-  data.backend: "local" | "s3"
+  data.backend: "local" | "s3_compatible"
   data.created: boolean
   data.key_slots: integer
 
@@ -452,8 +452,20 @@ and JSONL modes. Machine progress belongs in JSONL `progress` events.
 
 `ferry init` creates an encrypted local filesystem repository when `--repo` or
 `FILEFERRY_REPOSITORY` points at a local path or `file:///absolute/path`.
-It requires `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`. S3-compatible
-repository bootstrap is not wired into the CLI yet.
+It also creates encrypted S3-compatible repositories when the repository URL
+has the form `s3://bucket[/prefix]`. The bucket and prefix come from the
+repository URL; credentials must not be embedded in the URL. S3 init requires
+`FILEFERRY_S3_ENDPOINT`, `FILEFERRY_S3_REGION`,
+`FILEFERRY_S3_ACCESS_KEY_ID`, and `FILEFERRY_S3_SECRET_ACCESS_KEY` in the
+environment. S3 endpoints must be HTTPS URLs. Prefix segments currently use
+FileFerry object-key characters: ASCII letters, digits, `.`, `_`, `-`, and
+`=`, separated by `/`. Set `FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1` only
+for providers, such as the current Backblaze B2 development path, that reject
+create-only `PutObject` requests.
+
+Init requires `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` for both local
+and S3-compatible repositories. Human, JSON, and JSONL init output redacts S3
+repository URLs as `s3://<redacted>` and does not emit S3 credentials.
 
 `ferry backup <SOURCE>...` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an encrypted,
@@ -461,8 +473,7 @@ compressed, deduplicated snapshot through the core backup pipeline, and commits
 it so `ferry snapshots` and `ferry ls` can discover it. `--tag <TAG>` may be
 repeated. JSON output follows the Backup data schema above; JSONL output emits
 the implemented progress phases listed above. Source paths are local
-filesystem paths; S3-compatible repository bootstrap remains unwired in the
-CLI.
+filesystem paths. S3-compatible backup is not implemented yet.
 
 `ferry restore <DESTINATION>` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects `latest` by default

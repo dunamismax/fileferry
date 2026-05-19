@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, S3Store, S3StoreConfig};
 use serde_json::Value;
 use std::{
     fs,
@@ -14,6 +15,11 @@ fn fileferry() -> Command {
         "FILEFERRY_REPOSITORY",
         "FILEFERRY_PASSWORD",
         "FILEFERRY_PASSWORD_FILE",
+        "FILEFERRY_S3_ENDPOINT",
+        "FILEFERRY_S3_REGION",
+        "FILEFERRY_S3_ACCESS_KEY_ID",
+        "FILEFERRY_S3_SECRET_ACCESS_KEY",
+        "FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE",
         "FILEFERRY_LOG",
     ] {
         command.env_remove(variable);
@@ -1009,7 +1015,7 @@ fn repository_open_failures_are_structured_and_redacted_in_machine_modes() {
     let unsupported: Value = serde_json::from_slice(&unsupported_output).expect("unsupported json");
     assert_eq!(unsupported["data"]["code"], "repository_url_unsupported");
     assert_eq!(unsupported["data"]["exit_code"], 9);
-    assert!(unsupported_text.contains("s3://<redacted>@example.com/bucket?<redacted>"));
+    assert!(unsupported_text.contains("s3://<redacted>"));
     assert!(!unsupported_text.contains("secret"));
     assert!(!unsupported_text.contains("sensitive"));
 
@@ -1250,6 +1256,133 @@ fn check_machine_failures_report_malformed_commits_and_corrupted_metadata() {
         failed["data"]["finding"]["code"],
         "repository_commit_decode_failed"
     );
+}
+
+#[test]
+fn init_s3_requires_environment_and_redacts_repository_url() {
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", "test-passphrase")
+        .args(["--repo", "s3://test-bucket/team/repo", "--json", "init"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output.clone()).expect("s3 init failure utf8");
+    let failure: Value = serde_json::from_slice(&output).expect("s3 init failure json");
+
+    assert_eq!(failure["command"], "init");
+    assert_eq!(failure["status"], "failure");
+    assert_eq!(failure["data"]["code"], "repository_s3_environment_missing");
+    assert_eq!(failure["data"]["exit_code"], 2);
+    assert!(text.contains("FILEFERRY_S3_ENDPOINT"));
+    assert!(!text.contains("test-bucket"));
+    assert!(!text.contains("team/repo"));
+    assert!(!text.contains("test-passphrase"));
+
+    let secret_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "test-passphrase")
+        .args([
+            "--repo",
+            "s3://access:secret@example.com/bucket?token=sensitive",
+            "--jsonl",
+            "init",
+        ])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let secret_text = String::from_utf8(secret_output.clone()).expect("secret failure utf8");
+    let lines: Vec<_> = secret_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let failed: Value = serde_json::from_slice(lines[1]).expect("secret failure event");
+    assert_eq!(failed["event"], "command_failed");
+    assert_eq!(failed["data"]["code"], "repository_s3_url_invalid");
+    assert!(secret_text.contains("s3://<redacted>"));
+    assert!(!secret_text.contains("secret"));
+    assert!(!secret_text.contains("sensitive"));
+}
+
+#[test]
+fn init_s3_live_integration_when_env_is_enabled() {
+    if std::env::var("FILEFERRY_S3_INIT_INTEGRATION")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+
+    let bucket = required_env("FILEFERRY_S3_BUCKET");
+    let endpoint = required_env("FILEFERRY_S3_ENDPOINT");
+    let region = required_env("FILEFERRY_S3_REGION");
+    let access_key_id = required_env("FILEFERRY_S3_ACCESS_KEY_ID");
+    let secret_access_key = required_env("FILEFERRY_S3_SECRET_ACCESS_KEY");
+    let test_prefix = required_env("FILEFERRY_S3_TEST_PREFIX");
+    let repo_prefix = format!("{test_prefix}/cli-init-{}", unique_test_id());
+    let repo_url = format!("s3://{bucket}/{repo_prefix}");
+    let passphrase = "s3-init-test-passphrase";
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_S3_ENDPOINT", &endpoint)
+        .env("FILEFERRY_S3_REGION", &region)
+        .env("FILEFERRY_S3_ACCESS_KEY_ID", &access_key_id)
+        .env("FILEFERRY_S3_SECRET_ACCESS_KEY", &secret_access_key)
+        .env("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE", "1")
+        .args(["--repo", &repo_url, "--json", "init"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output.clone()).expect("s3 init output utf8");
+    let init: Value = serde_json::from_slice(&output).expect("s3 init json");
+
+    assert_eq!(init["command"], "init");
+    assert_eq!(init["status"], "success");
+    assert_eq!(init["data"]["backend"], "s3_compatible");
+    assert_eq!(init["data"]["created"], true);
+    assert_eq!(init["data"]["repository_url"], "s3://<redacted>");
+    assert!(!text.contains(&bucket));
+    assert!(!text.contains(&repo_prefix));
+    assert!(!text.contains(&access_key_id));
+    assert!(!text.contains(&secret_access_key));
+
+    let cleanup_config = S3StoreConfig::new(
+        bucket,
+        region,
+        endpoint,
+        access_key_id,
+        secret_access_key,
+        ObjectKeyPrefix::new(repo_prefix).expect("test prefix"),
+    )
+    .expect("cleanup s3 config")
+    .with_conditional_create(false);
+    let cleanup_store = S3Store::new(cleanup_config).expect("cleanup s3 store");
+    let runtime = tokio::runtime::Runtime::new().expect("cleanup runtime");
+    runtime
+        .block_on(cleanup_store.delete(&ObjectKey::new("bootstrap").expect("bootstrap key")))
+        .expect("cleanup bootstrap");
+}
+
+fn required_env(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for S3 init integration"))
+}
+
+fn unique_test_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    format!("{}-{nanos}", std::process::id())
 }
 
 fn find_first_file(root: std::path::PathBuf) -> std::path::PathBuf {

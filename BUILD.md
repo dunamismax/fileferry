@@ -24,8 +24,9 @@ Last reviewed: 2026-05-19.
 - `ferry version` supports human, JSON, and JSONL output.
 - `ferry completion <SHELL>` generates shell completion scripts.
 - `ferry init` creates encrypted local filesystem repositories from
-  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`; S3-compatible repository
-  bootstrap is still not wired into the CLI.
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, and encrypted
+  S3-compatible repository bootstraps from `s3://bucket[/prefix]` URLs plus
+  explicit S3 endpoint, region, and credential environment variables.
 - `ferry backup` opens initialized local repositories, unlocks them with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates encrypted,
   compressed, deduplicated snapshots through the core backup pipeline, and
@@ -119,7 +120,7 @@ Last reviewed: 2026-05-19.
 The repo is still pre-v1. Restore is wired into the CLI for initialized local
 repositories, directory entries, regular-file contents, Unix symlinks, and
 modified timestamps for restored regular files and directories, but broader
-metadata application and S3-compatible repository bootstrap/restore are not
+metadata application and S3-compatible backup/restore/check paths are not
 complete. `ferry check` supports full referenced-chunk verification and
 deterministic count/percentage referenced-chunk subsets for initialized local
 repositories. Describe backup, restore, check, repository, storage, crypto, or
@@ -177,6 +178,8 @@ Non-goals:
 
 Goal: Make `ferry init s3://...` create encrypted S3-compatible repositories
 through the existing storage abstraction.
+
+Status: Complete as of 2026-05-19 for encrypted bootstrap creation only.
 
 Definition of done:
 
@@ -552,7 +555,7 @@ restore, automate, and install across the supported platform list.
 Minimum v1 bar:
 
 - [x] Rust workspace exists with the target crate boundaries.
-- [ ] `ferry init` creates encrypted local and S3-compatible repositories.
+- [x] `ferry init` creates encrypted local and S3-compatible repositories.
 - [x] `ferry backup` creates encrypted, compressed, deduplicated snapshots.
 - [x] `ferry restore` restores by snapshot id, tag, path, and `latest`.
 - [x] `ferry snapshots` and `ferry ls` have human, JSON, and JSONL-safe
@@ -798,6 +801,23 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone 2 S3-compatible init. `ferry init` now
+  accepts `s3://bucket[/prefix]` repository URLs for encrypted repository
+  bootstrap creation through `S3Store` wrapped in the common storage policy.
+  S3 init requires explicit `FILEFERRY_S3_ENDPOINT`, `FILEFERRY_S3_REGION`,
+  `FILEFERRY_S3_ACCESS_KEY_ID`, and `FILEFERRY_S3_SECRET_ACCESS_KEY`
+  environment variables; credentials in repository URLs, query strings, and
+  fragments are rejected. S3 repository URLs are redacted as
+  `s3://<redacted>` in human, JSON, JSONL, and error output, and S3 config
+  debug output keeps credentials redacted. Added unit coverage for S3 URL and
+  environment parsing, CLI coverage for missing S3 environment and redaction,
+  and a gated live CLI init test under `FILEFERRY_S3_INIT_INTEGRATION=1` that
+  can only initialize a unique prefix below `FILEFERRY_S3_TEST_PREFIX`.
+  Documented the CLI S3 init environment contract in `docs/cli-contract.md`,
+  S3 storage notes, Backblaze B2 development notes, and README status without
+  claiming S3 backup, restore, snapshots, ls, check, or v1 storage support.
+  Verified with `cargo test -p fileferry-cli`, `just fmt`, `just check`,
+  `just test`, `just build`, and `git diff --check`.
 - 2026-05-19 - Completed Milestone 1 configurable check subsets for
   initialized local repositories. `ferry check` now accepts
   `--read-data-subset <N|PERCENT>`, validates counts and percentages as usage
