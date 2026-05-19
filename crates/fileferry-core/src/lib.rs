@@ -231,6 +231,9 @@ pub enum CoreError {
     )]
     KeySlotRemovalWouldLockOut { key_slot_id: String },
 
+    #[error("repository key rotation request is invalid: {reason}")]
+    InvalidKeyRotation { reason: &'static str },
+
     #[error("repository format version {format_version} is not supported")]
     UnsupportedRepositoryFormat { format_version: u16 },
 
@@ -585,6 +588,17 @@ pub struct KeyRemoveResult {
     pub removal_marker_created: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct KeyRotateResult {
+    pub repository_id: String,
+    pub added_key_slot_id: String,
+    pub removed_key_slot_ids: Vec<String>,
+    pub key_slots: usize,
+    pub removal_marker_objects: Vec<String>,
+    pub removal_markers_created: usize,
+    pub kdf: KdfParams,
+}
+
 pub async fn create_repository(
     store: &dyn ObjectStore,
     passphrase: &SecretString,
@@ -804,6 +818,179 @@ pub async fn remove_repository_key_slot(
         removal_marker_object: removal_key.as_str().to_owned(),
         removal_marker_created: created,
     })
+}
+
+pub async fn rotate_repository_key_slots(
+    store: &dyn ObjectStore,
+    current_passphrase: &SecretString,
+    new_passphrase: &SecretString,
+    retire_key_slot_ids: &[String],
+    kdf: KdfParams,
+) -> CoreResult<KeyRotateResult> {
+    let retire_key_slot_ids = normalized_retire_key_slot_ids(retire_key_slot_ids)?;
+    let opened = open_repository(store, current_passphrase).await?;
+
+    for key_slot_id in &retire_key_slot_ids {
+        preflight_external_key_slot_for_removal(store, &opened, key_slot_id).await?;
+    }
+
+    let (added_key_slot_id, stored) =
+        write_external_key_slot(store, &opened, new_passphrase, kdf).await?;
+    let added_object_key = key_slot_object_key(&added_key_slot_id)?;
+    let added_key_slot = stored.key_slot.to_key_slot()?;
+    let new_master_key = unlock_master_key(new_passphrase, &added_key_slot)
+        .map_err(|source| CoreError::RepositoryUnlock { source })?;
+    let actual_check =
+        master_key_check(&new_master_key, &opened.repository_id, &added_key_slot_id)?;
+    if actual_check != stored.master_key_check {
+        return Err(CoreError::InvalidKeySlot {
+            key: added_object_key,
+            reason: "new key slot does not unlock this repository master key",
+        });
+    }
+
+    let mut removal_marker_objects = Vec::with_capacity(retire_key_slot_ids.len());
+    let mut removal_markers_created = 0;
+    for key_slot_id in &retire_key_slot_ids {
+        let (marker_object, marker_created) =
+            write_key_slot_removal_marker(store, &opened, key_slot_id).await?;
+        removal_marker_objects.push(marker_object);
+        removal_markers_created += usize::from(marker_created);
+    }
+
+    let reopened = open_repository(store, new_passphrase).await?;
+
+    Ok(KeyRotateResult {
+        repository_id: reopened.repository_id,
+        added_key_slot_id,
+        removed_key_slot_ids: retire_key_slot_ids,
+        key_slots: reopened.key_slots,
+        removal_marker_objects,
+        removal_markers_created,
+        kdf,
+    })
+}
+
+fn normalized_retire_key_slot_ids(key_slot_ids: &[String]) -> CoreResult<Vec<String>> {
+    if key_slot_ids.is_empty() {
+        return Err(CoreError::InvalidKeyRotation {
+            reason: "at least one key slot must be selected for retirement",
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(key_slot_ids.len());
+    for key_slot_id in key_slot_ids {
+        validate_key_slot_id(key_slot_id)?;
+        if seen.insert(key_slot_id.clone()) {
+            normalized.push(key_slot_id.clone());
+        }
+    }
+
+    Ok(normalized)
+}
+
+async fn preflight_external_key_slot_for_removal(
+    store: &dyn ObjectStore,
+    opened: &OpenedRepository,
+    key_slot_id: &str,
+) -> CoreResult<()> {
+    let removal_key = key_slot_removal_object_key(key_slot_id)?;
+    if let Some(marker) = read_key_slot_removal_marker_if_present(
+        store,
+        &removal_key,
+        key_slot_id,
+        &opened.repository_id,
+    )
+    .await?
+    {
+        marker.verify(&removal_key, &opened.master_key, &opened.repository_id)?;
+        return Ok(());
+    }
+
+    let key_slot_key = key_slot_object_key(key_slot_id)?;
+    let bytes = store
+        .get(&key_slot_key)
+        .await
+        .map_err(|source| match source {
+            StorageError::ObjectNotFound { .. } => CoreError::KeySlotNotFound {
+                key_slot_id: key_slot_id.to_owned(),
+            },
+            source => CoreError::Storage { source },
+        })?;
+    let external: StoredExternalKeySlot =
+        serde_json::from_slice(&bytes).map_err(|source| CoreError::KeySlotDecode {
+            key: key_slot_key.clone(),
+            source,
+        })?;
+    external.validate(&key_slot_key, &opened.repository_id)?;
+    Ok(())
+}
+
+async fn write_external_key_slot(
+    store: &dyn ObjectStore,
+    opened: &OpenedRepository,
+    new_passphrase: &SecretString,
+    kdf: KdfParams,
+) -> CoreResult<(String, StoredExternalKeySlot)> {
+    loop {
+        let key_slot = create_key_slot(&opened.master_key, new_passphrase, kdf)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let key_slot_id = hex_bytes(&random_bytes::<KEY_SLOT_ID_BYTES>());
+        let object_key = key_slot_object_key(&key_slot_id)?;
+        let master_key_check =
+            master_key_check(&opened.master_key, &opened.repository_id, &key_slot_id)?;
+        let stored = StoredExternalKeySlot {
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: opened.repository_id.clone(),
+            key_slot_id: key_slot_id.clone(),
+            key_slot: StoredKeySlot::from_key_slot(&key_slot),
+            master_key_check,
+        };
+        let bytes = serde_json::to_vec_pretty(&stored)
+            .map_err(|source| CoreError::Serialization { source })?;
+        match store
+            .put_if_absent(&object_key, &bytes)
+            .await
+            .map_err(|source| CoreError::Storage { source })?
+        {
+            PutStatus::Created => return Ok((key_slot_id, stored)),
+            PutStatus::AlreadyPresent => continue,
+        }
+    }
+}
+
+async fn write_key_slot_removal_marker(
+    store: &dyn ObjectStore,
+    opened: &OpenedRepository,
+    key_slot_id: &str,
+) -> CoreResult<(String, bool)> {
+    let removal_key = key_slot_removal_object_key(key_slot_id)?;
+    let key_slot_key = key_slot_object_key(key_slot_id)?;
+    let removed_at_unix_seconds = current_unix_seconds()?;
+    let marker = StoredKeySlotRemoval {
+        schema_version: 0,
+        magic: REPOSITORY_MAGIC.to_owned(),
+        format_version: REPOSITORY_FORMAT_VERSION_V0,
+        repository_id: opened.repository_id.clone(),
+        key_slot_id: key_slot_id.to_owned(),
+        key_slot_object: key_slot_key.as_str().to_owned(),
+        removed_at_unix_seconds,
+        master_key_removal_check: master_key_removal_check(
+            &opened.master_key,
+            &opened.repository_id,
+            key_slot_id,
+        )?,
+    };
+    let marker_bytes =
+        serde_json::to_vec_pretty(&marker).map_err(|source| CoreError::Serialization { source })?;
+    let created = store
+        .put_if_absent(&removal_key, &marker_bytes)
+        .await
+        .map_err(|source| CoreError::Storage { source })?
+        == PutStatus::Created;
+    Ok((removal_key.as_str().to_owned(), created))
 }
 
 fn bootstrap_object_key() -> CoreResult<ObjectKey> {
@@ -4367,6 +4554,130 @@ mod tests {
             error,
             CoreError::KeySlotNotFound { key_slot_id } if key_slot_id == missing
         ));
+    }
+
+    #[tokio::test]
+    async fn repository_key_rotate_adds_new_slot_and_retires_selected_external_slot() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let old = SecretString::from("old passphrase");
+        let new = SecretString::from("new passphrase");
+        create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let old_slot = add_repository_key_slot(&store, &original, &old, KdfParams::for_tests())
+            .await
+            .expect("add old key slot");
+        let bootstrap_key = bootstrap_object_key().expect("bootstrap key");
+        let bootstrap_before = store.get(&bootstrap_key).await.expect("bootstrap before");
+        let old_key_slot_key = key_slot_object_key(&old_slot.key_slot_id).expect("old slot key");
+
+        let rotated = rotate_repository_key_slots(
+            &store,
+            &old,
+            &new,
+            std::slice::from_ref(&old_slot.key_slot_id),
+            KdfParams::for_tests(),
+        )
+        .await
+        .expect("rotate key slot");
+
+        assert_ne!(rotated.added_key_slot_id, old_slot.key_slot_id);
+        assert_eq!(
+            rotated.removed_key_slot_ids,
+            vec![old_slot.key_slot_id.clone()]
+        );
+        assert_eq!(
+            rotated.removal_marker_objects,
+            vec![format!("key-slot-removals/{}", old_slot.key_slot_id)]
+        );
+        assert_eq!(rotated.removal_markers_created, 1);
+        assert_eq!(rotated.key_slots, 2);
+        assert_eq!(
+            store.get(&bootstrap_key).await.expect("bootstrap after"),
+            bootstrap_before
+        );
+        assert!(
+            store
+                .exists(&old_key_slot_key)
+                .await
+                .expect("old slot object still exists")
+        );
+        assert!(
+            store
+                .exists(&key_slot_object_key(&rotated.added_key_slot_id).expect("new slot key"))
+                .await
+                .expect("new slot object exists")
+        );
+
+        let opened = open_repository(&store, &new)
+            .await
+            .expect("new passphrase unlocks");
+        assert_eq!(opened.key_slots, 2);
+        let old_unlock = open_repository(&store, &old)
+            .await
+            .expect_err("retired old passphrase no longer unlocks");
+        assert!(matches!(old_unlock, CoreError::RepositoryUnlock { .. }));
+        open_repository(&store, &original)
+            .await
+            .expect("bootstrap passphrase remains");
+    }
+
+    #[tokio::test]
+    async fn repository_key_rotate_preflights_selected_slots_before_writing_new_slot() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let new = SecretString::from("new passphrase");
+        create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let missing = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+
+        let error = rotate_repository_key_slots(
+            &store,
+            &original,
+            &new,
+            std::slice::from_ref(&missing),
+            KdfParams::for_tests(),
+        )
+        .await
+        .expect_err("missing retired slot fails");
+
+        assert!(matches!(
+            error,
+            CoreError::KeySlotNotFound { key_slot_id } if key_slot_id == missing
+        ));
+        assert_eq!(
+            store
+                .list_prefix(&key_slot_prefix().expect("key slot prefix"))
+                .await
+                .expect("list key slots")
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_key_rotate_rejects_empty_retire_selection() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let new = SecretString::from("new passphrase");
+        create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+
+        let error =
+            rotate_repository_key_slots(&store, &original, &new, &[], KdfParams::for_tests())
+                .await
+                .expect_err("empty retire selection fails");
+
+        assert!(matches!(error, CoreError::InvalidKeyRotation { .. }));
     }
 
     #[tokio::test]

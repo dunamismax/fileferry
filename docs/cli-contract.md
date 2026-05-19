@@ -202,10 +202,15 @@ key remove
   data.reencrypted_repository_objects: boolean
 
 key rotate
+  data.repository_id: string
   data.added_key_slot_id: string
   data.removed_key_slot_ids: array of strings
   data.key_slots: integer
-  data.reencrypted_master_key_only: boolean
+  data.removal_marker_objects: array of strings
+  data.removal_markers_created: integer
+  data.kdf: KdfSummary
+  data.deleted_key_slot_objects: boolean
+  data.reencrypted_repository_objects: boolean
 
 key export-recovery
   data.export_id: string
@@ -618,6 +623,24 @@ code `7`; malformed key-slot or key-slot removal marker state fails as an
 integrity failure with exit code `6`. Output includes the repository id,
 removed key-slot id, visible key-slot count, removal marker object,
 `removal_marker_created`, `deleted_key_slot_objects: false`, and
+`reencrypted_repository_objects: false`.
+
+`ferry key rotate --retire-key-slot <KEY_SLOT_ID>...` opens an initialized
+local repository with the current passphrase from `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`, reads the new passphrase from
+`--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`FILEFERRY_NEW_PASSWORD_FILE`, writes one immutable new key-slot object for
+the existing repository master key, proves that new slot unlocks the master
+key, then writes immutable `key-slot-removals/<key-slot-id>` markers for only
+the explicitly selected externally added slots. It does not delete key-slot
+objects, remove the original bootstrap key slot, remove unselected key slots,
+create a new master key, rewrite encrypted repository objects, or recover
+lost keys. Missing selected key-slot ids fail with exit code `7`; wrong
+current passphrases fail with exit code `4`; malformed key-slot or removal
+marker state fails as an integrity failure with exit code `6`. Output
+includes the repository id, added key-slot id, removed key-slot ids, visible
+key-slot count, removal marker objects, removal marker creation count, KDF
+parameters, `deleted_key_slot_objects: false`, and
 `reencrypted_repository_objects: false`.
 S3-compatible key management is not implemented yet.
 

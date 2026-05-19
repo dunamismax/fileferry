@@ -206,10 +206,21 @@ Key rotation has two different meanings:
 - Repository rekey creates a new master key and rewrites or re-encrypts all
   repository objects.
 
-Format v0 `key rotate` must mean unlock rotation unless a future command name
-explicitly chooses full repository rekey. Unlock rotation does not rewrite old
-chunks, manifests, indexes, or policy objects. The command must say that
-clearly in human and machine output.
+Format v0 `key rotate` means unlock rotation. For initialized local
+repositories, `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...` unlocks
+the repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, writes
+one new immutable `key-slots/<key-slot-id>` object from
+`--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`FILEFERRY_NEW_PASSWORD_FILE`, proves that the new slot unlocks the existing
+repository master key, then writes immutable removal markers for the
+explicitly selected externally added key slots.
+
+`key rotate` does not create a new repository master key, does not re-encrypt
+or rewrite chunks, manifests, indexes, snapshot commit markers, forget
+markers, policy/config objects, or the original bootstrap slot, does not
+delete `key-slots/<key-slot-id>` objects, does not remove unselected key
+slots, and does not recover lost keys. S3-compatible key rotation is not
+implemented yet.
 
 ## Tamper And Corruption Errors
 

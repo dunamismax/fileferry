@@ -5,7 +5,7 @@ use fileferry_core::{
     CheckRepositoryOptions, CoreError, MetadataStatus, RestoreDestinationAction,
     RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection,
     add_repository_key_slot, create_repository, list_snapshot_entries, open_repository,
-    remove_repository_key_slot, select_snapshot, snapshot_summaries,
+    remove_repository_key_slot, rotate_repository_key_slots, select_snapshot, snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
 use fileferry_platform::{EntryKind, MetadataValue};
@@ -228,6 +228,22 @@ pub enum KeyCommand {
         #[arg(value_parser = parse_key_slot_id)]
         key_slot_id: String,
     },
+
+    /// Add a new passphrase key slot and mark selected added slots removed.
+    Rotate {
+        /// File containing the new passphrase to add.
+        #[arg(long = "new-password-file", value_name = "FILE")]
+        new_password_file: Option<PathBuf>,
+
+        /// Added key-slot id to retire. May be repeated.
+        #[arg(
+            long = "retire-key-slot",
+            value_name = "KEY_SLOT_ID",
+            value_parser = parse_key_slot_id,
+            required = true
+        )]
+        retire_key_slot_ids: Vec<String>,
+    },
 }
 
 impl Command {
@@ -246,6 +262,9 @@ impl Command {
             Self::Key {
                 command: KeyCommand::Remove { .. },
             } => "key remove",
+            Self::Key {
+                command: KeyCommand::Rotate { .. },
+            } => "key rotate",
             Self::Restore { .. } => "restore",
             Self::Version => "version",
         }
@@ -401,6 +420,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidChunkingConfig { .. } => 1,
         CoreError::SourceRootNotAbsolute { .. }
         | CoreError::InvalidCheckDataSubset { .. }
+        | CoreError::InvalidKeyRotation { .. }
         | CoreError::InvalidRestoreRequest { .. }
         | CoreError::RestoreDestinationNotAbsolute { .. }
         | CoreError::RestoreDestinationEscapesRoot { .. }
@@ -660,6 +680,19 @@ struct KeyRemoveData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct KeyRotateData {
+    repository_id: String,
+    added_key_slot_id: String,
+    removed_key_slot_ids: Vec<String>,
+    key_slots: usize,
+    removal_marker_objects: Vec<String>,
+    removal_markers_created: usize,
+    kdf: KdfSummary,
+    deleted_key_slot_objects: bool,
+    reencrypted_repository_objects: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct KdfSummary {
     algorithm: &'static str,
     memory_cost_kib: u32,
@@ -910,6 +943,16 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             let config = resolve_config(&cli.globals)?;
             key_remove(mode, &config, key_slot_id)
         }
+        Command::Key {
+            command:
+                KeyCommand::Rotate {
+                    new_password_file,
+                    retire_key_slot_ids,
+                },
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            key_rotate(mode, &config, new_password_file, retire_key_slot_ids)
+        }
         Command::Restore {
             snapshot,
             tag,
@@ -1113,6 +1156,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::KeySlotRemovalWouldLockOut { .. } => {
             "repository_key_slot_removal_would_lock_out"
         }
+        CoreError::InvalidKeyRotation { .. } => "repository_key_rotation_invalid",
         CoreError::UnsupportedRepositoryFormat { .. } => "repository_format_unsupported",
         CoreError::UnsupportedRepositoryFeatures => "repository_features_unsupported",
         CoreError::RepositoryUnlock { .. } => "repository_unlock_failed",
@@ -1651,6 +1695,47 @@ fn key_remove(
             data.repository_id,
             data.key_slots,
             data.removal_marker_object
+        )
+    })
+}
+
+fn key_rotate(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    new_password_file: Option<PathBuf>,
+    retire_key_slot_ids: Vec<String>,
+) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let current_passphrase = repository_passphrase()?;
+    let new_passphrase = new_repository_passphrase(new_password_file.as_deref())?;
+    let runtime = tokio_runtime()?;
+    let result = runtime.block_on(rotate_repository_key_slots(
+        &repository.store,
+        &current_passphrase,
+        &new_passphrase,
+        &retire_key_slot_ids,
+        KdfParams::default(),
+    ))?;
+    let data = KeyRotateData {
+        repository_id: result.repository_id,
+        added_key_slot_id: result.added_key_slot_id,
+        removed_key_slot_ids: result.removed_key_slot_ids,
+        key_slots: result.key_slots,
+        removal_marker_objects: result.removal_marker_objects,
+        removal_markers_created: result.removal_markers_created,
+        kdf: KdfSummary::from(result.kdf),
+        deleted_key_slot_objects: false,
+        reencrypted_repository_objects: false,
+    };
+
+    emit_command(mode, "key rotate", data, |data| {
+        format!(
+            "Rotated repository unlock keys for {}\nadded_key_slot_id={}\nremoved_key_slot_ids={}\nkey_slots={}\nremoval_markers_created={}\ndeleted_key_slot_objects=false\nreencrypted_repository_objects=false\n",
+            data.repository_id,
+            data.added_key_slot_id,
+            data.removed_key_slot_ids.join(","),
+            data.key_slots,
+            data.removal_markers_created
         )
     })
 }

@@ -357,11 +357,13 @@ currently exposes `version`, `completion`, local and S3-compatible repository
 `check`; it also exposes local repository `forget` as marker-only retention
 state without object deletion, `ferry key add` as an append-only passphrase
 key-slot addition command, and `ferry key remove` as marker-based external
-key-slot removal for initialized local repositories. Restore currently covers
-directory entries, regular-file contents, Unix symlinks, and modified
-timestamps for restored regular files and directories from initialized local
-repositories. S3-compatible backup, restore, snapshots, ls, check, forget,
-and key management are not implemented yet. Other metadata
+key-slot removal for initialized local repositories, and `ferry key rotate`
+as unlock rotation that adds one new passphrase key slot and marker-removes
+explicitly selected external key slots. Restore currently covers directory
+entries, regular-file contents, Unix symlinks, and modified timestamps for
+restored regular files and directories from initialized local repositories.
+S3-compatible backup, restore, snapshots, ls, check, forget, and key
+management are not implemented yet. Other metadata
 application is not implemented yet. Check failures in JSON and JSONL modes now
 emit machine-readable failure envelopes with stable codes and object-key
 context where available.
@@ -374,9 +376,13 @@ existing repository master key; it does not re-encrypt repository objects or
 recover lost keys. `ferry key remove` writes one immutable
 `key-slot-removals/<key-slot-id>` marker for an externally added key slot; it
 does not delete key-slot objects, remove the original bootstrap slot, rekey,
-re-encrypt repository objects, or recover lost keys. Broader metadata
-application is not implemented yet. The repository format is still not
-frozen.
+re-encrypt repository objects, or recover lost keys. `ferry key rotate` writes
+one immutable new key slot for the existing repository master key, proves the
+new passphrase unlock path before marker-removing selected externally added
+old slots, and does not rekey, re-encrypt repository objects, delete key-slot
+objects, remove the original bootstrap slot, remove unselected slots, or
+recover lost keys. Broader metadata application is not implemented yet. The
+repository format is still not frozen.
 
 The normal local gate is:
 

@@ -70,6 +70,14 @@ Current implementation status:
   external key slots during unlock after the marker check verifies. They do
   not delete `key-slots/<key-slot-id>` objects and do not rewrite the
   bootstrap key slot or encrypted repository objects.
+- `ferry key rotate` for initialized local repositories is unlock rotation:
+  it writes one new immutable `key-slots/<key-slot-id>` object for the
+  existing repository master key, proves the new slot unlocks that master key,
+  then writes immutable `key-slot-removals/<key-slot-id>` marker objects for
+  explicitly selected externally added key slots. It does not create a new
+  repository master key, delete key-slot objects, remove the original
+  bootstrap key slot, retire unselected slots, or rewrite encrypted repository
+  objects.
 - `ferry snapshots` and `ferry ls` read the bootstrap, unlock the master key
   from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then authenticate
   encrypted manifests before returning snapshot metadata.

@@ -100,6 +100,21 @@ Last reviewed: 2026-05-19.
   visible key-slot count, marker object, marker creation status, and explicit
   `deleted_key_slot_objects: false` and
   `reencrypted_repository_objects: false`.
+- `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...` opens initialized
+  local repositories, unlocks with `FILEFERRY_PASSWORD` or
+  `FILEFERRY_PASSWORD_FILE`, writes one immutable additional passphrase
+  key-slot object from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+  `FILEFERRY_NEW_PASSWORD_FILE`, proves the new slot unlocks the existing
+  repository master key, and writes immutable `key-slot-removals/<key-slot-id>`
+  markers for explicitly selected externally added key slots. It does not
+  create a new master key, remove the original bootstrap key slot, remove
+  unselected key slots, delete `key-slots/<key-slot-id>` objects, rewrite or
+  re-encrypt repository objects, recover lost keys, or implement
+  S3-compatible key management. Human, JSON, and JSONL-safe output report the
+  added key-slot id, removed key-slot ids, total visible key-slot count,
+  marker objects, marker creation count, KDF parameters, and explicit
+  `deleted_key_slot_objects: false` and
+  `reencrypted_repository_objects: false`.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -166,9 +181,11 @@ repositories. `ferry forget` is marker-only for initialized local repositories;
 it hides forgotten snapshots from normal snapshot discovery but does not
 delete objects or reclaim storage. `ferry key add` and `ferry key remove` are
 implemented for initialized local repositories only; `key remove` is limited
-to marker-based removal of externally added key slots. Key rotate, recovery
-export, full repository rekey, bootstrap-slot removal, and S3-compatible key
-management are not implemented. Describe backup, restore, check, forget, key
+to marker-based removal of externally added key slots, and `key rotate` is
+limited to unlock rotation that adds one new slot and marker-removes
+explicitly selected externally added slots. Recovery export, full repository
+rekey, bootstrap-slot removal, and S3-compatible key management are not
+implemented. Describe backup, restore, check, forget, key
 management, repository, storage, crypto, or platform behavior only to the
 level backed by code, tests, and platform evidence.
 
@@ -370,6 +387,53 @@ Non-goals:
 - S3-compatible key management.
 - Recovery export, key rotation, prune, repair, or broad key-management
   completion.
+
+### Milestone 7 - Key Rotate Unlock Slice
+
+Goal: Implement `ferry key rotate` as unlock rotation for initialized local
+repositories without changing the repository master key or rewriting encrypted
+repository objects.
+
+Status: Complete as of 2026-05-19 for marker-based unlock rotation of
+explicitly selected externally added key slots in initialized local
+repositories.
+
+Definition of done:
+
+- CLI exposes `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...` for local
+  repositories with human, JSON, and JSONL-safe output.
+- The command requires the current passphrase from `FILEFERRY_PASSWORD` or
+  `FILEFERRY_PASSWORD_FILE`.
+- The command requires the new passphrase from `--new-password-file`,
+  `FILEFERRY_NEW_PASSWORD`, or `FILEFERRY_NEW_PASSWORD_FILE`.
+- Rotation writes one immutable new `key-slots/<key-slot-id>` object wrapping
+  the existing repository master key.
+- Rotation retires only explicitly selected externally added key slots by
+  writing immutable `key-slot-removals/<key-slot-id>` markers.
+- The new key slot is proven to unlock the existing repository master key
+  before any selected old slot is retired.
+- Removed slots no longer unlock the repository, while the new passphrase
+  still unlocks it after rotation.
+- Human, JSON, and JSONL output report the added key-slot id, removed key-slot
+  ids, visible key-slot count, marker objects, marker creation count, KDF
+  parameters, `deleted_key_slot_objects: false`, and
+  `reencrypted_repository_objects: false`.
+- Tests cover success, JSON/JSONL output, current-slot rotation, wrong
+  password/key behavior, missing key-slot ids, malformed key-slot/removal
+  marker state, redaction, and exit-code mapping.
+- `docs/security.md`, `docs/repository-format.md`, `docs/cli-contract.md`,
+  README, and this file reflect only the implemented behavior.
+
+Non-goals:
+
+- Full repository rekey or changing the repository master key.
+- Re-encrypting chunks, manifests, indexes, commit markers, forget markers, or
+  policy/config objects.
+- Removing the original bootstrap key slot.
+- Deleting `key-slots/<key-slot-id>` objects.
+- Retiring unselected key slots.
+- S3-compatible key management.
+- Recovery export, prune, repair, or broad key-management completion.
 
 ## Current Deprioritized Polish
 
@@ -790,7 +854,7 @@ where documented verification passes on a clean checkout.
 
 - [x] Implement `key add`.
 - [x] Implement `key remove`.
-- [ ] Implement `key rotate`.
+- [x] Implement `key rotate`.
 - [ ] Implement `key export-recovery`.
 - [ ] Document operational recovery procedures.
 - [ ] Add tests for multiple unlock methods and removed keys.
@@ -891,6 +955,28 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone 7 key rotate unlock slice for initialized
+  local repositories by implementing
+  `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...`. The command unlocks
+  with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, writes one
+  immutable new `key-slots/<key-slot-id>` object from `--new-password-file`,
+  `FILEFERRY_NEW_PASSWORD`, or `FILEFERRY_NEW_PASSWORD_FILE`, proves the new
+  passphrase unlock path wraps the existing repository master key, and writes
+  immutable `key-slot-removals/<key-slot-id>` markers for explicitly selected
+  externally added key slots. Rotated-away selected slots no longer unlock,
+  while the new passphrase and any unselected remaining unlock paths still do.
+  The command does not create a new master key, delete key-slot objects,
+  remove the original bootstrap slot, remove unselected slots, rewrite or
+  re-encrypt repository objects, recover lost keys, or implement
+  S3-compatible key management. Added human/JSON/JSONL-safe CLI output,
+  structured failure mapping for wrong passwords, missing selected slots,
+  malformed key-slot objects, malformed removal markers, and redaction, plus
+  security, repository-format, CLI contract, README, and build-plan docs.
+  Verified with `cargo test -p fileferry-core repository_key_rotate
+  --no-fail-fast`, `cargo test -p fileferry-cli key_rotate --no-fail-fast`,
+  `cargo test -p fileferry-core -p fileferry-cli --no-fail-fast`,
+  `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check`.
 - 2026-05-19 - Completed Milestone 6 key remove first slice for initialized
   local repositories by implementing `ferry key remove <KEY_SLOT_ID>` for
   externally added key slots. The command unlocks with `FILEFERRY_PASSWORD` or
