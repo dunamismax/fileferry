@@ -16,8 +16,9 @@ Last reviewed: 2026-05-19.
 ## Current Baseline
 
 - Repository exists with MIT license.
-- `origin` fetches from and pushes to
-  `https://github.com/dunamismax/fileferry.git`.
+- The canonical GitHub remote is
+  `https://github.com/dunamismax/fileferry.git`, though local checkouts may
+  fetch or push through SSH aliases and may push to more than one URL.
 - Rust workspace exists with the target crate boundaries, `fileferry-cli`
   binary, `fileferry-web` homepage binary, `just` verification recipes, and
   GitHub Actions CI.
@@ -199,247 +200,241 @@ application.
 
 This section is the current execution queue. Agents should prefer completing
 one active milestone end to end over making many small adjacent improvements.
-Do not spend another pass on restore/check polish unless it directly supports
-one of these milestones or fixes a verified bug.
+Choose the first unfinished milestone that can be completed honestly in the
+current session. If it is too large, split it into explicit sub-milestones in
+this section before coding.
 
-If a milestone is too large for one work session, split it into explicit
-sub-milestones in this section before coding. Each sub-milestone needs its own
-definition of done and non-goals. Only check boxes elsewhere in this file when
-the completed implementation and verification satisfy the full stated scope.
+### Milestone A - Key Recovery Export
 
-### Milestone 1 - Configurable Check Subsets
-
-Goal: Implement `ferry check --read-data-subset <N|PERCENT>` end to end for
-initialized local repositories.
+Goal: Implement the remaining key-management command,
+`ferry key export-recovery`, for initialized local repositories without
+printing or storing raw master-key material.
 
 Definition of done:
 
-- CLI parses, validates, and documents `--read-data-subset`.
-- Core supports full checks and deterministic subset checks over referenced
-  chunks.
-- Subset selection is stable for the same repository state and does not depend
-  on object-store listing order.
-- JSON and JSONL report `read_data_mode` and `read_data_subset` accurately.
-- Invalid subset arguments fail with exit code `2`.
-- Corruption, tampering, decompression, identity, and missing-object failures
-  still fail with exit code `6`.
-- Tests cover full check behavior, count subset, percentage subset, invalid
-  subset arguments, deterministic selection, and at least one subset integrity
-  failure.
-- `docs/cli-contract.md` and this file reflect only the implemented behavior.
-
-Non-goals:
-
-- Repair.
-- `doctor`.
-- S3-specific check behavior.
-- Probabilistic or background checking.
-- Changing the repository format.
-
-### Milestone 2 - S3-Compatible Init
-
-Goal: Make `ferry init s3://...` create encrypted S3-compatible repositories
-through the existing storage abstraction.
-
-Status: Complete as of 2026-05-19 for encrypted bootstrap creation only.
-
-Definition of done:
-
-- CLI accepts S3-compatible repository URLs for `init`.
-- Required endpoint, region, bucket, prefix, credential, and environment
-  behavior is documented.
-- Secrets and repository URLs are redacted in human, JSON, JSONL, debug, and
-  error output.
-- Init writes the same encrypted bootstrap model used by local repositories.
-- Existing unsupported-format and wrong-password behavior remains unchanged.
-- Tests use a fake store, emulator, or gated isolated integration path that
-  cannot touch non-test repositories.
-- Backblaze B2 development behavior follows
-  `docs/backblaze-b2-dev-storage.md` when live credentials are used.
-- `README.md`, docs, and this file do not claim S3 backup, restore, check, or
-  v1 support unless those paths are implemented and verified.
-
-Non-goals:
-
-- S3 backup or restore unless completed end to end in the same milestone.
-- Broad cloud-provider support.
-- Multipart upload lifecycle changes.
-- Release support claims.
-
-### Milestone 3 - Forget Without Prune
-
-Goal: Implement safe `ferry forget` planning and snapshot forget markers
-without deleting repository objects.
-
-Status: Complete as of 2026-05-19 for initialized local repositories.
-
-Definition of done:
-
-- CLI exposes `ferry forget` with documented dry-run behavior.
-- Retention selection uses `fileferry-policy` keep rules where implemented.
-- Forget writes explicit repository state or markers only when not in dry-run.
-- Forget does not delete chunks, manifests, indexes, or commit objects unless
-  prune is implemented and verified separately.
-- JSON and JSONL report candidate snapshots, kept snapshots, forgotten
-  snapshots, dry-run status, and item-level reasons.
-- Human output writes diagnostics to stderr and does not put progress in
-  stdout data modes.
-- No-match behavior and invalid policy arguments have stable exit codes.
-- Tests cover tag rules, count rules, dry-run, no-match behavior,
-  non-interactive operation, JSON/JSONL envelopes, and repository state after
-  forget.
-- Docs clearly state that object deletion is not implemented until prune lands.
-
-Non-goals:
-
-- Object deletion.
-- Two-phase prune sweep.
-- Storage reclamation claims.
-- Automatic repair.
-
-### Milestone 4 - Local Backend Interruption And Corruption Evidence
-
-Goal: Turn local backend reliability from partially tested behavior into
-documented evidence for v1 planning.
-
-Status: Complete as of 2026-05-19 for initialized local repositories.
-
-Definition of done:
-
-- Local repository tests cover interrupted or partial writes where practical.
-- Tests cover missing objects, stale temporary objects, malformed objects,
-  permission errors, and immutable-write conflicts through command or core
-  boundaries.
-- Failures map to documented exit-code families.
-- JSON/JSONL failure envelopes preserve safe object-key/path context where
-  available.
-- `docs/operations.md` or a dedicated local-backend runbook documents the
-  tested evidence without claiming platform-wide support.
-
-Non-goals:
-
-- S3-compatible backend claims.
-- Full platform support claims.
-- Repair or automatic cleanup beyond implemented behavior.
-
-### Milestone 5 - Key Management First Slice
-
-Goal: Implement the smallest useful key-management command slice without
-weakening repository encryption.
-
-Status: Complete as of 2026-05-19 for `ferry key add` on initialized local
-repositories.
-
-Definition of done:
-
-- Choose one command first: `ferry key add`, `ferry key remove`, `ferry key
-  rotate`, or `ferry key export-recovery`.
-- Document the exact command semantics before implementation if the existing
-  security docs are not specific enough.
-- CLI supports human, JSON, and JSONL-safe output.
-- Every prompt has a non-interactive alternative.
-- Tests cover success, wrong password/key, malformed repository state,
-  redaction, and exit-code mapping.
-- Security docs explain what the command does not rewrite or recover.
-
-Non-goals:
-
-- Completing all key-management commands in one pass unless each is fully
-  implemented and tested.
-- Rewriting existing encrypted backup data unless explicitly designed,
-  documented, and verified.
-- Silent weakening or bypassing of KDF/key-slot behavior.
-
-### Milestone 6 - Key Remove First Slice
-
-Goal: Implement `ferry key remove <KEY_SLOT_ID>` for initialized local
-repositories without deleting key material or making silent lockout possible.
-
-Status: Complete as of 2026-05-19 for marker-based removal of externally
-added key slots in initialized local repositories.
-
-Definition of done:
-
-- CLI exposes `ferry key remove <KEY_SLOT_ID>` for local repositories with
-  human, JSON, and JSONL-safe output.
-- Removal is marker-based and writes an immutable
-  `key-slot-removals/<key-slot-id>` object instead of deleting
-  `key-slots/<key-slot-id>` objects.
-- The command removes only externally added key slots; the original bootstrap
-  key slot is not removable in this slice.
-- The repository must first unlock with `FILEFERRY_PASSWORD` or
-  `FILEFERRY_PASSWORD_FILE`.
-- At least one remaining non-removed unlock path is proven with the supplied
-  current passphrase before a removal marker is written.
-- Removed key slots no longer unlock the repository, while a proven remaining
-  passphrase still unlocks it.
-- Tests cover success, JSON/JSONL output, removed-slot rejection, wrong
-  password/key behavior, missing key-slot ids, malformed removal markers,
-  lockout prevention, redaction, and exit-code mapping.
-- `docs/security.md`, `docs/repository-format.md`, `docs/cli-contract.md`,
-  and this file reflect only the implemented behavior.
-
-Non-goals:
-
-- Physical deletion of key-slot objects.
-- Removing the original bootstrap key slot.
-- Full repository rekey or re-encryption.
-- S3-compatible key management.
-- Recovery export, key rotation, prune, repair, or broad key-management
-  completion.
-
-### Milestone 7 - Key Rotate Unlock Slice
-
-Goal: Implement `ferry key rotate` as unlock rotation for initialized local
-repositories without changing the repository master key or rewriting encrypted
-repository objects.
-
-Status: Complete as of 2026-05-19 for marker-based unlock rotation of
-explicitly selected externally added key slots in initialized local
-repositories.
-
-Definition of done:
-
-- CLI exposes `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...` for local
+- CLI exposes `ferry key export-recovery --output <FILE>` for local
   repositories with human, JSON, and JSONL-safe output.
-- The command requires the current passphrase from `FILEFERRY_PASSWORD` or
+- The command unlocks with `FILEFERRY_PASSWORD` or
   `FILEFERRY_PASSWORD_FILE`.
-- The command requires the new passphrase from `--new-password-file`,
-  `FILEFERRY_NEW_PASSWORD`, or `FILEFERRY_NEW_PASSWORD_FILE`.
-- Rotation writes one immutable new `key-slots/<key-slot-id>` object wrapping
-  the existing repository master key.
-- Rotation retires only explicitly selected externally added key slots by
-  writing immutable `key-slot-removals/<key-slot-id>` markers.
-- The new key slot is proven to unlock the existing repository master key
-  before any selected old slot is retired.
-- Removed slots no longer unlock the repository, while the new passphrase
-  still unlocks it after rotation.
-- Human, JSON, and JSONL output report the added key-slot id, removed key-slot
-  ids, visible key-slot count, marker objects, marker creation count, KDF
-  parameters, `deleted_key_slot_objects: false`, and
-  `reencrypted_repository_objects: false`.
-- Tests cover success, JSON/JSONL output, current-slot rotation, wrong
-  password/key behavior, missing key-slot ids, malformed key-slot/removal
-  marker state, redaction, and exit-code mapping.
+- The recovery export is encrypted and authenticated with documented KDF,
+  AEAD, associated data, and warning text.
+- Output never prints raw master keys, recovery secrets, passphrases, or
+  repository URLs with credentials.
+- The export file format records only the minimum fields needed for future
+  recovery import or verification.
+- Tests cover success, wrong password, destination safety, malformed output
+  prevention, redaction, and exit-code mapping.
 - `docs/security.md`, `docs/repository-format.md`, `docs/cli-contract.md`,
-  README, and this file reflect only the implemented behavior.
+  README, and this file describe only the implemented behavior.
 
 Non-goals:
 
-- Full repository rekey or changing the repository master key.
-- Re-encrypting chunks, manifests, indexes, commit markers, forget markers, or
-  policy/config objects.
-- Removing the original bootstrap key slot.
-- Deleting `key-slots/<key-slot-id>` objects.
-- Retiring unselected key slots.
+- Recovery import unless explicitly split and completed.
+- Plaintext key export.
+- Full repository rekey.
 - S3-compatible key management.
-- Recovery export, prune, repair, or broad key-management completion.
+- Rewriting bootstrap slots or encrypted repository objects.
+
+### Milestone B - Local Two-Phase Prune
+
+Goal: Implement safe local `ferry prune` for forgotten snapshots using a
+recoverable mark-and-sweep model.
+
+Definition of done:
+
+- CLI exposes `ferry prune` for initialized local repositories with `--dry-run`
+  plus human, JSON, and JSONL-safe output.
+- Prune deletes only objects proven unreachable from non-forgotten committed
+  snapshots and required repository state.
+- The first phase writes durable prune marks or equivalent recoverable state.
+- The sweep phase is interruption-safe and can be resumed or safely rerun.
+- Prune never deletes bootstrap, key slots, key-slot removal markers, current
+  policy/config objects, or non-forgotten snapshot data.
+- JSON/JSONL report candidate objects, retained objects, deleted objects,
+  byte counts where known, dry-run status, and recovery state.
+- Tests cover dry-run, successful sweep, interruption/resume, malformed prune
+  state, concurrent forget/prune guardrails, missing objects, and exit-code
+  mapping.
+- `docs/repository-format.md`, `docs/cli-contract.md`, `docs/operations.md`,
+  README, and this file document the exact local-only behavior.
+
+Non-goals:
+
+- S3-compatible prune.
+- Repair of corrupted repositories.
+- Automatic stale temporary cleanup outside prune state.
+- Repository compaction beyond unreachable-object deletion.
+
+### Milestone C - S3 Command Parity Foundation
+
+Goal: Remove local-only CLI assumptions so implemented repository commands can
+open initialized S3-compatible repositories through the existing object-store
+abstraction.
+
+Definition of done:
+
+- Shared repository opening selects local or S3-compatible stores from the
+  resolved repository URL without leaking credentials.
+- Existing S3 init environment rules remain stable and documented.
+- Unsupported S3 command paths fail with documented exit code `9` or `3`
+  until that command is implemented end to end.
+- Tests use fake stores, isolated local abstractions, or gated live S3 paths
+  that cannot touch non-test repositories.
+- Docs continue to distinguish S3 init from S3 backup/restore/check/forget,
+  prune, and key management until each is implemented and verified.
+
+Non-goals:
+
+- Claiming S3 v1 support.
+- Multipart lifecycle changes.
+- Broad cloud-provider support beyond S3-compatible URLs.
+- Implementing every command in one pass.
+
+### Milestone D - S3 Backup And Read Paths
+
+Goal: Implement the smallest complete S3-compatible data-path slice: backup,
+snapshots, ls, restore, and check for initialized S3-compatible repositories.
+
+Definition of done:
+
+- `backup`, `snapshots`, `ls`, `restore`, and `check` work against
+  initialized S3-compatible repositories with the same encryption and
+  authentication model as local repositories.
+- Command output preserves stdout/stderr separation and existing JSON/JSONL
+  contracts.
+- Object-store retries, timeouts, idempotent writes, and missing-object
+  behavior are exercised through tests.
+- Live Backblaze B2 testing is gated and follows
+  `docs/backblaze-b2-dev-storage.md`.
+- Docs state exactly which S3-compatible commands are implemented and which
+  remain unsupported.
+
+Non-goals:
+
+- S3-compatible forget, prune, or key management unless split and completed.
+- Native Backblaze B2 APIs.
+- New storage providers.
+- Platform support claims.
+
+### Milestone E - S3 Retention And Key Management
+
+Goal: Extend marker-based forget and key-management commands to
+S3-compatible repositories after S3 read/write data paths are proven.
+
+Definition of done:
+
+- `forget`, `key add`, `key remove`, `key rotate`, and
+  `key export-recovery` either work against initialized S3-compatible
+  repositories or fail with explicit documented unsupported behavior.
+- Marker writes remain immutable and retry-safe on object storage.
+- Wrong-password, missing-object, malformed-marker, permission, and retry
+  behavior map to documented exit-code families.
+- Tests cover fake/object-store behavior and gated live S3 behavior where
+  practical.
+- Docs do not claim S3 prune until Milestone F is complete.
+
+Non-goals:
+
+- S3-compatible prune.
+- Full repository rekey.
+- New backend providers.
+
+### Milestone F - S3 Two-Phase Prune
+
+Goal: Implement recoverable two-phase prune for S3-compatible repositories
+after local prune and S3 command parity are proven.
+
+Definition of done:
+
+- S3 prune uses immutable/recoverable state and does not require rename
+  operations for correctness.
+- Dry-run, mark, sweep, interruption, resume, missing objects, stale objects,
+  permission failures, and retry behavior are tested.
+- Multipart or partial-upload cleanup guidance is documented where relevant.
+- Live tests are gated and isolated from non-test repositories.
+- README and docs clearly state the S3 prune support boundary.
+
+Non-goals:
+
+- Repair of arbitrary S3 repository corruption.
+- Provider-specific lifecycle policies as core behavior.
+- Release support claims before the v1 evidence path passes.
+
+### Milestone G - Metadata And Platform Hardening
+
+Goal: Close the v1 metadata and platform evidence gaps without overstating
+support.
+
+Definition of done:
+
+- Implement and test the remaining v1 metadata restore behavior chosen in
+  `docs/platform-metadata.md`.
+- Add platform-specific tests for path normalization, reserved names, symlink
+  behavior, case behavior, long paths, permission errors, and metadata warning
+  output where each platform exposes the behavior.
+- CI builds and tests every platform that README or release docs call
+  supported.
+- Unsupported or partially supported metadata produces clear human and
+  machine-readable warnings.
+
+Non-goals:
+
+- Claiming platform support before CI and artifacts exist.
+- Platform-specific cleverness that weakens portable correctness.
+- GUI, TUI, daemon, scheduler, or service behavior.
+
+### Milestone H - Format Fixtures And Compatibility Freeze
+
+Goal: Freeze repository format `0` only after durable fixtures and migration
+expectations exist.
+
+Definition of done:
+
+- Add golden fixtures for bootstrap, key slots, key-slot removal markers,
+  recovery exports if implemented, encrypted chunks, indexes, manifests,
+  commit markers, forget markers, and prune state.
+- Fixture tests prove current code can read the fixtures and rejects malformed
+  or tampered variants with documented error classes.
+- `docs/repository-format.md` identifies which fields are compatibility
+  contracts and which remain internal.
+- Migration detection and unsupported-version behavior are tested.
+
+Non-goals:
+
+- Compatibility with restic, rustic, Borg, Kopia, rclone, or any other backup
+  format.
+- Freezing before recovery export and prune object formats are settled.
+
+### Milestone I - V1 Release Hardening
+
+Goal: Build the release evidence path after local and S3 repository behavior
+meet the v1 scope.
+
+Definition of done:
+
+- Run documented local and S3-compatible restore drills.
+- Audit logs, errors, JSON, JSONL, and tests for secret leakage.
+- Add release artifacts, checksums, signatures, SBOM, and
+  `cargo-auditable` metadata.
+- Add tested Unix shell and PowerShell install paths.
+- Run release smoke tests on every claimed platform artifact.
+- Update README, docs, completions, release notes, and homepage status to
+  match the exact release candidate.
+
+Non-goals:
+
+- Tagging v1 before the exact release candidate passes.
+- Claiming unsupported platforms.
+- Adding GUI, TUI, daemon, server, scheduler, SaaS, mobile, FUSE, or
+  compatibility-layer behavior.
 
 ## Current Deprioritized Polish
 
 Do not choose these as primary work unless a test proves a bug or the work is
 required by an active milestone:
 
+- Reworking completed check, forget, local-backend evidence, key add, key
+  remove, or key rotate slices unless a real bug blocks a remaining milestone.
 - More restore edge-case diagnostics around already-covered destination
   preflight behavior.
 - More check failure-envelope polish where object-key/path/snapshot context is
@@ -448,6 +443,8 @@ required by an active milestone:
 - Refactors that do not remove a blocker for an active milestone.
 - Broad platform, S3, metadata, prune, repair, release, or v1 claims without
   implementation and verification.
+- New storage providers, repository compatibility layers, GUI/TUI/server
+  surfaces, or scheduling behavior.
 
 ---
 
@@ -955,6 +952,15 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Cleaned up `BUILD.md` after completion of the previous active
+  milestones. Removed completed milestone definitions from the Active
+  Milestones queue, replaced them with a forward-looking v1 execution queue
+  covering recovery export, local prune, S3 command parity, S3 prune,
+  metadata/platform hardening, format fixtures, and release hardening, and
+  tightened deprioritized-work guidance so future agents focus on remaining
+  v1 blockers instead of revisiting completed slices. Also clarified that the
+  canonical GitHub remote is HTTPS while local checkouts may use SSH aliases
+  and multiple push URLs. Verified with `git diff --check`.
 - 2026-05-19 - Completed Milestone 7 key rotate unlock slice for initialized
   local repositories by implementing
   `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...`. The command unlocks
