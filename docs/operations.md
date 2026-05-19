@@ -109,12 +109,16 @@ Evidence added or retained:
   stale temporary object listing behavior.
 - `fileferry-core` tests: missing or tampered chunks, malformed or replayed
   metadata, malformed commits, manifest/index mismatches, invalid manifests,
-  permission-denied source reads, and immutable bootstrap write conflicts.
+  permission-denied source reads, immutable bootstrap write conflicts, local
+  prune dry-runs, successful prune sweeps, interrupted prune resume, missing
+  prune candidates, malformed prune state, and commit/forget state-change
+  guardrails.
 - `fileferry-cli` tests: missing referenced manifests/chunks, tampered
   chunks, malformed commits, corrupted metadata, stale local temp/uncommitted
-  partial objects, and JSON permission failure envelopes.
+  partial objects, local prune JSON/JSONL output, malformed prune state exit
+  mapping, and JSON permission failure envelopes.
 
 This evidence is local-backend evidence only. It does not claim automatic
-repair, cleanup of stale temporary files, prune safety, S3-compatible backup,
-S3-compatible restore, S3-compatible check, platform-wide permission behavior,
-or release support on every target.
+repair, cleanup of stale temporary files, S3-compatible prune,
+S3-compatible backup, S3-compatible restore, S3-compatible check,
+platform-wide permission behavior, or release support on every target.

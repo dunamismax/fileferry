@@ -76,10 +76,24 @@ Last reviewed: 2026-05-19.
   visible committed encrypted manifests, evaluates `fileferry-policy` keep
   rules, supports dry-run, and writes immutable snapshot forget markers only
   when not in dry-run. It does not delete chunks, manifests, indexes, or
-  commit objects; storage reclamation remains unimplemented until prune lands.
+  commit objects; storage reclamation is handled by the separate local-only
+  `ferry prune` command.
   JSON and JSONL output report candidate snapshots, kept snapshots, forgotten
   snapshots, item-level reasons, dry-run status, marker objects written, and
   explicit `object_deletion: false`.
+- `ferry prune` opens initialized local repositories, unlocks with
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, computes objects
+  reachable from forgotten snapshots and not reachable from non-forgotten
+  committed snapshots, supports dry-run, writes encrypted durable prune plan
+  state before sweeping, resumes incomplete sweeps when commit/forget marker
+  state still matches the marked plan, and writes encrypted completion state
+  after sweep. It deletes only planned commit markers, forget markers,
+  manifests, indexes, and chunks; it never deletes bootstrap, key slots,
+  key-slot removal markers, policy/config objects, upload state, prune state,
+  unknown objects, or non-forgotten snapshot data. JSON and JSONL output
+  report candidate, retained, deleted, and missing objects, byte counts where
+  known, dry-run status, completion status, and recovery state. S3-compatible
+  prune is not implemented.
 - `ferry key add` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, and writes one immutable
   additional passphrase key-slot object from `--new-password-file`,
@@ -195,7 +209,9 @@ not complete. `ferry check` supports full referenced-chunk verification and
 deterministic count/percentage referenced-chunk subsets for initialized local
 repositories. `ferry forget` is marker-only for initialized local repositories;
 it hides forgotten snapshots from normal snapshot discovery but does not
-delete objects or reclaim storage. `ferry key add` and `ferry key remove` are
+delete objects itself. `ferry prune` reclaims local storage through encrypted
+two-phase prune plan/completion state for objects proven unreachable from
+non-forgotten committed snapshots. `ferry key add` and `ferry key remove` are
 implemented for initialized local repositories only; `key remove` is limited
 to marker-based removal of externally added key slots, `key rotate` is
 limited to unlock rotation that adds one new slot and marker-removes
@@ -203,7 +219,7 @@ explicitly selected externally added slots, and `key export-recovery` is
 limited to a local-only encrypted recovery package protected by the current
 repository passphrase. Recovery import, full repository rekey, bootstrap-slot
 removal, and S3-compatible key management are not
-implemented. Describe backup, restore, check, forget, key
+implemented. Describe backup, restore, check, forget, prune, key
 management, repository, storage, crypto, or platform behavior only to the
 level backed by code, tests, and platform evidence.
 
@@ -220,36 +236,6 @@ one active milestone end to end over making many small adjacent improvements.
 Choose the first unfinished milestone that can be completed honestly in the
 current session. If it is too large, split it into explicit sub-milestones in
 this section before coding.
-
-### Milestone B - Local Two-Phase Prune
-
-Goal: Implement safe local `ferry prune` for forgotten snapshots using a
-recoverable mark-and-sweep model.
-
-Definition of done:
-
-- CLI exposes `ferry prune` for initialized local repositories with `--dry-run`
-  plus human, JSON, and JSONL-safe output.
-- Prune deletes only objects proven unreachable from non-forgotten committed
-  snapshots and required repository state.
-- The first phase writes durable prune marks or equivalent recoverable state.
-- The sweep phase is interruption-safe and can be resumed or safely rerun.
-- Prune never deletes bootstrap, key slots, key-slot removal markers, current
-  policy/config objects, or non-forgotten snapshot data.
-- JSON/JSONL report candidate objects, retained objects, deleted objects,
-  byte counts where known, dry-run status, and recovery state.
-- Tests cover dry-run, successful sweep, interruption/resume, malformed prune
-  state, concurrent forget/prune guardrails, missing objects, and exit-code
-  mapping.
-- `docs/repository-format.md`, `docs/cli-contract.md`, `docs/operations.md`,
-  README, and this file document the exact local-only behavior.
-
-Non-goals:
-
-- S3-compatible prune.
-- Repair of corrupted repositories.
-- Automatic stale temporary cleanup outside prune state.
-- Repository compaction beyond unreachable-object deletion.
 
 ### Milestone C - S3 Command Parity Foundation
 
@@ -828,10 +814,10 @@ where documented verification passes on a clean checkout.
 
 - [x] Implement retention policy parser.
 - [x] Implement `forget`.
-- [ ] Implement two-phase prune.
-- [ ] Add prune marks and recovery behavior.
-- [ ] Add dry-run summaries.
-- [ ] Add concurrent backup/prune tests.
+- [x] Implement local two-phase prune.
+- [x] Add prune marks and recovery behavior.
+- [x] Add dry-run summaries.
+- [x] Add concurrent forget/prune guardrail tests.
 
 ### Phase 10 - Key Management
 
@@ -938,6 +924,31 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone B local two-phase prune for initialized
+  local repositories by implementing `ferry prune`. The command unlocks with
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, supports `--dry-run`,
+  computes objects reachable from forgotten committed snapshots and not
+  reachable from non-forgotten committed snapshots, writes encrypted prune
+  plan state before sweeping, deletes only planned commit markers, forget
+  markers, manifests, indexes, and chunks, and writes encrypted completion
+  state after the sweep. Real prune resumes an incomplete plan when the
+  repository commit/forget marker state still matches that plan, treats
+  missing candidate objects as already gone, and aborts with
+  `repository_prune_state_changed` if a new commit or forget marker appears.
+  Prune never deletes bootstrap, key slots, key-slot removal markers, policy
+  objects, upload state, prune state, unknown objects, or non-forgotten
+  snapshot data. S3-compatible prune, repair, stale temporary cleanup, and
+  repository compaction beyond unreachable-object deletion remain
+  unimplemented. Added core and CLI tests for dry-run, successful sweep,
+  interruption/resume, missing candidates, malformed prune state,
+  commit/forget state-change guardrails, JSON/JSONL output, and exit-code
+  mapping. Updated `README.md`, `docs/repository-format.md`,
+  `docs/cli-contract.md`, `docs/operations.md`, and this file. Verified with
+  `cargo test -p fileferry-core prune_ --no-fail-fast`,
+  `cargo test -p fileferry-cli prune_ --no-fail-fast`,
+  `cargo test -p fileferry-core -p fileferry-cli --no-fail-fast`,
+  `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check`.
 - 2026-05-19 - Completed Milestone A key recovery export for initialized
   local repositories by implementing
   `ferry key export-recovery --output <FILE>`. The command unlocks with

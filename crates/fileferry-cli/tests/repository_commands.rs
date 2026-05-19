@@ -1297,6 +1297,195 @@ fn forget_jsonl_reports_progress_and_completion_envelope() {
 }
 
 #[test]
+fn prune_dry_run_and_sweep_reclaim_forgotten_local_snapshot_objects() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let keep_source = temp.path().join("keep-source");
+    let drop_source = temp.path().join("drop-source");
+    fs::create_dir(&keep_source).expect("create keep source");
+    fs::create_dir(&drop_source).expect("create drop source");
+    fs::write(keep_source.join("keep.txt"), patterned_bytes(1, 4096)).expect("write keep");
+    fs::write(drop_source.join("drop.txt"), patterned_bytes(2, 4096)).expect("write drop");
+    backup_source_with_tags(&repo_url, passphrase, &keep_source, &["keep"]);
+    backup_source_with_tags(&repo_url, passphrase, &drop_source, &["drop"]);
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "forget", "--keep-tag", "keep"])
+        .assert()
+        .success()
+        .stderr("");
+    let objects_before_dry_run = file_count_under(&repo);
+
+    let dry_run_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "prune", "--dry-run"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let dry_run: Value = serde_json::from_slice(&dry_run_output).expect("prune dry-run json");
+    assert_eq!(dry_run["command"], "prune");
+    assert_eq!(dry_run["status"], "success");
+    assert_eq!(dry_run["data"]["dry_run"], true);
+    assert_eq!(dry_run["data"]["completed"], true);
+    assert_eq!(dry_run["data"]["recovery_state"], "dry_run");
+    assert!(
+        dry_run["data"]["candidate_object_count"]
+            .as_u64()
+            .expect("candidate count")
+            >= 4
+    );
+    assert_eq!(dry_run["data"]["deleted_object_count"], 0);
+    assert_eq!(file_count_under(&repo), objects_before_dry_run);
+    assert_eq!(
+        file_count_under(&repo.join("objects").join("prune-plan")),
+        0
+    );
+
+    let prune_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "prune"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let prune: Value = serde_json::from_slice(&prune_output).expect("prune json");
+    assert_eq!(prune["data"]["dry_run"], false);
+    assert_eq!(prune["data"]["completed"], true);
+    assert_eq!(prune["data"]["recovery_state"], "completed");
+    assert_eq!(
+        prune["data"]["deleted_object_count"],
+        prune["data"]["candidate_object_count"]
+    );
+    assert!(
+        prune["data"]["candidate_objects"]
+            .as_array()
+            .expect("candidate objects")
+            .iter()
+            .any(|object| object["kind"] == "commit")
+    );
+    assert!(file_count_under(&repo) < objects_before_dry_run);
+    assert_eq!(
+        file_count_under(&repo.join("objects").join("prune-plan")),
+        1
+    );
+    assert_eq!(
+        file_count_under(&repo.join("objects").join("prune-completion")),
+        1
+    );
+
+    let snapshots_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(snapshots["data"]["snapshots"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        snapshots["data"]["snapshots"][0]["tags"],
+        serde_json::json!(["keep"])
+    );
+}
+
+#[test]
+fn prune_jsonl_reports_progress_and_completion_envelope() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let first_source = temp.path().join("first-source");
+    let second_source = temp.path().join("second-source");
+    fs::create_dir(&first_source).expect("create first source");
+    fs::create_dir(&second_source).expect("create second source");
+    fs::write(first_source.join("first.txt"), b"first").expect("write first");
+    fs::write(second_source.join("second.txt"), b"second").expect("write second");
+    backup_source_with_tags(&repo_url, passphrase, &first_source, &["first"]);
+    backup_source_with_tags(&repo_url, passphrase, &second_source, &["second"]);
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "forget", "--keep-last", "1"])
+        .assert()
+        .success()
+        .stderr("");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "prune"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let events = String::from_utf8(output)
+        .expect("jsonl utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl event"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(events.first().unwrap()["event"], "command_started");
+    assert_eq!(events.last().unwrap()["event"], "command_completed");
+    assert_eq!(events.last().unwrap()["command"], "prune");
+    assert_eq!(events.last().unwrap()["data"]["completed"], true);
+    assert!(events.iter().any(|event| event["data"]["phase"] == "mark"));
+    assert!(events.iter().any(|event| event["data"]["phase"] == "sweep"));
+}
+
+#[test]
+fn prune_malformed_state_has_stable_integrity_exit_code() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let malformed_path = repo
+        .join("objects")
+        .join("prune-plan")
+        .join("aa")
+        .join("aa".repeat(32));
+    fs::create_dir_all(malformed_path.parent().expect("malformed parent"))
+        .expect("create malformed parent");
+    fs::write(&malformed_path, b"not encrypted json").expect("write malformed prune plan");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "prune"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failed: Value = serde_json::from_slice(&output).expect("failure json");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(
+        failed["data"]["code"],
+        "repository_prune_plan_decode_failed"
+    );
+    assert_eq!(failed["data"]["exit_code"], 6);
+    assert_eq!(
+        failed["data"]["object_key"],
+        "objects/prune-plan/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+}
+
+#[test]
 fn forget_no_match_and_invalid_policy_have_stable_exit_codes() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

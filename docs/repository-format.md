@@ -109,9 +109,11 @@ objects/manifest/<prefix>/<manifest-id>
 objects/index/<prefix>/<index-id>
 objects/policy/<prefix>/<policy-id>
 objects/upload/<writer-id>/<upload-id>
-objects/prune/<plan-id>/<mark-id>
+objects/prune-plan/<prefix>/<plan-id>
+objects/prune-completion/<prefix>/<plan-id>
 commits/<commit-id>
 locks/<lease-id>
+forgets/<snapshot-id>
 ```
 
 Rules:
@@ -304,22 +306,42 @@ committed or in-progress objects are protected from deletion.
 
 ## Prune Mark, Sweep, And Recovery
 
-Prune is two-phase:
+Current local prune is two-phase:
 
-1. Mark: compute a prune plan and write encrypted prune-mark objects that
-   identify candidate objects, retained roots, and plan metadata.
-2. Sweep: delete only objects named by a committed prune plan after checking
-   that no protected snapshot, in-progress upload, or active lease references
-   them.
+1. Mark: compute a prune plan and write one encrypted prune-plan object under
+   `objects/prune-plan/<prefix>/<plan-id>`. The plan identifies candidate
+   objects, retained objects, observed commit-marker keys, observed
+   forget-marker keys, byte counts where known, and plan metadata.
+2. Sweep: delete only candidate objects named by the marked plan after
+   checking that the current commit/forget marker state still matches the
+   marked state, ignoring candidate commit/forget markers already deleted by
+   that same plan. After all candidates are deleted or observed missing,
+   write one encrypted completion object under
+   `objects/prune-completion/<prefix>/<plan-id>`.
+
+Current implementation status:
+
+- `ferry prune` is implemented only for initialized local filesystem
+  repositories.
+- Candidate objects are limited to commit markers, forget markers, encrypted
+  manifests, encrypted indexes, and encrypted chunks reachable from forgotten
+  committed snapshots and not reachable from non-forgotten committed
+  snapshots.
+- Prune never deletes `bootstrap`, `key-slots/`, `key-slot-removals/`,
+  `objects/policy/`, `objects/upload/`, prune state, or unknown objects.
+- Prune plan and completion objects are encrypted and authenticated as
+  `prune-mark` objects with the repository prune subkey.
+- S3-compatible prune is not implemented.
 
 Recovery rules:
 
 - A mark without a completed sweep is recoverable by rechecking live commits and
-  either resuming or abandoning the plan.
+  resuming the plan when the observed commit/forget marker state still matches.
 - A sweep must be idempotent; missing candidate objects are recorded as already
   gone, not fatal corruption by themselves.
-- Prune plans must expire or be explicitly abandoned before a later prune can
-  rely on their state.
+- If the observed commit/forget marker state has changed, the current local
+  implementation aborts the sweep instead of deleting from a stale plan.
+- Plan expiration and explicit abandonment are not implemented yet.
 - Dry-run prune uses the same reachability logic but writes no marks and deletes
   nothing.
 

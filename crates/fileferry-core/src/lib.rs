@@ -266,6 +266,22 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("prune plan {key} could not be decoded")]
+    PrunePlanDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("prune plan {key} is invalid: {reason}")]
+    InvalidPrunePlan {
+        key: ObjectKey,
+        reason: &'static str,
+    },
+
+    #[error("repository commit or forget state changed after prune plan {plan_id} was marked")]
+    PruneRepositoryStateChanged { plan_id: String },
+
     #[error("snapshot path {path} was not found in snapshot {snapshot_id}")]
     SnapshotPathNotFound { snapshot_id: String, path: PathBuf },
 
@@ -554,8 +570,11 @@ pub const REPOSITORY_FORMAT_VERSION_V0: u16 = fileferry_crypto::FORMAT_VERSION_V
 const REPOSITORY_ID_BYTES: usize = 32;
 const KEY_SLOT_ID_BYTES: usize = 32;
 const RECOVERY_EXPORT_ID_BYTES: usize = 32;
+const PRUNE_PLAN_ID_BYTES: usize = 32;
 const KEY_SLOT_PREFIX: &str = "key-slots";
 const KEY_SLOT_REMOVAL_PREFIX: &str = "key-slot-removals";
+const PRUNE_PLAN_PREFIX: &str = "objects/prune-plan";
+const PRUNE_COMPLETION_PREFIX: &str = "objects/prune-completion";
 pub const RECOVERY_EXPORT_WARNING: &str = "Recovery exports are encrypted with the current repository passphrase. Store the export separately from the repository and protect it like a backup key. Recovery import is not implemented yet.";
 
 #[derive(Debug)]
@@ -611,6 +630,83 @@ pub struct RecoveryExportResult {
     pub kdf: KdfParams,
     pub aead: RepositoryAeadAlgorithm,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PruneRepositoryOptions {
+    pub dry_run: bool,
+    pub max_deletions: Option<usize>,
+}
+
+impl PruneRepositoryOptions {
+    pub const fn dry_run() -> Self {
+        Self {
+            dry_run: true,
+            max_deletions: None,
+        }
+    }
+
+    pub const fn sweep() -> Self {
+        Self {
+            dry_run: false,
+            max_deletions: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepositoryPruneResult {
+    pub repository_id: String,
+    pub plan_id: Option<String>,
+    pub dry_run: bool,
+    pub resumed: bool,
+    pub completed: bool,
+    pub recovery_state: PruneRecoveryState,
+    pub candidate_objects: Vec<PruneObject>,
+    pub retained_objects: Vec<PruneObject>,
+    pub deleted_objects: Vec<PruneObject>,
+    pub missing_objects: Vec<PruneObject>,
+    pub candidate_object_count: usize,
+    pub retained_object_count: usize,
+    pub deleted_object_count: usize,
+    pub missing_object_count: usize,
+    pub candidate_bytes: u64,
+    pub retained_bytes: u64,
+    pub deleted_bytes: u64,
+    pub missing_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PruneRecoveryState {
+    DryRun,
+    Marked,
+    Resumed,
+    Completed,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct PruneObject {
+    pub object_key: String,
+    pub kind: PruneObjectKind,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PruneObjectKind {
+    Bootstrap,
+    KeySlot,
+    KeySlotRemoval,
+    Commit,
+    ForgetMarker,
+    Manifest,
+    Index,
+    Chunk,
+    Policy,
+    UploadState,
+    PruneState,
+    Other,
 }
 
 pub async fn create_repository(
@@ -1073,6 +1169,14 @@ fn key_slot_removal_prefix() -> CoreResult<ObjectKeyPrefix> {
     ObjectKeyPrefix::new(KEY_SLOT_REMOVAL_PREFIX).map_err(|source| CoreError::ObjectKey { source })
 }
 
+fn prune_plan_object_key(plan_id: &str) -> CoreResult<ObjectKey> {
+    object_key_for_id(PRUNE_PLAN_PREFIX, plan_id)
+}
+
+fn prune_completion_object_key(plan_id: &str) -> CoreResult<ObjectKey> {
+    object_key_for_id(PRUNE_COMPLETION_PREFIX, plan_id)
+}
+
 fn validate_key_slot_id(key_slot_id: &str) -> CoreResult<()> {
     if !key_slot_id_is_valid(key_slot_id) {
         return Err(CoreError::InvalidKeySlot {
@@ -1086,6 +1190,15 @@ fn validate_key_slot_id(key_slot_id: &str) -> CoreResult<()> {
 fn key_slot_id_is_valid(key_slot_id: &str) -> bool {
     key_slot_id.len() == KEY_SLOT_ID_BYTES * 2
         && key_slot_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn prune_plan_id_is_valid(plan_id: &str) -> bool {
+    plan_id.len() == PRUNE_PLAN_ID_BYTES * 2 && plan_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn repository_id_is_valid(repository_id: &str) -> bool {
+    repository_id.len() == REPOSITORY_ID_BYTES * 2
+        && repository_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2133,6 +2246,389 @@ impl BackupPipeline {
         Ok(SnapshotForgetWriteResult { markers })
     }
 
+    pub async fn prune_repository(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        options: PruneRepositoryOptions,
+    ) -> CoreResult<RepositoryPruneResult> {
+        if options.dry_run {
+            let plan = self
+                .build_prune_plan(store, master_key, None, current_unix_seconds()?)
+                .await?;
+            return Ok(RepositoryPruneResult::from_parts(
+                &self.config.repository_id,
+                PruneResultParts {
+                    plan_id: None,
+                    dry_run: true,
+                    resumed: false,
+                    completed: true,
+                    recovery_state: PruneRecoveryState::DryRun,
+                    candidate_objects: plan.candidate_objects,
+                    retained_objects: plan.retained_objects,
+                    deleted_objects: Vec::new(),
+                    missing_objects: Vec::new(),
+                },
+            ));
+        }
+
+        let prune_key = master_key
+            .derive_subkey(KeyPurpose::PruneMark, self.config.repository_id.as_bytes())
+            .map_err(|source| CoreError::Encryption { source })?;
+        let pending = self.read_incomplete_prune_plan(store, &prune_key).await?;
+        let (plan, plan_object, resumed) = if let Some((plan, plan_object)) = pending {
+            (plan, plan_object, true)
+        } else {
+            let plan_id = hex_bytes(&random_bytes::<PRUNE_PLAN_ID_BYTES>());
+            let plan = self
+                .build_prune_plan(store, master_key, Some(plan_id), current_unix_seconds()?)
+                .await?;
+            let plan_object = prune_plan_object_key(&plan.plan_id)?;
+            let bytes =
+                serde_json::to_vec(&plan).map_err(|source| CoreError::Serialization { source })?;
+            let encrypted =
+                encrypt_repository_object(&prune_key, ObjectKind::PruneMark, &plan_object, &bytes)?;
+            store
+                .put_if_absent(&plan_object, &encrypted)
+                .await
+                .map_err(|source| CoreError::Storage { source })?;
+            (plan, plan_object, false)
+        };
+
+        self.ensure_prune_plan_state_current(store, &plan).await?;
+
+        let mut deleted_objects = Vec::new();
+        let mut missing_objects = Vec::new();
+        let deletion_limit = options.max_deletions.unwrap_or(usize::MAX);
+
+        for (deletions_attempted, object) in plan.candidate_objects.iter().enumerate() {
+            if deletions_attempted >= deletion_limit {
+                return Ok(RepositoryPruneResult::from_parts(
+                    &self.config.repository_id,
+                    PruneResultParts {
+                        plan_id: Some(plan.plan_id.clone()),
+                        dry_run: false,
+                        resumed,
+                        completed: false,
+                        recovery_state: if resumed {
+                            PruneRecoveryState::Resumed
+                        } else {
+                            PruneRecoveryState::Marked
+                        },
+                        candidate_objects: plan.candidate_objects.clone(),
+                        retained_objects: plan.retained_objects.clone(),
+                        deleted_objects,
+                        missing_objects,
+                    },
+                ));
+            }
+
+            self.ensure_prune_plan_state_current(store, &plan).await?;
+            let key = ObjectKey::new(object.object_key.clone())
+                .map_err(|source| CoreError::ObjectKey { source })?;
+            if store
+                .exists(&key)
+                .await
+                .map_err(|source| CoreError::Storage { source })?
+            {
+                store
+                    .delete(&key)
+                    .await
+                    .map_err(|source| CoreError::Storage { source })?;
+                deleted_objects.push(object.clone());
+            } else {
+                missing_objects.push(object.clone());
+            }
+        }
+
+        let completion = StoredPruneCompletion {
+            schema_version: 0,
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: self.config.repository_id.clone(),
+            plan_id: plan.plan_id.clone(),
+            plan_object: plan_object.as_str().to_owned(),
+            completed_at_unix_seconds: current_unix_seconds()?,
+            candidate_objects: plan.candidate_objects.len(),
+            deleted_objects: deleted_objects.len(),
+            missing_objects: missing_objects.len(),
+            candidate_bytes: sum_object_bytes(&plan.candidate_objects),
+            deleted_bytes: sum_object_bytes(&deleted_objects),
+            missing_bytes: sum_object_bytes(&missing_objects),
+        };
+        let completion_object = prune_completion_object_key(&plan.plan_id)?;
+        let completion_bytes = serde_json::to_vec(&completion)
+            .map_err(|source| CoreError::Serialization { source })?;
+        let encrypted_completion = encrypt_repository_object(
+            &prune_key,
+            ObjectKind::PruneMark,
+            &completion_object,
+            &completion_bytes,
+        )?;
+        store
+            .put_if_absent(&completion_object, &encrypted_completion)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+
+        Ok(RepositoryPruneResult::from_parts(
+            &self.config.repository_id,
+            PruneResultParts {
+                plan_id: Some(plan.plan_id),
+                dry_run: false,
+                resumed,
+                completed: true,
+                recovery_state: PruneRecoveryState::Completed,
+                candidate_objects: plan.candidate_objects,
+                retained_objects: plan.retained_objects,
+                deleted_objects,
+                missing_objects,
+            },
+        ))
+    }
+
+    async fn build_prune_plan(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        plan_id: Option<String>,
+        created_at_unix_seconds: u64,
+    ) -> CoreResult<StoredPrunePlan> {
+        let plan_id = plan_id.unwrap_or_else(|| hex_bytes(&random_bytes::<PRUNE_PLAN_ID_BYTES>()));
+        let state = self.read_prune_repository_state(store).await?;
+        let forgotten_snapshot_ids = self.read_forgotten_snapshot_ids(store).await?;
+        let mut retained_keys = BTreeSet::new();
+        let mut candidate_keys = BTreeSet::new();
+        let mut all_commits = Vec::with_capacity(state.commit_objects.len());
+
+        for commit_key in &state.commit_objects {
+            let commit = self.read_snapshot_commit(store, commit_key).await?;
+            let expected_commit_key = object_key_for_commit(&commit.snapshot_id)?;
+            if expected_commit_key != *commit_key {
+                return Err(CoreError::InvalidCommitMarker {
+                    key: commit_key.clone(),
+                    reason: "commit object key does not match committed snapshot id",
+                });
+            }
+            all_commits.push((commit_key.clone(), commit));
+        }
+
+        for (commit_key, commit) in &all_commits {
+            if forgotten_snapshot_ids.contains(&commit.snapshot_id) {
+                continue;
+            }
+
+            retained_keys.insert(commit_key.clone());
+            let manifest_object = object_key_for_id("objects/manifest", &commit.snapshot_id)?;
+            retained_keys.insert(manifest_object.clone());
+            let manifest = self
+                .read_snapshot_manifest(store, master_key, &commit.snapshot_id)
+                .await
+                .map_err(|error| referenced_object_read_error(error, manifest_object))?;
+            for index_id in &manifest.body.index_ids {
+                let index_object = object_key_for_id("objects/index", index_id)?;
+                retained_keys.insert(index_object.clone());
+                let index = self
+                    .read_chunk_index(store, master_key, index_id)
+                    .await
+                    .map_err(|error| referenced_object_read_error(error, index_object))?;
+                for chunk in index.chunks {
+                    let chunk_object = ObjectKey::new(chunk.object_key)
+                        .map_err(|source| CoreError::ObjectKey { source })?;
+                    retained_keys.insert(chunk_object);
+                }
+            }
+        }
+
+        for (commit_key, commit) in &all_commits {
+            if !forgotten_snapshot_ids.contains(&commit.snapshot_id) {
+                continue;
+            }
+
+            candidate_keys.insert(commit_key.clone());
+            candidate_keys.insert(object_key_for_forget_marker(&commit.snapshot_id)?);
+            let manifest_object = object_key_for_id("objects/manifest", &commit.snapshot_id)?;
+            let manifest = self
+                .read_snapshot_manifest(store, master_key, &commit.snapshot_id)
+                .await
+                .map_err(|error| referenced_object_read_error(error, manifest_object.clone()))?;
+            if !retained_keys.contains(&manifest_object) {
+                candidate_keys.insert(manifest_object);
+            }
+            for index_id in &manifest.body.index_ids {
+                let index_object = object_key_for_id("objects/index", index_id)?;
+                let index = self
+                    .read_chunk_index(store, master_key, index_id)
+                    .await
+                    .map_err(|error| referenced_object_read_error(error, index_object.clone()))?;
+                if !retained_keys.contains(&index_object) {
+                    candidate_keys.insert(index_object);
+                }
+                for chunk in index.chunks {
+                    let chunk_object = ObjectKey::new(chunk.object_key)
+                        .map_err(|source| CoreError::ObjectKey { source })?;
+                    if !retained_keys.contains(&chunk_object) {
+                        candidate_keys.insert(chunk_object);
+                    }
+                }
+            }
+        }
+
+        candidate_keys.retain(|key| !retained_keys.contains(key));
+
+        let root_prefix = ObjectKeyPrefix::root();
+        let mut listed_keys = store
+            .list_prefix(&root_prefix)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        listed_keys.sort();
+
+        let candidate_objects = self
+            .prune_objects_for_keys(store, candidate_keys.iter().cloned().collect())
+            .await?;
+        let retained_objects = self
+            .prune_objects_for_keys(
+                store,
+                listed_keys
+                    .into_iter()
+                    .filter(|key| !candidate_keys.contains(key))
+                    .collect(),
+            )
+            .await?;
+
+        Ok(StoredPrunePlan {
+            schema_version: 0,
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: self.config.repository_id.clone(),
+            plan_id,
+            created_at_unix_seconds,
+            commit_objects: state
+                .commit_objects
+                .iter()
+                .map(|key| key.as_str().to_owned())
+                .collect(),
+            forget_marker_objects: state
+                .forget_marker_objects
+                .iter()
+                .map(|key| key.as_str().to_owned())
+                .collect(),
+            candidate_objects,
+            retained_objects,
+        })
+    }
+
+    async fn prune_objects_for_keys(
+        &self,
+        store: &dyn ObjectStore,
+        keys: Vec<ObjectKey>,
+    ) -> CoreResult<Vec<PruneObject>> {
+        let mut objects = Vec::with_capacity(keys.len());
+        for key in keys {
+            let bytes = match store.get(&key).await {
+                Ok(bytes) => Some(bytes.len() as u64),
+                Err(StorageError::ObjectNotFound { .. }) => None,
+                Err(source) => return Err(CoreError::Storage { source }),
+            };
+            objects.push(PruneObject {
+                object_key: key.as_str().to_owned(),
+                kind: prune_object_kind(&key),
+                bytes,
+            });
+        }
+        objects.sort_by(|left, right| left.object_key.cmp(&right.object_key));
+        Ok(objects)
+    }
+
+    async fn read_prune_repository_state(
+        &self,
+        store: &dyn ObjectStore,
+    ) -> CoreResult<PruneRepositoryState> {
+        let commit_prefix =
+            ObjectKeyPrefix::new("commits").map_err(|source| CoreError::ObjectKey { source })?;
+        let forget_prefix =
+            ObjectKeyPrefix::new("forgets").map_err(|source| CoreError::ObjectKey { source })?;
+        let mut commit_objects = store
+            .list_prefix(&commit_prefix)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        let mut forget_marker_objects = store
+            .list_prefix(&forget_prefix)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        commit_objects.sort();
+        forget_marker_objects.sort();
+        Ok(PruneRepositoryState {
+            commit_objects,
+            forget_marker_objects,
+        })
+    }
+
+    async fn ensure_prune_plan_state_current(
+        &self,
+        store: &dyn ObjectStore,
+        plan: &StoredPrunePlan,
+    ) -> CoreResult<()> {
+        let current = self.read_prune_repository_state(store).await?;
+        let candidate_commits =
+            object_keys_for_kind(&plan.candidate_objects, PruneObjectKind::Commit)?;
+        let candidate_forgets =
+            object_keys_for_kind(&plan.candidate_objects, PruneObjectKind::ForgetMarker)?;
+        let planned_commits = object_keys_from_strings(&plan.commit_objects)?;
+        let planned_forgets = object_keys_from_strings(&plan.forget_marker_objects)?;
+
+        if subtract_keys(&current.commit_objects, &candidate_commits)
+            != subtract_keys(&planned_commits, &candidate_commits)
+            || subtract_keys(&current.forget_marker_objects, &candidate_forgets)
+                != subtract_keys(&planned_forgets, &candidate_forgets)
+        {
+            return Err(CoreError::PruneRepositoryStateChanged {
+                plan_id: plan.plan_id.clone(),
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn read_incomplete_prune_plan(
+        &self,
+        store: &dyn ObjectStore,
+        prune_key: &fileferry_crypto::Subkey,
+    ) -> CoreResult<Option<(StoredPrunePlan, ObjectKey)>> {
+        let prefix = ObjectKeyPrefix::new(PRUNE_PLAN_PREFIX)
+            .map_err(|source| CoreError::ObjectKey { source })?;
+        let mut plan_keys = store
+            .list_prefix(&prefix)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        plan_keys.sort();
+
+        for plan_key in plan_keys {
+            let plan: StoredPrunePlan =
+                read_encrypted_json_object(store, prune_key, ObjectKind::PruneMark, &plan_key)
+                    .await
+                    .map_err(|error| match error {
+                        CoreError::ObjectDecode { key, source } => {
+                            CoreError::PrunePlanDecode { key, source }
+                        }
+                        CoreError::MetadataDecode { key, source } => {
+                            CoreError::PrunePlanDecode { key, source }
+                        }
+                        other => other,
+                    })?;
+            plan.validate(&plan_key, &self.config.repository_id)?;
+            let completion_key = prune_completion_object_key(&plan.plan_id)?;
+            if !store
+                .exists(&completion_key)
+                .await
+                .map_err(|source| CoreError::Storage { source })?
+            {
+                return Ok(Some((plan, plan_key)));
+            }
+        }
+
+        Ok(None)
+    }
+
     async fn read_snapshot_commit(
         &self,
         store: &dyn ObjectStore,
@@ -2968,6 +3464,93 @@ pub struct SnapshotForgetWrite {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SnapshotForgetWriteResult {
     pub markers: Vec<SnapshotForgetWrite>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct StoredPrunePlan {
+    schema_version: u16,
+    magic: String,
+    format_version: u16,
+    repository_id: String,
+    plan_id: String,
+    created_at_unix_seconds: u64,
+    commit_objects: Vec<String>,
+    forget_marker_objects: Vec<String>,
+    candidate_objects: Vec<PruneObject>,
+    retained_objects: Vec<PruneObject>,
+}
+
+impl StoredPrunePlan {
+    fn validate(&self, key: &ObjectKey, repository_id: &str) -> CoreResult<()> {
+        if self.schema_version != 0 {
+            return Err(CoreError::InvalidPrunePlan {
+                key: key.clone(),
+                reason: "unsupported prune plan schema version",
+            });
+        }
+        if self.magic != REPOSITORY_MAGIC {
+            return Err(CoreError::InvalidPrunePlan {
+                key: key.clone(),
+                reason: "prune plan magic is not recognized",
+            });
+        }
+        if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+            return Err(CoreError::InvalidPrunePlan {
+                key: key.clone(),
+                reason: "unsupported prune plan format version",
+            });
+        }
+        if self.repository_id != repository_id {
+            return Err(CoreError::InvalidPrunePlan {
+                key: key.clone(),
+                reason: "prune plan repository id does not match this repository",
+            });
+        }
+        if !repository_id_is_valid(&self.repository_id) || !prune_plan_id_is_valid(&self.plan_id) {
+            return Err(CoreError::InvalidPrunePlan {
+                key: key.clone(),
+                reason: "prune plan id is invalid",
+            });
+        }
+        if prune_plan_object_key(&self.plan_id)? != *key {
+            return Err(CoreError::InvalidPrunePlan {
+                key: key.clone(),
+                reason: "prune plan object key does not match plan id",
+            });
+        }
+        for object in self
+            .candidate_objects
+            .iter()
+            .chain(self.retained_objects.iter())
+        {
+            ObjectKey::new(object.object_key.clone())
+                .map_err(|source| CoreError::ObjectKey { source })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct StoredPruneCompletion {
+    schema_version: u16,
+    magic: String,
+    format_version: u16,
+    repository_id: String,
+    plan_id: String,
+    plan_object: String,
+    completed_at_unix_seconds: u64,
+    candidate_objects: usize,
+    deleted_objects: usize,
+    missing_objects: usize,
+    candidate_bytes: u64,
+    deleted_bytes: u64,
+    missing_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PruneRepositoryState {
+    commit_objects: Vec<ObjectKey>,
+    forget_marker_objects: Vec<ObjectKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -4266,6 +4849,103 @@ fn referenced_object_read_error(error: CoreError, expected_key: ObjectKey) -> Co
             source: StorageError::ObjectNotFound { .. },
         } => CoreError::RepositoryReferencedObjectMissing { key: expected_key },
         other => other,
+    }
+}
+
+impl RepositoryPruneResult {
+    fn from_parts(repository_id: &str, parts: PruneResultParts) -> Self {
+        Self {
+            repository_id: repository_id.to_owned(),
+            plan_id: parts.plan_id,
+            dry_run: parts.dry_run,
+            resumed: parts.resumed,
+            completed: parts.completed,
+            recovery_state: parts.recovery_state,
+            candidate_object_count: parts.candidate_objects.len(),
+            retained_object_count: parts.retained_objects.len(),
+            deleted_object_count: parts.deleted_objects.len(),
+            missing_object_count: parts.missing_objects.len(),
+            candidate_bytes: sum_object_bytes(&parts.candidate_objects),
+            retained_bytes: sum_object_bytes(&parts.retained_objects),
+            deleted_bytes: sum_object_bytes(&parts.deleted_objects),
+            missing_bytes: sum_object_bytes(&parts.missing_objects),
+            candidate_objects: parts.candidate_objects,
+            retained_objects: parts.retained_objects,
+            deleted_objects: parts.deleted_objects,
+            missing_objects: parts.missing_objects,
+        }
+    }
+}
+
+struct PruneResultParts {
+    plan_id: Option<String>,
+    dry_run: bool,
+    resumed: bool,
+    completed: bool,
+    recovery_state: PruneRecoveryState,
+    candidate_objects: Vec<PruneObject>,
+    retained_objects: Vec<PruneObject>,
+    deleted_objects: Vec<PruneObject>,
+    missing_objects: Vec<PruneObject>,
+}
+
+fn sum_object_bytes(objects: &[PruneObject]) -> u64 {
+    objects.iter().filter_map(|object| object.bytes).sum()
+}
+
+fn object_keys_for_kind(
+    objects: &[PruneObject],
+    kind: PruneObjectKind,
+) -> CoreResult<BTreeSet<ObjectKey>> {
+    objects
+        .iter()
+        .filter(|object| object.kind == kind)
+        .map(|object| {
+            ObjectKey::new(object.object_key.clone())
+                .map_err(|source| CoreError::ObjectKey { source })
+        })
+        .collect()
+}
+
+fn object_keys_from_strings(keys: &[String]) -> CoreResult<Vec<ObjectKey>> {
+    keys.iter()
+        .map(|key| ObjectKey::new(key.clone()).map_err(|source| CoreError::ObjectKey { source }))
+        .collect()
+}
+
+fn subtract_keys(keys: &[ObjectKey], remove: &BTreeSet<ObjectKey>) -> Vec<ObjectKey> {
+    keys.iter()
+        .filter(|key| !remove.contains(*key))
+        .cloned()
+        .collect()
+}
+
+fn prune_object_kind(key: &ObjectKey) -> PruneObjectKind {
+    let value = key.as_str();
+    if value == "bootstrap" {
+        PruneObjectKind::Bootstrap
+    } else if value.starts_with("key-slots/") {
+        PruneObjectKind::KeySlot
+    } else if value.starts_with("key-slot-removals/") {
+        PruneObjectKind::KeySlotRemoval
+    } else if value.starts_with("commits/") {
+        PruneObjectKind::Commit
+    } else if value.starts_with("forgets/") {
+        PruneObjectKind::ForgetMarker
+    } else if value.starts_with("objects/manifest/") {
+        PruneObjectKind::Manifest
+    } else if value.starts_with("objects/index/") {
+        PruneObjectKind::Index
+    } else if value.starts_with("objects/chunk/") {
+        PruneObjectKind::Chunk
+    } else if value.starts_with("objects/policy/") {
+        PruneObjectKind::Policy
+    } else if value.starts_with("objects/upload/") {
+        PruneObjectKind::UploadState
+    } else if value.starts_with("objects/prune-") {
+        PruneObjectKind::PruneState
+    } else {
+        PruneObjectKind::Other
     }
 }
 
@@ -6001,6 +6681,367 @@ mod tests {
                 .expect("manifests after"),
             manifests_before
         );
+    }
+
+    #[tokio::test]
+    async fn prune_dry_run_reports_unreachable_objects_without_writes() {
+        use fileferry_storage::ObjectKeyPrefix;
+        use fileferry_testkit::FakeObjectStore;
+
+        let first_source = tempfile::tempdir().expect("first source");
+        fs::write(first_source.path().join("file.txt"), varied_bytes(1, 2048)).expect("write one");
+        let second_source = tempfile::tempdir().expect("second source");
+        fs::write(second_source.path().join("file.txt"), varied_bytes(2, 2048)).expect("write two");
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+        let first = pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![first_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("first snapshot");
+        pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![second_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("second snapshot");
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget first");
+        let before = store
+            .list_prefix(&ObjectKeyPrefix::root())
+            .await
+            .expect("list before");
+
+        let pruned = pipeline
+            .prune_repository(
+                &store,
+                &created.repository.master_key,
+                PruneRepositoryOptions::dry_run(),
+            )
+            .await
+            .expect("dry-run prune");
+
+        assert!(pruned.dry_run);
+        assert!(pruned.completed);
+        assert_eq!(pruned.recovery_state, PruneRecoveryState::DryRun);
+        assert!(pruned.candidate_object_count >= 4);
+        assert_eq!(pruned.deleted_object_count, 0);
+        assert_eq!(
+            store
+                .list_prefix(&ObjectKeyPrefix::root())
+                .await
+                .expect("list after"),
+            before
+        );
+        assert!(
+            pruned
+                .candidate_objects
+                .iter()
+                .any(|object| object.kind == PruneObjectKind::Commit)
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_sweeps_forgotten_snapshot_objects_and_keeps_retained_data() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let first_source = tempfile::tempdir().expect("first source");
+        fs::write(first_source.path().join("file.txt"), varied_bytes(3, 4096)).expect("write one");
+        let second_source = tempfile::tempdir().expect("second source");
+        fs::write(second_source.path().join("file.txt"), varied_bytes(4, 4096)).expect("write two");
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+        let first = pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![first_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("first snapshot");
+        let second = pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![second_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("second snapshot");
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget first");
+
+        let pruned = pipeline
+            .prune_repository(
+                &store,
+                &created.repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect("prune");
+
+        assert!(!pruned.dry_run);
+        assert!(pruned.completed);
+        assert_eq!(pruned.deleted_object_count, pruned.candidate_object_count);
+        assert!(
+            !store
+                .exists(&first.commit_object)
+                .await
+                .expect("first commit exists")
+        );
+        assert!(
+            !store
+                .exists(&first.manifest_object)
+                .await
+                .expect("first manifest exists")
+        );
+        assert!(
+            store
+                .exists(&second.commit_object)
+                .await
+                .expect("second commit exists")
+        );
+        assert!(
+            store
+                .exists(&second.manifest_object)
+                .await
+                .expect("second manifest exists")
+        );
+        let visible = pipeline
+            .read_committed_snapshot_manifests(&store, &created.repository.master_key)
+            .await
+            .expect("visible snapshots");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].snapshot_id, second.snapshot_id);
+    }
+
+    #[tokio::test]
+    async fn prune_resumes_interrupted_sweep_and_treats_missing_candidates_as_gone() {
+        use fileferry_storage::ObjectKey;
+        use fileferry_testkit::FakeObjectStore;
+
+        let first_source = tempfile::tempdir().expect("first source");
+        fs::write(first_source.path().join("file.txt"), varied_bytes(5, 4096)).expect("write one");
+        let second_source = tempfile::tempdir().expect("second source");
+        fs::write(second_source.path().join("file.txt"), varied_bytes(6, 4096)).expect("write two");
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+        let first = pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![first_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("first snapshot");
+        pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![second_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("second snapshot");
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget first");
+
+        let marked = pipeline
+            .prune_repository(
+                &store,
+                &created.repository.master_key,
+                PruneRepositoryOptions {
+                    dry_run: false,
+                    max_deletions: Some(0),
+                },
+            )
+            .await
+            .expect("mark only");
+        assert!(!marked.completed);
+        let externally_removed =
+            ObjectKey::new(marked.candidate_objects[0].object_key.clone()).expect("candidate key");
+        store
+            .delete(&externally_removed)
+            .await
+            .expect("external candidate delete");
+
+        let resumed = pipeline
+            .prune_repository(
+                &store,
+                &created.repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect("resume prune");
+
+        assert!(resumed.resumed);
+        assert!(resumed.completed);
+        assert_eq!(resumed.missing_object_count, 1);
+        assert_eq!(
+            resumed
+                .missing_objects
+                .first()
+                .expect("missing object")
+                .object_key,
+            externally_removed.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_rejects_malformed_pending_state_and_changed_repository_state() {
+        use fileferry_storage::ObjectKey;
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+
+        let malformed_key = ObjectKey::new(format!(
+            "objects/prune-plan/aa/{}",
+            "aa".repeat(PRUNE_PLAN_ID_BYTES)
+        ))
+        .expect("malformed prune key");
+        store
+            .overwrite_for_tests(malformed_key.clone(), b"not encrypted json".to_vec())
+            .await;
+        let malformed = pipeline
+            .prune_repository(
+                &store,
+                &created.repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect_err("malformed prune state");
+        assert!(matches!(malformed, CoreError::PrunePlanDecode { .. }));
+        store
+            .delete(&malformed_key)
+            .await
+            .expect("remove malformed");
+
+        let first_source = tempfile::tempdir().expect("first source");
+        fs::write(first_source.path().join("file.txt"), varied_bytes(7, 4096)).expect("write one");
+        let second_source = tempfile::tempdir().expect("second source");
+        fs::write(second_source.path().join("file.txt"), varied_bytes(8, 4096)).expect("write two");
+        let first = pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![first_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("first snapshot");
+        let second = pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![second_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("second snapshot");
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget first");
+        let marked = pipeline
+            .prune_repository(
+                &store,
+                &created.repository.master_key,
+                PruneRepositoryOptions {
+                    dry_run: false,
+                    max_deletions: Some(0),
+                },
+            )
+            .await
+            .expect("mark only");
+        assert!(!marked.completed);
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&second.snapshot_id))
+            .await
+            .expect("concurrent forget");
+
+        let changed = pipeline
+            .prune_repository(
+                &store,
+                &created.repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect_err("state changed");
+        assert!(matches!(
+            changed,
+            CoreError::PruneRepositoryStateChanged { .. }
+        ));
     }
 
     #[test]

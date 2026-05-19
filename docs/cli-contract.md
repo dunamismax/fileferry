@@ -175,15 +175,24 @@ forget
   data.policy_summary: RetentionPolicySummary
 
 prune
-  data.dry_run: boolean
+  data.repository_id: string
   data.plan_id: string | null
-  data.objects_candidates: integer
-  data.objects_deleted: integer
-  data.objects_retained: integer
-  data.bytes_candidates: integer
-  data.bytes_deleted: integer
-  data.bytes_retained: integer
-  data.recovery_state: "none" | "mark_written" | "sweep_completed"
+  data.dry_run: boolean
+  data.resumed: boolean
+  data.completed: boolean
+  data.recovery_state: "dry_run" | "marked" | "resumed" | "completed"
+  data.candidate_objects: array of PruneObject
+  data.retained_objects: array of PruneObject
+  data.deleted_objects: array of PruneObject
+  data.missing_objects: array of PruneObject
+  data.candidate_object_count: integer
+  data.retained_object_count: integer
+  data.deleted_object_count: integer
+  data.missing_object_count: integer
+  data.candidate_bytes: integer
+  data.retained_bytes: integer
+  data.deleted_bytes: integer
+  data.missing_bytes: integer
 
 key add
   data.repository_id: string
@@ -287,6 +296,11 @@ ForgetSnapshotItem
   action: "keep" | "forget"
   reasons: array of strings
   marker_object: string | null
+
+PruneObject
+  object_key: repository object key string
+  kind: "bootstrap" | "key_slot" | "key_slot_removal" | "commit" | "forget_marker" | "manifest" | "index" | "chunk" | "policy" | "upload_state" | "prune_state" | "other"
+  bytes: integer | null
 
 KdfSummary
   algorithm: "argon2id_v19"
@@ -581,9 +595,10 @@ integrity errors with snapshot id, object key, and path context when available.
 visible committed snapshot manifests, evaluates retention keep rules, and
 writes immutable snapshot forget markers for snapshots not retained by those
 rules. It never deletes chunks, manifests, indexes, or commit objects; object
-deletion is not implemented until `ferry prune` lands separately. `--dry-run`
-evaluates the same plan but writes no forget markers. The implemented keep
-rules are `--keep-last <N>`, `--keep-hourly <N>`, `--keep-daily <N>`,
+deletion is handled only by the separate local-only `ferry prune` command.
+`--dry-run` evaluates the same plan but writes no forget markers. The
+implemented keep rules are `--keep-last <N>`, `--keep-hourly <N>`,
+`--keep-daily <N>`,
 `--keep-weekly <N>`, `--keep-monthly <N>`, `--keep-yearly <N>`, and repeatable
 `--keep-tag <TAG>`. Count values must be greater than zero. A policy that would
 forget no currently visible snapshots fails with exit code `7` and
@@ -592,6 +607,28 @@ forget no currently visible snapshots fails with exit code `7` and
 item-level reasons, dry-run status, and marker objects written. JSONL output
 emits `load_snapshots`, `evaluate_policy`, `write_forget_state`, and
 `complete` progress phases. S3-compatible forget is not implemented yet.
+
+`ferry prune` opens an initialized local repository with `FILEFERRY_PASSWORD`
+or `FILEFERRY_PASSWORD_FILE` and deletes only objects that are reachable from
+forgotten committed snapshots and not reachable from any non-forgotten
+committed snapshot. It never deletes `bootstrap`, key-slot objects,
+key-slot-removal markers, policy objects, upload-state objects, unknown
+objects, or S3-compatible repository objects. `--dry-run` uses the same
+reachability logic but writes no prune state and deletes nothing. A real prune
+writes an encrypted durable prune plan under `objects/prune-plan/` before
+deleting candidates, then writes an encrypted completion object under
+`objects/prune-completion/` after the sweep. If a previous plan has no
+completion object, the next real prune resumes it. Missing candidate objects
+during sweep are reported as already gone, not as corruption. Before and
+during sweep, prune compares the current commit/forget marker state against
+the marked plan, allowing for objects already deleted by that same plan; a
+new commit or forget marker aborts the sweep with exit code `8` and
+`repository_prune_state_changed`. Malformed prune state fails closed as an
+integrity failure with exit code `6`. JSON and JSONL output report candidate,
+retained, deleted, and missing objects plus byte counts where object bytes
+were available. JSONL output emits `plan`, `mark`, `verify_reachability`,
+`sweep`, and `complete` progress phases. S3-compatible prune is not
+implemented yet.
 
 `ferry snapshots` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

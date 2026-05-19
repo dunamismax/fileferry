@@ -2,11 +2,12 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, BackupRequest, CheckReadDataSubset,
-    CheckRepositoryOptions, CoreError, MetadataStatus, RECOVERY_EXPORT_WARNING,
-    RepositoryAeadAlgorithm, RestoreDestinationAction, RestoreDestinationRequest,
-    RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection, add_repository_key_slot,
-    create_repository, export_repository_recovery, list_snapshot_entries, open_repository,
-    remove_repository_key_slot, rotate_repository_key_slots, select_snapshot, snapshot_summaries,
+    CheckRepositoryOptions, CoreError, MetadataStatus, PruneRepositoryOptions,
+    RECOVERY_EXPORT_WARNING, RepositoryAeadAlgorithm, RestoreDestinationAction,
+    RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection,
+    add_repository_key_slot, create_repository, export_repository_recovery, list_snapshot_entries,
+    open_repository, remove_repository_key_slot, rotate_repository_key_slots, select_snapshot,
+    snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
 use fileferry_platform::{EntryKind, MetadataValue};
@@ -173,6 +174,13 @@ pub enum Command {
         keep_tags: Vec<String>,
     },
 
+    /// Delete objects unreachable from non-forgotten local snapshots.
+    Prune {
+        /// Report what would be deleted without writing prune state or deleting objects.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Manage repository unlock keys.
     Key {
         #[command(subcommand)]
@@ -264,6 +272,7 @@ impl Command {
             Self::Ls { .. } => "ls",
             Self::Check { .. } => "check",
             Self::Forget { .. } => "forget",
+            Self::Prune { .. } => "prune",
             Self::Key {
                 command: KeyCommand::Add { .. },
             } => "key add",
@@ -432,6 +441,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidCommitMarker { .. }
         | CoreError::ForgetMarkerDecode { .. }
         | CoreError::InvalidForgetMarker { .. }
+        | CoreError::PrunePlanDecode { .. }
+        | CoreError::InvalidPrunePlan { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::ObjectDecode { .. }
         | CoreError::ObjectAuthentication { .. }
@@ -442,6 +453,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidChunkLength { .. }
         | CoreError::MissingChunkIndexEntry { .. } => 6,
         CoreError::Encryption { .. } => 6,
+        CoreError::PruneRepositoryStateChanged { .. } => 8,
         CoreError::KeySlotRemovalWouldLockOut { .. } => 4,
         CoreError::ObjectKey { .. }
         | CoreError::Serialization { .. }
@@ -976,6 +988,10 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             )?;
             forget(mode, &config, policy, dry_run)
         }
+        Command::Prune { dry_run } => {
+            let config = resolve_config(&cli.globals)?;
+            prune(mode, &config, dry_run)
+        }
         Command::Key {
             command: KeyCommand::Add { new_password_file },
         } => {
@@ -1199,6 +1215,9 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::ForgetNoSnapshotsMatched => "forget_no_snapshots_matched",
         CoreError::ForgetMarkerDecode { .. } => "repository_forget_marker_decode_failed",
         CoreError::InvalidForgetMarker { .. } => "repository_forget_marker_invalid",
+        CoreError::PrunePlanDecode { .. } => "repository_prune_plan_decode_failed",
+        CoreError::InvalidPrunePlan { .. } => "repository_prune_plan_invalid",
+        CoreError::PruneRepositoryStateChanged { .. } => "repository_prune_state_changed",
         CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
         CoreError::RepositoryNotInitialized => "repository_not_initialized",
         CoreError::InvalidRepositoryBootstrap { .. } => "repository_bootstrap_invalid",
@@ -1371,6 +1390,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         | CoreError::InvalidCommitMarker { key, .. }
         | CoreError::ForgetMarkerDecode { key, .. }
         | CoreError::InvalidForgetMarker { key, .. }
+        | CoreError::PrunePlanDecode { key, .. }
+        | CoreError::InvalidPrunePlan { key, .. }
         | CoreError::RepositoryCheckMissingObject { key }
         | CoreError::RepositoryReferencedObjectMissing { key } => Some(key.as_str().to_owned()),
         CoreError::MissingChunkIndexEntry { object_key, .. }
@@ -2038,6 +2059,26 @@ fn forget(
     let data = forget_data(policy, plan, dry_run, marker_writes);
 
     emit_forget_command(mode, data)
+}
+
+fn prune(mode: OutputMode, config: &ResolvedConfig, dry_run: bool) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+    let options = if dry_run {
+        PruneRepositoryOptions::dry_run()
+    } else {
+        PruneRepositoryOptions::sweep()
+    };
+    let data = runtime.block_on(pipeline.prune_repository(
+        &repository.store,
+        &opened.master_key,
+        options,
+    ))?;
+
+    emit_prune_command(mode, data)
 }
 
 fn restore(
@@ -3038,6 +3079,109 @@ fn emit_forget_command(mode: OutputMode, data: ForgetData) -> Result<Output, Cli
                 schema_version: OUTPUT_SCHEMA_VERSION,
                 event: EventKind::CommandCompleted,
                 command: "forget",
+                status: CommandStatus::Success,
+                data: Some(data),
+            };
+            lines.push(serde_json::to_string(&completed)?);
+            lines.join("\n") + "\n"
+        }
+    };
+
+    Ok(Output {
+        stdout,
+        stderr: String::new(),
+        exit_code: 0,
+    })
+}
+
+fn emit_prune_command(
+    mode: OutputMode,
+    data: fileferry_core::RepositoryPruneResult,
+) -> Result<Output, CliError> {
+    let stdout = match mode {
+        OutputMode::Human => {
+            let action = if data.dry_run {
+                "Would delete"
+            } else if data.completed {
+                "Deleted"
+            } else {
+                "Marked prune plan"
+            };
+            let action_count = if data.dry_run {
+                data.candidate_object_count
+            } else {
+                data.deleted_object_count
+            };
+            let recovery_state = match data.recovery_state {
+                fileferry_core::PruneRecoveryState::DryRun => "dry_run",
+                fileferry_core::PruneRecoveryState::Marked => "marked",
+                fileferry_core::PruneRecoveryState::Resumed => "resumed",
+                fileferry_core::PruneRecoveryState::Completed => "completed",
+            };
+            format!(
+                "{} {} object(s)\nretained_objects={} missing_objects={} candidate_bytes={} deleted_bytes={} dry_run={} completed={} recovery_state={}\n",
+                action,
+                action_count,
+                data.retained_object_count,
+                data.missing_object_count,
+                data.candidate_bytes,
+                data.deleted_bytes,
+                data.dry_run,
+                data.completed,
+                recovery_state
+            )
+        }
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command: "prune",
+                status: CommandStatus::Success,
+                data,
+            };
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<fileferry_core::RepositoryPruneResult> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command: "prune",
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let phases = [
+                ("plan", "planned unreachable objects"),
+                ("mark", "wrote durable prune state"),
+                (
+                    "verify_reachability",
+                    "verified repository state before sweep",
+                ),
+                ("sweep", "deleted planned unreachable objects"),
+                ("complete", "completed prune"),
+            ];
+            let mut lines = vec![serde_json::to_string(&started)?];
+            for (phase, message) in phases {
+                let event = CommandEvent {
+                    schema_version: OUTPUT_SCHEMA_VERSION,
+                    event: EventKind::Progress,
+                    command: "prune",
+                    status: CommandStatus::Started,
+                    data: Some(ProgressData {
+                        phase,
+                        message,
+                        items_done: Some(data.deleted_object_count + data.missing_object_count),
+                        items_total: Some(data.candidate_object_count),
+                        bytes_done: Some(data.deleted_bytes + data.missing_bytes),
+                        bytes_total: Some(data.candidate_bytes),
+                        snapshot_id: None,
+                        object_key: None,
+                    }),
+                };
+                lines.push(serde_json::to_string(&event)?);
+            }
+            let completed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandCompleted,
+                command: "prune",
                 status: CommandStatus::Success,
                 data: Some(data),
             };
