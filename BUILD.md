@@ -89,6 +89,12 @@ Last reviewed: 2026-05-19.
 - `fileferry-storage` has a tested object-store trait, capability model,
   validated object keys, local filesystem backend, S3-compatible backend, and
   reusable retry/timeout/backoff/concurrency policy wrapper.
+- Local backend reliability evidence covers stale temporary objects,
+  uncommitted partial objects, missing committed objects, malformed committed
+  objects, permission-denied source reads where the platform exposes them,
+  immutable-write conflicts, exit-code families, and safe JSON/JSONL
+  object-key/path context for the implemented local command surface. It does
+  not implement repair or automatic stale temporary object cleanup.
 - `fileferry-policy` has a tested parser for count-based and tag-based
   retention keep rules.
 - `docs/platform-metadata.md` defines the v1 metadata capture target and
@@ -253,6 +259,8 @@ Non-goals:
 
 Goal: Turn local backend reliability from partially tested behavior into
 documented evidence for v1 planning.
+
+Status: Complete as of 2026-05-19 for initialized local repositories.
 
 Definition of done:
 
@@ -580,7 +588,7 @@ Minimum v1 bar:
 - [ ] `ferry forget` and `ferry prune` implement retention and two-phase
       deletion safely.
 - [ ] Key add/remove/rotate/export-recovery paths exist and are tested.
-- [ ] Local backend passes interruption and corruption tests.
+- [x] Local backend passes interruption and corruption tests.
 - [ ] S3-compatible backend passes retry, resume, and eventual-weirdness tests.
 - [x] Stable config profiles and environment variables exist.
 - [x] Shell completions are generated.
@@ -817,6 +825,22 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone 4 local backend interruption and
+  corruption evidence for initialized local repositories. Added CLI coverage
+  proving stale `.fileferry-tmp` files and malformed uncommitted partial
+  objects do not affect normal snapshot discovery or check, plus Unix
+  permission-denied backup JSON failure coverage when the platform exposes the
+  denial. Added core coverage for immutable bootstrap write conflicts and
+  CLI coverage for immutable conflict failure envelopes, and tightened local
+  storage conflict cleanup assertions. Documented the tested evidence in
+  `docs/operations.md` and `docs/cli-contract.md` without claiming repair,
+  automatic stale temporary cleanup, prune, S3-compatible backup/restore/check,
+  or platform-wide support. Verified with `cargo test -p fileferry-storage
+  local_store_`, `cargo test -p fileferry-core
+  repository_bootstrap_reports_immutable_write_conflicts`, targeted
+  `fileferry-cli` local backend tests, `cargo test -p fileferry-storage`,
+  `cargo test -p fileferry-core`, `cargo test -p fileferry-cli`, `just fmt`,
+  `just check`, `just test`, `just build`, and `git diff --check`.
 - 2026-05-19 - Completed Milestone 3 forget without prune for initialized
   local repositories. `ferry forget` now accepts retention keep flags
   (`--keep-last`, hourly/daily/weekly/monthly/yearly counts, and repeatable

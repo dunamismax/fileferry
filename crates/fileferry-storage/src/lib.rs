@@ -1337,6 +1337,13 @@ mod tests {
             .expect_err("conflict");
         assert!(matches!(error, StorageError::ObjectAlreadyExists { .. }));
         assert_eq!(store.get(&object).await.expect("get"), b"first");
+        assert_eq!(
+            store
+                .list_prefix(&ObjectKeyPrefix::new(".fileferry-tmp").expect("temp prefix"))
+                .await
+                .expect("list temp objects"),
+            Vec::<ObjectKey>::new()
+        );
     }
 
     #[tokio::test]

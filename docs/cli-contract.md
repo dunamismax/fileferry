@@ -575,6 +575,26 @@ repository as uninitialized.
 or accepts `--snapshot <ID>` / `--tag <TAG>`, and lists immediate entries at a
 snapshot-relative path. JSON output uses `"."` for the snapshot root path.
 
+## Local Backend Failure Evidence
+
+For initialized local repositories, current tests exercise these failure
+families through command or core/storage boundaries:
+
+- Missing objects referenced by committed repository metadata map to integrity
+  failure exit code `6`.
+- Malformed committed objects and authenticated-object failures map to
+  integrity failure exit code `6`.
+- Immutable write conflicts map to storage/filesystem failure exit code `5`.
+- Permission-denied source reads during backup map to filesystem I/O failure
+  exit code `5` when the platform exposes the denial to the test process.
+- Stale `.fileferry-tmp/*.part` files and malformed uncommitted objects are
+  not treated as committed snapshots. They are not cleaned up automatically.
+
+JSON and JSONL failure envelopes preserve safe repository object keys for
+object-scoped failures when the core or storage layer knows the key. Path
+context is redacted before it is emitted. This is local-backend evidence only;
+it is not a repair, prune, or S3-compatible backend support claim.
+
 `ferry version` supports human, JSON, and JSONL output.
 
 `ferry completion <SHELL>` writes shell completion data for Bash, Elvish,

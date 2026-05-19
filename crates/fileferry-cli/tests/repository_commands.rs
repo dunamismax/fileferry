@@ -1552,6 +1552,115 @@ fn check_machine_failures_report_malformed_commits_and_corrupted_metadata() {
 }
 
 #[test]
+fn local_repository_ignores_stale_temp_and_uncommitted_partial_objects() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let stale_temp = repo.join(".fileferry-tmp").join("interrupted.part");
+    fs::create_dir_all(stale_temp.parent().expect("temp parent")).expect("create temp parent");
+    fs::write(&stale_temp, b"partial temporary object").expect("write stale temp");
+
+    let uncommitted_object = repo
+        .join("objects")
+        .join("manifest")
+        .join("ff")
+        .join("uncommitted-partial");
+    fs::create_dir_all(uncommitted_object.parent().expect("object parent"))
+        .expect("create object parent");
+    fs::write(&uncommitted_object, b"not a committed manifest").expect("write uncommitted object");
+
+    let snapshots_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(snapshots["data"]["snapshots"].as_array().unwrap().len(), 1);
+
+    let check_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "check"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let check: Value = serde_json::from_slice(&check_output).expect("check json");
+    assert_eq!(check["status"], "success");
+    assert_eq!(check["data"]["metadata_objects_checked"], 3);
+    assert_eq!(check["data"]["chunk_objects_checked"], 1);
+    assert!(stale_temp.is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_json_failure_reports_permission_denied_source_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    let locked = source.join("locked.txt");
+    fs::write(&locked, b"locked").expect("write locked");
+    let original_permissions = fs::metadata(&locked).expect("metadata").permissions();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock file");
+
+    if fs::read(&locked).is_ok() {
+        fs::set_permissions(&locked, original_permissions).expect("restore permissions");
+        return;
+    }
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "backup",
+            source.to_str().expect("source path"),
+        ])
+        .assert()
+        .code(5)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    fs::set_permissions(&locked, original_permissions).expect("restore permissions");
+    let failure: Value = serde_json::from_slice(&output).expect("backup failure json");
+
+    assert_eq!(failure["command"], "backup");
+    assert_eq!(failure["status"], "failure");
+    assert_eq!(failure["data"]["code"], "file_read_failed");
+    assert_eq!(failure["data"]["exit_code"], 5);
+    assert_eq!(failure["data"]["retryable"], true);
+    assert!(
+        failure["data"]["path"]
+            .as_str()
+            .expect("failure path")
+            .ends_with("locked.txt")
+    );
+    assert_eq!(failure["data"]["object_key"], serde_json::Value::Null);
+}
+
+#[test]
 fn init_s3_requires_environment_and_redacts_repository_url() {
     let output = fileferry()
         .env("FILEFERRY_PASSWORD", "test-passphrase")

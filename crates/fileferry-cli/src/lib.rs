@@ -2919,6 +2919,26 @@ mod tests {
     }
 
     #[test]
+    fn storage_immutable_conflict_maps_to_cli_failure_envelope() {
+        let object_key = fileferry_storage::ObjectKey::new("bootstrap").expect("object key");
+        let error = CliError::Core(Box::new(CoreError::Storage {
+            source: StorageError::ObjectAlreadyExists { key: object_key },
+        }));
+        let output = render_error_output(OutputMode::Json, "init", &error, error.exit_code())
+            .expect("render storage conflict failure");
+        let failure: serde_json::Value =
+            serde_json::from_str(&output.stdout).expect("failure json");
+
+        assert_eq!(output.stderr, "");
+        assert_eq!(output.exit_code, 5);
+        assert_eq!(failure["data"]["code"], "storage_object_already_exists");
+        assert_eq!(failure["data"]["exit_code"], 5);
+        assert_eq!(failure["data"]["retryable"], false);
+        assert_eq!(failure["data"]["object_key"], "bootstrap");
+        assert_eq!(failure["data"]["finding"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn config_discovery_loads_default_profile() {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(

@@ -3510,6 +3510,42 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ConflictingBootstrapStore;
+
+    impl ObjectStore for ConflictingBootstrapStore {
+        fn capabilities(&self) -> fileferry_storage::StorageCapabilities {
+            fileferry_storage::StorageCapabilities::in_memory_fake()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> fileferry_storage::StorageFuture<'a, PutStatus> {
+            Box::pin(async move { Err(StorageError::ObjectAlreadyExists { key: key.clone() }) })
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move { Err(StorageError::ObjectNotFound { key: key.clone() }) })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(false) })
+        }
+
+        fn delete<'a>(&'a self, _key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> fileferry_storage::StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+    }
+
     async fn replace_committed_manifest_for_tests(
         pipeline: &BackupPipeline,
         store: &fileferry_testkit::FakeObjectStore,
@@ -3596,6 +3632,26 @@ mod tests {
             .expect("reopen existing repository");
         assert!(!reopened.created);
         assert_eq!(reopened.repository.repository_id, opened.repository_id);
+    }
+
+    #[tokio::test]
+    async fn repository_bootstrap_reports_immutable_write_conflicts() {
+        let passphrase = SecretString::from("correct horse battery staple");
+
+        let error = create_repository(
+            &ConflictingBootstrapStore,
+            &passphrase,
+            KdfParams::for_tests(),
+        )
+        .await
+        .expect_err("conflicting bootstrap write should fail");
+
+        assert!(matches!(
+            error,
+            CoreError::Storage {
+                source: StorageError::ObjectAlreadyExists { .. },
+            }
+        ));
     }
 
     #[tokio::test]

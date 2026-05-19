@@ -68,3 +68,53 @@ test "$(stat -f %m "$source/empty/nested")" = "$(stat -f %m "$restore/empty/nest
 This drill does not claim S3-compatible restore coverage, metadata beyond
 regular-file and directory modified timestamps, configurable check subset
 coverage, or symlink restore behavior on non-Unix platforms.
+
+## Local Backend Interruption And Corruption Evidence - 2026-05-19
+
+Scope:
+
+- Backend: local filesystem repository in temporary directories.
+- Commands and boundaries: `ferry backup`, `ferry snapshots`, `ferry check`,
+  and core/storage tests beneath the same local object-store model.
+- Interruption simulation: stale `.fileferry-tmp/*.part` files and malformed
+  uncommitted repository objects were added to initialized local repositories
+  without corresponding commit markers.
+- Corruption simulation: committed metadata and referenced chunk objects were
+  removed, malformed, or tampered in tests.
+
+Observed behavior:
+
+- Stale local temporary objects are not returned by repository object listing.
+  They are left in place; no cleanup or repair command is implemented yet.
+- Malformed objects that are not referenced by a commit marker are ignored by
+  `ferry snapshots` and `ferry check`.
+- Missing objects referenced by committed metadata fail closed as integrity
+  failures with exit code `6`, and JSON/JSONL failure envelopes include the
+  safe repository `object_key` when it is known.
+- Malformed committed objects and authenticated-object failures fail closed as
+  integrity failures with exit code `6`. `ferry check` JSON/JSONL failures
+  include a `finding` object when the core error carries enough context.
+- Local immutable write conflicts are tested in the storage layer and through
+  the core repository bootstrap boundary. They map to the storage/filesystem
+  failure family, exit code `5`, at the CLI boundary.
+- Unix unreadable source-file backup failures are tested through the CLI when
+  the test process cannot read the file after permissions are removed. They
+  map to the filesystem I/O failure family, exit code `5`, and JSON output
+  preserves a redacted path without an object key.
+
+Evidence added or retained:
+
+- `fileferry-storage` tests: local put/get/list/delete, idempotent immutable
+  writes, conflicting immutable writes with temporary-object cleanup, and
+  stale temporary object listing behavior.
+- `fileferry-core` tests: missing or tampered chunks, malformed or replayed
+  metadata, malformed commits, manifest/index mismatches, invalid manifests,
+  permission-denied source reads, and immutable bootstrap write conflicts.
+- `fileferry-cli` tests: missing referenced manifests/chunks, tampered
+  chunks, malformed commits, corrupted metadata, stale local temp/uncommitted
+  partial objects, and JSON permission failure envelopes.
+
+This evidence is local-backend evidence only. It does not claim automatic
+repair, cleanup of stale temporary files, prune safety, S3-compatible backup,
+S3-compatible restore, S3-compatible check, platform-wide permission behavior,
+or release support on every target.
