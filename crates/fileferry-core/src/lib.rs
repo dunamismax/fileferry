@@ -5,8 +5,9 @@ use fastcdc::v2020::{
 };
 use fileferry_crypto::{
     AeadAlgorithm, CryptoError, EncryptedObject, KdfAlgorithm, KdfParams, KeyPurpose, KeySlot,
-    MasterKey, ObjectContext, ObjectKind, create_key_slot, create_master_key, decrypt_object,
-    encrypt_object, keyed_content_id, random_bytes, unlock_master_key,
+    MasterKey, ObjectContext, ObjectKind, RecoveryKeyExport, create_key_slot, create_master_key,
+    create_recovery_key_export, decrypt_object, encrypt_object, keyed_content_id, random_bytes,
+    unlock_master_key,
 };
 use fileferry_platform::{
     EntryKind, EntryMetadata, MetadataValue, PlatformError, Timestamp, capture_metadata,
@@ -552,8 +553,10 @@ pub const REPOSITORY_MAGIC: &str = "fileferry";
 pub const REPOSITORY_FORMAT_VERSION_V0: u16 = fileferry_crypto::FORMAT_VERSION_V0;
 const REPOSITORY_ID_BYTES: usize = 32;
 const KEY_SLOT_ID_BYTES: usize = 32;
+const RECOVERY_EXPORT_ID_BYTES: usize = 32;
 const KEY_SLOT_PREFIX: &str = "key-slots";
 const KEY_SLOT_REMOVAL_PREFIX: &str = "key-slot-removals";
+pub const RECOVERY_EXPORT_WARNING: &str = "Recovery exports are encrypted with the current repository passphrase. Store the export separately from the repository and protect it like a backup key. Recovery import is not implemented yet.";
 
 #[derive(Debug)]
 pub struct OpenedRepository {
@@ -597,6 +600,17 @@ pub struct KeyRotateResult {
     pub removal_marker_objects: Vec<String>,
     pub removal_markers_created: usize,
     pub kdf: KdfParams,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecoveryExportResult {
+    pub repository_id: String,
+    pub export_id: String,
+    pub key_slots: usize,
+    pub created_at_unix_seconds: u64,
+    pub kdf: KdfParams,
+    pub aead: RepositoryAeadAlgorithm,
+    pub bytes: Vec<u8>,
 }
 
 pub async fn create_repository(
@@ -868,6 +882,50 @@ pub async fn rotate_repository_key_slots(
         removal_marker_objects,
         removal_markers_created,
         kdf,
+    })
+}
+
+pub async fn export_repository_recovery(
+    store: &dyn ObjectStore,
+    current_passphrase: &SecretString,
+    kdf: KdfParams,
+) -> CoreResult<RecoveryExportResult> {
+    let opened = open_repository(store, current_passphrase).await?;
+    let export = create_recovery_key_export(
+        &opened.master_key,
+        current_passphrase,
+        kdf,
+        &opened.repository_id,
+    )
+    .map_err(|source| CoreError::Encryption { source })?;
+    let export_id = hex_bytes(&random_bytes::<RECOVERY_EXPORT_ID_BYTES>());
+    let created_at_unix_seconds = current_unix_seconds()?;
+    let master_key_check =
+        master_key_recovery_check(&opened.master_key, &opened.repository_id, &export_id)?;
+    let stored = StoredRecoveryExport {
+        schema_version: 0,
+        magic: REPOSITORY_MAGIC.to_owned(),
+        format_version: REPOSITORY_FORMAT_VERSION_V0,
+        export_type: "fileferry_recovery_export".to_owned(),
+        repository_id: opened.repository_id.clone(),
+        export_id: export_id.clone(),
+        created_at_unix_seconds,
+        warning: RECOVERY_EXPORT_WARNING.to_owned(),
+        aead: "xchacha20_poly1305".to_owned(),
+        recovery_key: StoredRecoveryKeyExport::from_recovery_key_export(&export),
+        master_key_check,
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&stored).map_err(|source| CoreError::Serialization { source })?;
+
+    Ok(RecoveryExportResult {
+        repository_id: opened.repository_id,
+        export_id,
+        key_slots: opened.key_slots,
+        created_at_unix_seconds,
+        kdf,
+        aead: RepositoryAeadAlgorithm::XChaCha20Poly1305,
+        bytes,
     })
 }
 
@@ -1270,6 +1328,29 @@ struct StoredExternalKeySlot {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredRecoveryExport {
+    schema_version: u16,
+    magic: String,
+    format_version: u16,
+    export_type: String,
+    repository_id: String,
+    export_id: String,
+    created_at_unix_seconds: u64,
+    warning: String,
+    aead: String,
+    recovery_key: StoredRecoveryKeyExport,
+    master_key_check: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredRecoveryKeyExport {
+    kdf: StoredKdfParams,
+    salt: Vec<u8>,
+    nonce: Vec<u8>,
+    wrapped_master_key: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredKeySlotRemoval {
     schema_version: u16,
     magic: String,
@@ -1279,6 +1360,116 @@ struct StoredKeySlotRemoval {
     key_slot_object: String,
     removed_at_unix_seconds: u64,
     master_key_removal_check: String,
+}
+
+impl StoredRecoveryExport {
+    #[cfg(test)]
+    fn validate(&self) -> CoreResult<()> {
+        if self.schema_version != 0 {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "unsupported recovery export schema version",
+            });
+        }
+        if self.magic != REPOSITORY_MAGIC {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "repository magic is not recognized",
+            });
+        }
+        if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+            return Err(CoreError::UnsupportedRepositoryFormat {
+                format_version: self.format_version,
+            });
+        }
+        if self.export_type != "fileferry_recovery_export" {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "recovery export type is invalid",
+            });
+        }
+        if self.repository_id.len() != REPOSITORY_ID_BYTES * 2
+            || !self
+                .repository_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "repository id is invalid",
+            });
+        }
+        if self.export_id.len() != RECOVERY_EXPORT_ID_BYTES * 2
+            || !self.export_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "recovery export id is invalid",
+            });
+        }
+        if self.warning != RECOVERY_EXPORT_WARNING {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "recovery export warning is invalid",
+            });
+        }
+        if self.aead != "xchacha20_poly1305" {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "recovery export AEAD algorithm is invalid",
+            });
+        }
+        if self.master_key_check.len() != 64
+            || !self
+                .master_key_check
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "recovery export master key check is invalid",
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn verify(&self, passphrase: &SecretString) -> CoreResult<()> {
+        self.validate()?;
+        let export = self.recovery_key.to_recovery_key_export()?;
+        let master_key =
+            fileferry_crypto::unlock_recovery_key_export(passphrase, &export, &self.repository_id)
+                .map_err(|source| CoreError::RepositoryUnlock { source })?;
+        let actual = master_key_recovery_check(&master_key, &self.repository_id, &self.export_id)?;
+        if actual != self.master_key_check {
+            return Err(CoreError::InvalidRepositoryBootstrap {
+                reason: "recovery export does not unlock this repository master key",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl StoredRecoveryKeyExport {
+    fn from_recovery_key_export(export: &RecoveryKeyExport) -> Self {
+        Self {
+            kdf: StoredKdfParams::from_kdf_params(export.kdf),
+            salt: export.salt.to_vec(),
+            nonce: export.nonce.to_vec(),
+            wrapped_master_key: export.wrapped_master_key.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn to_recovery_key_export(&self) -> CoreResult<RecoveryKeyExport> {
+        let salt = fixed_bytes::<{ fileferry_crypto::KDF_SALT_LEN }>(
+            &self.salt,
+            "recovery export salt has an invalid length",
+        )?;
+        let nonce = fixed_bytes::<{ fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN }>(
+            &self.nonce,
+            "recovery export nonce has an invalid length",
+        )?;
+
+        Ok(RecoveryKeyExport {
+            kdf: self.kdf.to_kdf_params()?,
+            salt,
+            nonce,
+            wrapped_master_key: self.wrapped_master_key.clone(),
+        })
+    }
 }
 
 impl StoredKeySlotRemoval {
@@ -4030,6 +4221,24 @@ fn master_key_removal_check(
     .map_err(|source| CoreError::Encryption { source })
 }
 
+fn master_key_recovery_check(
+    master_key: &MasterKey,
+    repository_id: &str,
+    export_id: &str,
+) -> CoreResult<String> {
+    let mut bytes = Vec::with_capacity("recovery-export".len() + 1 + export_id.len());
+    bytes.extend_from_slice(b"recovery-export\0");
+    bytes.extend_from_slice(export_id.as_bytes());
+    keyed_content_id(
+        master_key,
+        KeyPurpose::KeySlot,
+        repository_id.as_bytes(),
+        &bytes,
+    )
+    .map(|id| hex_bytes(&id))
+    .map_err(|source| CoreError::Encryption { source })
+}
+
 fn check_read_error(error: CoreError, expected_key: ObjectKey) -> CoreError {
     match error {
         CoreError::Storage {
@@ -4678,6 +4887,80 @@ mod tests {
                 .expect_err("empty retire selection fails");
 
         assert!(matches!(error, CoreError::InvalidKeyRotation { .. }));
+    }
+
+    #[tokio::test]
+    async fn repository_recovery_export_wraps_existing_master_key_without_repository_writes() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("original passphrase");
+        let bootstrap_key = bootstrap_object_key().expect("bootstrap key");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let bootstrap_before = store.get(&bootstrap_key).await.expect("bootstrap before");
+
+        let result = export_repository_recovery(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("export recovery");
+
+        assert_eq!(result.repository_id, created.repository.repository_id);
+        assert_eq!(result.key_slots, 1);
+        assert_eq!(result.aead, RepositoryAeadAlgorithm::XChaCha20Poly1305);
+        assert_eq!(result.kdf, KdfParams::for_tests());
+        assert_eq!(result.export_id.len(), RECOVERY_EXPORT_ID_BYTES * 2);
+        assert_eq!(
+            store.get(&bootstrap_key).await.expect("bootstrap after"),
+            bootstrap_before
+        );
+        let export: StoredRecoveryExport =
+            serde_json::from_slice(&result.bytes).expect("recovery export json");
+        export.verify(&passphrase).expect("export verifies");
+        assert_eq!(export.repository_id, created.repository.repository_id);
+        assert_eq!(export.export_id, result.export_id);
+        assert_eq!(export.warning, RECOVERY_EXPORT_WARNING);
+    }
+
+    #[tokio::test]
+    async fn repository_recovery_export_fails_closed_for_wrong_passphrase() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("original passphrase");
+        let wrong = SecretString::from("wrong passphrase");
+        create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+
+        let error = export_repository_recovery(&store, &wrong, KdfParams::for_tests())
+            .await
+            .expect_err("wrong passphrase fails");
+
+        assert!(matches!(error, CoreError::RepositoryUnlock { .. }));
+    }
+
+    #[tokio::test]
+    async fn repository_recovery_export_tampering_fails_closed() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("original passphrase");
+        create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let result = export_repository_recovery(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("export recovery");
+        let mut export: StoredRecoveryExport =
+            serde_json::from_slice(&result.bytes).expect("recovery export json");
+        export.recovery_key.wrapped_master_key[0] ^= 0x80;
+
+        let error = export
+            .verify(&passphrase)
+            .expect_err("tampered export must fail");
+
+        assert!(matches!(error, CoreError::RepositoryUnlock { .. }));
     }
 
     #[tokio::test]

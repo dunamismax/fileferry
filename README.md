@@ -359,7 +359,10 @@ state without object deletion, `ferry key add` as an append-only passphrase
 key-slot addition command, and `ferry key remove` as marker-based external
 key-slot removal for initialized local repositories, and `ferry key rotate`
 as unlock rotation that adds one new passphrase key slot and marker-removes
-explicitly selected external key slots. Restore currently covers directory
+explicitly selected external key slots, plus
+`ferry key export-recovery --output <FILE>` as a local-only encrypted
+recovery-package export protected by the current repository passphrase.
+Restore currently covers directory
 entries, regular-file contents, Unix symlinks, and modified timestamps for
 restored regular files and directories from initialized local repositories.
 S3-compatible backup, restore, snapshots, ls, check, forget, and key
@@ -381,7 +384,10 @@ one immutable new key slot for the existing repository master key, proves the
 new passphrase unlock path before marker-removing selected externally added
 old slots, and does not rekey, re-encrypt repository objects, delete key-slot
 objects, remove the original bootstrap slot, remove unselected slots, or
-recover lost keys. Broader metadata application is not implemented yet. The
+recover lost keys. `ferry key export-recovery` writes a standalone encrypted
+recovery package to a destination file that must not already exist; it does
+not implement recovery import, export raw master-key material, rekey, rewrite
+repository objects, or recover lost passphrases. Broader metadata application is not implemented yet. The
 repository format is still not frozen.
 
 The normal local gate is:

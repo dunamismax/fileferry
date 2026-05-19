@@ -182,20 +182,50 @@ recover lost keys.
 
 ## Recovery Export
 
-Recovery export is not implemented yet. Format v0 design target:
+`ferry key export-recovery --output <FILE>` is implemented for initialized
+local repositories. It unlocks the repository with `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`, creates a standalone encrypted recovery package,
+and writes that package to a destination file that must not already exist.
 
-- Export only an encrypted recovery package.
-- Require an explicit command and a strong warning that possession of the
-  export plus its recovery secret can unlock the repository.
-- Include repository identity, format version, KDF parameters, and encrypted
-  master-key material.
-- Never print raw master keys to terminal output, JSON, JSONL, logs, or debug
-  output.
-- Require a file output path by default so accidental terminal capture is less
-  likely.
+The current recovery package is password-protected by the same current
+repository passphrase used to run the command. It is intended as an encrypted,
+offline copy of unlock material for future recovery-import work, not as a
+plaintext key export and not as recovery from a lost passphrase.
 
-Warning text must state that the export should be stored separately from the
-repository and protected like a backup key.
+The recovery export format records:
+
+- `schema_version`, `magic`, `format_version`, and `export_type`.
+- Repository id and a random export id.
+- Creation time as Unix seconds.
+- Warning text stating that the export should be stored separately from the
+  repository and protected like a backup key.
+- KDF parameters and salt for Argon2id v1.3.
+- AEAD algorithm `xchacha20_poly1305`, AEAD nonce, and encrypted master-key
+  bytes.
+- A keyed master-key check derived from the repository master key, repository
+  id, and export id so future import can reject exports for a different
+  master key.
+
+The recovery-export AEAD associated data is:
+
+```text
+"fileferry\0format-v0\0recovery-export-wrap\0"
+little-endian format version
+KDF algorithm id
+little-endian KDF memory cost, time cost, and parallelism
+length-prefixed KDF salt
+length-prefixed repository id
+```
+
+The command never prints raw master keys, recovery plaintext, passphrases, or
+repository URLs with credentials in human output, JSON, JSONL, logs, errors,
+or debug output. Output reports the repository id, export id, redacted
+destination, KDF summary, AEAD algorithm, warning text,
+`recovery_import_implemented: false`, `raw_master_key_exported: false`, and
+`reencrypted_repository_objects: false`.
+
+Recovery import is not implemented. S3-compatible recovery export is not
+implemented.
 
 ## Key Rotation
 

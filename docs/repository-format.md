@@ -78,6 +78,17 @@ Current implementation status:
   repository master key, delete key-slot objects, remove the original
   bootstrap key slot, retire unselected slots, or rewrite encrypted repository
   objects.
+- `ferry key export-recovery --output <FILE>` for initialized local
+  repositories writes a standalone encrypted JSON recovery package outside the
+  repository. The destination file must not already exist. The package
+  contains only the minimum plaintext needed to identify and decrypt the
+  package later: schema version, magic, format version, export type,
+  repository id, random export id, creation time, warning text, KDF
+  parameters and salt, AEAD algorithm and nonce, encrypted master-key bytes,
+  and a keyed master-key check. The current implementation encrypts the
+  package with the current repository passphrase, does not implement recovery
+  import, does not export raw master-key material, and does not rewrite
+  repository objects.
 - `ferry snapshots` and `ferry ls` read the bootstrap, unlock the master key
   from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then authenticate
   encrypted manifests before returning snapshot metadata.

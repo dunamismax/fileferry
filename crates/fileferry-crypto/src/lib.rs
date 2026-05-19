@@ -17,6 +17,7 @@ pub const XCHACHA20_POLY1305_NONCE_LEN: usize = 24;
 pub const FORMAT_VERSION_V0: u16 = 0;
 
 const KEY_SLOT_AAD_PREFIX: &[u8] = b"fileferry\0format-v0\0key-slot-wrap\0";
+const RECOVERY_EXPORT_AAD_PREFIX: &[u8] = b"fileferry\0format-v0\0recovery-export-wrap\0";
 const OBJECT_AAD_PREFIX: &[u8] = b"fileferry\0format-v0\0object\0";
 const HKDF_SALT: &[u8] = b"fileferry\0format-v0\0hkdf\0";
 
@@ -236,6 +237,14 @@ pub struct KeySlot {
     pub wrapped_master_key: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryKeyExport {
+    pub kdf: KdfParams,
+    pub salt: [u8; KDF_SALT_LEN],
+    pub nonce: [u8; XCHACHA20_POLY1305_NONCE_LEN],
+    pub wrapped_master_key: Vec<u8>,
+}
+
 pub fn create_master_key(
     passphrase: &SecretString,
     kdf: KdfParams,
@@ -279,6 +288,50 @@ pub fn unlock_master_key(
         &wrapping_key,
         &key_slot.nonce,
         &key_slot.wrapped_master_key,
+        &aad,
+    )?;
+    let master_key = MasterKey::from_secret_slice(&plaintext);
+    plaintext.zeroize();
+
+    master_key
+}
+
+pub fn create_recovery_key_export(
+    master_key: &MasterKey,
+    passphrase: &SecretString,
+    kdf: KdfParams,
+    repository_id: &str,
+) -> Result<RecoveryKeyExport, CryptoError> {
+    kdf.validate()?;
+
+    let mut salt = [0_u8; KDF_SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    let wrapping_key = derive_passphrase_key(passphrase, &salt, kdf)?;
+    let nonce = random_nonce();
+    let aad = recovery_export_aad(kdf, &salt, repository_id)?;
+    let wrapped_master_key = encrypt_with_key(&wrapping_key, &nonce, master_key.expose(), &aad)?;
+
+    Ok(RecoveryKeyExport {
+        kdf,
+        salt,
+        nonce,
+        wrapped_master_key,
+    })
+}
+
+pub fn unlock_recovery_key_export(
+    passphrase: &SecretString,
+    export: &RecoveryKeyExport,
+    repository_id: &str,
+) -> Result<MasterKey, CryptoError> {
+    export.kdf.validate()?;
+
+    let wrapping_key = derive_passphrase_key(passphrase, &export.salt, export.kdf)?;
+    let aad = recovery_export_aad(export.kdf, &export.salt, repository_id)?;
+    let mut plaintext = decrypt_with_key(
+        &wrapping_key,
+        &export.nonce,
+        &export.wrapped_master_key,
         &aad,
     )?;
     let master_key = MasterKey::from_secret_slice(&plaintext);
@@ -479,6 +532,36 @@ fn key_slot_aad(kdf: KdfParams, salt: &[u8; KDF_SALT_LEN]) -> Vec<u8> {
     aad
 }
 
+fn recovery_export_aad(
+    kdf: KdfParams,
+    salt: &[u8; KDF_SALT_LEN],
+    repository_id: &str,
+) -> Result<Vec<u8>, CryptoError> {
+    if repository_id.is_empty() {
+        return Err(CryptoError::InvalidObjectContext(
+            "repository id must not be empty",
+        ));
+    }
+    if repository_id.as_bytes().contains(&0) {
+        return Err(CryptoError::InvalidObjectContext(
+            "repository id must not contain NUL",
+        ));
+    }
+
+    let mut aad = Vec::with_capacity(128 + repository_id.len());
+    aad.extend_from_slice(RECOVERY_EXPORT_AAD_PREFIX);
+    aad.extend_from_slice(&FORMAT_VERSION_V0.to_le_bytes());
+    aad.push(match kdf.algorithm {
+        KdfAlgorithm::Argon2idV19 => 1,
+    });
+    aad.extend_from_slice(&kdf.memory_cost_kib.to_le_bytes());
+    aad.extend_from_slice(&kdf.time_cost.to_le_bytes());
+    aad.extend_from_slice(&kdf.parallelism.to_le_bytes());
+    write_len_prefixed(&mut aad, salt);
+    write_len_prefixed(&mut aad, repository_id.as_bytes());
+    Ok(aad)
+}
+
 fn write_len_prefixed(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(&(value.len() as u64).to_le_bytes());
     output.extend_from_slice(value);
@@ -535,6 +618,58 @@ mod tests {
 
         let error =
             unlock_master_key(&passphrase(), &key_slot).expect_err("tampered key slot fails");
+
+        assert!(matches!(error, CryptoError::Decryption));
+    }
+
+    #[test]
+    fn creates_and_unlocks_recovery_key_export() {
+        let master_key = MasterKey::generate();
+        let export = create_recovery_key_export(
+            &master_key,
+            &passphrase(),
+            KdfParams::for_tests(),
+            "repo-id",
+        )
+        .expect("created recovery export");
+
+        let unlocked =
+            unlock_recovery_key_export(&passphrase(), &export, "repo-id").expect("unlocked");
+
+        assert_eq!(unlocked.expose(), master_key.expose());
+    }
+
+    #[test]
+    fn recovery_key_export_binds_repository_context() {
+        let master_key = MasterKey::generate();
+        let export = create_recovery_key_export(
+            &master_key,
+            &passphrase(),
+            KdfParams::for_tests(),
+            "repo-id",
+        )
+        .expect("created recovery export");
+
+        let error = unlock_recovery_key_export(&passphrase(), &export, "other-repo")
+            .expect_err("wrong repository context fails");
+
+        assert!(matches!(error, CryptoError::Decryption));
+    }
+
+    #[test]
+    fn recovery_key_export_tampering_fails_closed() {
+        let master_key = MasterKey::generate();
+        let mut export = create_recovery_key_export(
+            &master_key,
+            &passphrase(),
+            KdfParams::for_tests(),
+            "repo-id",
+        )
+        .expect("created recovery export");
+        export.wrapped_master_key[0] ^= 0x80;
+
+        let error = unlock_recovery_key_export(&passphrase(), &export, "repo-id")
+            .expect_err("tampered export fails");
 
         assert!(matches!(error, CryptoError::Decryption));
     }

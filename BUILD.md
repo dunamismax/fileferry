@@ -116,6 +116,21 @@ Last reviewed: 2026-05-19.
   marker objects, marker creation count, KDF parameters, and explicit
   `deleted_key_slot_objects: false` and
   `reencrypted_repository_objects: false`.
+- `ferry key export-recovery --output <FILE>` opens initialized local
+  repositories, unlocks with `FILEFERRY_PASSWORD` or
+  `FILEFERRY_PASSWORD_FILE`, writes a standalone encrypted recovery package
+  to a destination file that must not already exist, and protects that package
+  with the current repository passphrase. The export records repository id,
+  export id, creation time, warning text, KDF parameters, AEAD algorithm,
+  nonce, encrypted master-key bytes, and a keyed master-key check for future
+  verification. It does not print or store raw master-key material, implement
+  recovery import, recover lost passphrases, create a new master key, rewrite
+  the bootstrap slot, rewrite or re-encrypt repository objects, or implement
+  S3-compatible key management. Human, JSON, and JSONL-safe output report the
+  repository id, export id, redacted destination, visible key-slot count,
+  creation time, KDF parameters, AEAD algorithm, warning text, and explicit
+  `recovery_import_implemented: false`, `raw_master_key_exported: false`, and
+  `reencrypted_repository_objects: false`.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -182,10 +197,12 @@ repositories. `ferry forget` is marker-only for initialized local repositories;
 it hides forgotten snapshots from normal snapshot discovery but does not
 delete objects or reclaim storage. `ferry key add` and `ferry key remove` are
 implemented for initialized local repositories only; `key remove` is limited
-to marker-based removal of externally added key slots, and `key rotate` is
+to marker-based removal of externally added key slots, `key rotate` is
 limited to unlock rotation that adds one new slot and marker-removes
-explicitly selected externally added slots. Recovery export, full repository
-rekey, bootstrap-slot removal, and S3-compatible key management are not
+explicitly selected externally added slots, and `key export-recovery` is
+limited to a local-only encrypted recovery package protected by the current
+repository passphrase. Recovery import, full repository rekey, bootstrap-slot
+removal, and S3-compatible key management are not
 implemented. Describe backup, restore, check, forget, key
 management, repository, storage, crypto, or platform behavior only to the
 level backed by code, tests, and platform evidence.
@@ -203,37 +220,6 @@ one active milestone end to end over making many small adjacent improvements.
 Choose the first unfinished milestone that can be completed honestly in the
 current session. If it is too large, split it into explicit sub-milestones in
 this section before coding.
-
-### Milestone A - Key Recovery Export
-
-Goal: Implement the remaining key-management command,
-`ferry key export-recovery`, for initialized local repositories without
-printing or storing raw master-key material.
-
-Definition of done:
-
-- CLI exposes `ferry key export-recovery --output <FILE>` for local
-  repositories with human, JSON, and JSONL-safe output.
-- The command unlocks with `FILEFERRY_PASSWORD` or
-  `FILEFERRY_PASSWORD_FILE`.
-- The recovery export is encrypted and authenticated with documented KDF,
-  AEAD, associated data, and warning text.
-- Output never prints raw master keys, recovery secrets, passphrases, or
-  repository URLs with credentials.
-- The export file format records only the minimum fields needed for future
-  recovery import or verification.
-- Tests cover success, wrong password, destination safety, malformed output
-  prevention, redaction, and exit-code mapping.
-- `docs/security.md`, `docs/repository-format.md`, `docs/cli-contract.md`,
-  README, and this file describe only the implemented behavior.
-
-Non-goals:
-
-- Recovery import unless explicitly split and completed.
-- Plaintext key export.
-- Full repository rekey.
-- S3-compatible key management.
-- Rewriting bootstrap slots or encrypted repository objects.
 
 ### Milestone B - Local Two-Phase Prune
 
@@ -714,7 +700,7 @@ Minimum v1 bar:
 - [x] `ferry check` verifies metadata and configurable data subsets.
 - [ ] `ferry forget` and `ferry prune` implement retention and two-phase
       deletion safely.
-- [ ] Key add/remove/rotate/export-recovery paths exist and are tested.
+- [x] Key add/remove/rotate/export-recovery paths exist and are tested.
 - [x] Local backend passes interruption and corruption tests.
 - [ ] S3-compatible backend passes retry, resume, and eventual-weirdness tests.
 - [x] Stable config profiles and environment variables exist.
@@ -852,7 +838,7 @@ where documented verification passes on a clean checkout.
 - [x] Implement `key add`.
 - [x] Implement `key remove`.
 - [x] Implement `key rotate`.
-- [ ] Implement `key export-recovery`.
+- [x] Implement `key export-recovery`.
 - [ ] Document operational recovery procedures.
 - [ ] Add tests for multiple unlock methods and removed keys.
 
@@ -952,6 +938,30 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone A key recovery export for initialized
+  local repositories by implementing
+  `ferry key export-recovery --output <FILE>`. The command unlocks with
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, writes a standalone
+  encrypted recovery package to a destination file that must not already
+  exist, protects that package with the current repository passphrase, and
+  reports human, JSON, and JSONL-safe output without printing raw master-key
+  material, passphrases, or unredacted destinations. The recovery package
+  records repository id, export id, creation time, warning text, Argon2id v1.3
+  KDF parameters and salt, XChaCha20-Poly1305 nonce and encrypted master-key
+  bytes, and a keyed master-key check for future verification. Recovery
+  import, plaintext key export, full repository rekey, bootstrap-slot rewrite,
+  repository-object re-encryption, lost-passphrase recovery, and S3-compatible
+  key management remain unimplemented. Added crypto, core, and CLI tests for
+  success, authenticated context binding, tamper failure, wrong password,
+  destination safety, malformed-output prevention, redaction, JSON/JSONL
+  output, and exit-code mapping. Updated `README.md`,
+  `docs/security.md`, `docs/repository-format.md`, `docs/cli-contract.md`,
+  and this file. Verified with
+  `cargo test -p fileferry-crypto recovery_key_export --no-fail-fast`,
+  `cargo test -p fileferry-core repository_recovery_export --no-fail-fast`,
+  `cargo test -p fileferry-cli key_export_recovery --no-fail-fast`,
+  `cargo test -p fileferry-core -p fileferry-cli --no-fail-fast`,
+  `just fmt`, `just check`, `just test`, and `just build`.
 - 2026-05-19 - Cleaned up `BUILD.md` after completion of the previous active
   milestones. Removed completed milestone definitions from the Active
   Milestones queue, replaced them with a forward-looking v1 execution queue

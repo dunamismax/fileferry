@@ -213,9 +213,17 @@ key rotate
   data.reencrypted_repository_objects: boolean
 
 key export-recovery
+  data.repository_id: string
   data.export_id: string
-  data.warning_acknowledged: boolean
-  data.destination: redacted string | null
+  data.destination: redacted string
+  data.key_slots: integer
+  data.created_at_unix_seconds: integer
+  data.kdf: KdfSummary
+  data.aead: "xchacha20_poly1305"
+  data.warning: string
+  data.recovery_import_implemented: boolean
+  data.raw_master_key_exported: boolean
+  data.reencrypted_repository_objects: boolean
 
 version
   data.command: "ferry"
@@ -641,6 +649,23 @@ marker state fails as an integrity failure with exit code `6`. Output
 includes the repository id, added key-slot id, removed key-slot ids, visible
 key-slot count, removal marker objects, removal marker creation count, KDF
 parameters, `deleted_key_slot_objects: false`, and
+`reencrypted_repository_objects: false`.
+
+`ferry key export-recovery --output <FILE>` opens an initialized local
+repository with the current passphrase from `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`, creates one standalone encrypted recovery export
+file, and writes it only if the destination file does not already exist. The
+export is encrypted and authenticated with Argon2id v1.3 and
+XChaCha20-Poly1305 using associated data documented in `docs/security.md`.
+The current implementation protects the export with the current repository
+passphrase; recovery import is not implemented, and the command does not
+export raw master-key material, create a new master key, rewrite repository
+objects, or re-encrypt repository objects. Wrong passphrases fail with exit
+code `4`; an existing destination fails with exit code `2`; malformed
+repository key state fails as an integrity failure with exit code `6`. Output
+includes the repository id, export id, redacted destination, visible key-slot
+count, creation time, KDF parameters, AEAD algorithm, warning text,
+`recovery_import_implemented: false`, `raw_master_key_exported: false`, and
 `reencrypted_repository_objects: false`.
 S3-compatible key management is not implemented yet.
 

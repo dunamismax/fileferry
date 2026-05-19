@@ -2,9 +2,10 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, BackupRequest, CheckReadDataSubset,
-    CheckRepositoryOptions, CoreError, MetadataStatus, RestoreDestinationAction,
-    RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection,
-    add_repository_key_slot, create_repository, list_snapshot_entries, open_repository,
+    CheckRepositoryOptions, CoreError, MetadataStatus, RECOVERY_EXPORT_WARNING,
+    RepositoryAeadAlgorithm, RestoreDestinationAction, RestoreDestinationRequest,
+    RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection, add_repository_key_slot,
+    create_repository, export_repository_recovery, list_snapshot_entries, open_repository,
     remove_repository_key_slot, rotate_repository_key_slots, select_snapshot, snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
@@ -244,6 +245,13 @@ pub enum KeyCommand {
         )]
         retire_key_slot_ids: Vec<String>,
     },
+
+    /// Export an encrypted recovery package for this repository.
+    ExportRecovery {
+        /// Destination file for the encrypted recovery export.
+        #[arg(long = "output", value_name = "FILE")]
+        output: PathBuf,
+    },
 }
 
 impl Command {
@@ -265,6 +273,9 @@ impl Command {
             Self::Key {
                 command: KeyCommand::Rotate { .. },
             } => "key rotate",
+            Self::Key {
+                command: KeyCommand::ExportRecovery { .. },
+            } => "key export-recovery",
             Self::Restore { .. } => "restore",
             Self::Version => "version",
         }
@@ -337,6 +348,22 @@ pub enum RepositoryError {
         source: io::Error,
     },
 
+    #[error("recovery export destination {path} already exists")]
+    RecoveryOutputExists { path: Redacted },
+
+    #[error("recovery export destination {path} is invalid: {reason}")]
+    InvalidRecoveryOutput {
+        path: Redacted,
+        reason: &'static str,
+    },
+
+    #[error("recovery export could not be written to {path}: {source}")]
+    RecoveryOutputWrite {
+        path: Redacted,
+        #[source]
+        source: io::Error,
+    },
+
     #[error("repository URL {value} is not supported by this command yet")]
     UnsupportedRepository { value: Redacted },
 
@@ -370,10 +397,13 @@ impl RepositoryError {
             | Self::MissingNewPassword
             | Self::PasswordFileRead { .. }
             | Self::NewPasswordFileRead { .. }
+            | Self::RecoveryOutputExists { .. }
+            | Self::InvalidRecoveryOutput { .. }
             | Self::InvalidFileRepositoryUrl { .. }
             | Self::InvalidS3RepositoryUrl { .. }
             | Self::MissingS3Environment { .. }
             | Self::InvalidS3Config { .. } => 2,
+            Self::RecoveryOutputWrite { .. } => 5,
             Self::UnsupportedRepository { .. } => 9,
             Self::Runtime { .. } => 1,
         }
@@ -693,6 +723,21 @@ struct KeyRotateData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct KeyRecoveryExportData {
+    repository_id: String,
+    export_id: String,
+    destination: String,
+    key_slots: usize,
+    created_at_unix_seconds: u64,
+    kdf: KdfSummary,
+    aead: &'static str,
+    warning: &'static str,
+    recovery_import_implemented: bool,
+    raw_master_key_exported: bool,
+    reencrypted_repository_objects: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct KdfSummary {
     algorithm: &'static str,
     memory_cost_kib: u32,
@@ -953,6 +998,12 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             let config = resolve_config(&cli.globals)?;
             key_rotate(mode, &config, new_password_file, retire_key_slot_ids)
         }
+        Command::Key {
+            command: KeyCommand::ExportRecovery { output },
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            key_export_recovery(mode, &config, output)
+        }
         Command::Restore {
             snapshot,
             tag,
@@ -1095,6 +1146,9 @@ fn failure_code(error: &CliError) -> &'static str {
             RepositoryError::NewPasswordFileRead { .. } => {
                 "repository_new_password_file_read_failed"
             }
+            RepositoryError::RecoveryOutputExists { .. } => "recovery_output_exists",
+            RepositoryError::InvalidRecoveryOutput { .. } => "recovery_output_invalid",
+            RepositoryError::RecoveryOutputWrite { .. } => "recovery_output_write_failed",
             RepositoryError::UnsupportedRepository { .. } => "repository_url_unsupported",
             RepositoryError::InvalidFileRepositoryUrl { .. } => "repository_file_url_invalid",
             RepositoryError::InvalidS3RepositoryUrl { .. } => "repository_s3_url_invalid",
@@ -1235,8 +1289,11 @@ fn failure_path(error: &CliError) -> Option<String> {
             _ => None,
         },
         CliError::Repository(error) => match error {
-            RepositoryError::PasswordFileRead { path, .. } => Some(path.to_string()),
-            RepositoryError::NewPasswordFileRead { path, .. } => Some(path.to_string()),
+            RepositoryError::PasswordFileRead { path, .. }
+            | RepositoryError::NewPasswordFileRead { path, .. }
+            | RepositoryError::RecoveryOutputExists { path }
+            | RepositoryError::InvalidRecoveryOutput { path, .. }
+            | RepositoryError::RecoveryOutputWrite { path, .. } => Some(path.to_string()),
             _ => None,
         },
         CliError::Core(error) => core_failure_path(error),
@@ -1736,6 +1793,46 @@ fn key_rotate(
             data.removed_key_slot_ids.join(","),
             data.key_slots,
             data.removal_markers_created
+        )
+    })
+}
+
+fn key_export_recovery(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    output: PathBuf,
+) -> Result<Output, CliError> {
+    ensure_recovery_output_destination(&output)?;
+    let repository = local_repository(config)?;
+    let current_passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let result = runtime.block_on(export_repository_recovery(
+        &repository.store,
+        &current_passphrase,
+        KdfParams::default(),
+    ))?;
+    write_recovery_export_file(&output, &result.bytes)?;
+    let destination = redact_for_display(&output.display().to_string());
+    let data = KeyRecoveryExportData {
+        repository_id: result.repository_id,
+        export_id: result.export_id,
+        destination,
+        key_slots: result.key_slots,
+        created_at_unix_seconds: result.created_at_unix_seconds,
+        kdf: KdfSummary::from(result.kdf),
+        aead: match result.aead {
+            RepositoryAeadAlgorithm::XChaCha20Poly1305 => "xchacha20_poly1305",
+        },
+        warning: RECOVERY_EXPORT_WARNING,
+        recovery_import_implemented: false,
+        raw_master_key_exported: false,
+        reencrypted_repository_objects: false,
+    };
+
+    emit_command(mode, "key export-recovery", data, |data| {
+        format!(
+            "Exported encrypted recovery package {} for repository {}\ndestination={}\nwarning={}\nrecovery_import_implemented=false\nraw_master_key_exported=false\nreencrypted_repository_objects=false\n",
+            data.export_id, data.repository_id, data.destination, data.warning
         )
     })
 }
@@ -2331,6 +2428,61 @@ fn read_new_password_file(path: &Path) -> Result<SecretString, RepositoryError> 
     Ok(SecretString::from(
         content.trim_end_matches(['\r', '\n']).to_owned(),
     ))
+}
+
+fn ensure_recovery_output_destination(path: &Path) -> Result<(), RepositoryError> {
+    if path.as_os_str().is_empty() {
+        return Err(RepositoryError::InvalidRecoveryOutput {
+            path: Redacted::new(path.display().to_string()),
+            reason: "output path must not be empty",
+        });
+    }
+    if path.file_name().is_none() {
+        return Err(RepositoryError::InvalidRecoveryOutput {
+            path: Redacted::new(path.display().to_string()),
+            reason: "output path must name a file",
+        });
+    }
+    if path.exists() {
+        return Err(RepositoryError::RecoveryOutputExists {
+            path: Redacted::new(path.display().to_string()),
+        });
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        && !parent.is_dir()
+    {
+        return Err(RepositoryError::InvalidRecoveryOutput {
+            path: Redacted::new(path.display().to_string()),
+            reason: "output parent directory does not exist",
+        });
+    }
+    Ok(())
+}
+
+fn write_recovery_export_file(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
+    use std::io::Write as _;
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|source| match source.kind() {
+            io::ErrorKind::AlreadyExists => RepositoryError::RecoveryOutputExists {
+                path: Redacted::new(path.display().to_string()),
+            },
+            _ => RepositoryError::RecoveryOutputWrite {
+                path: Redacted::new(path.display().to_string()),
+                source,
+            },
+        })?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|source| RepositoryError::RecoveryOutputWrite {
+            path: Redacted::new(path.display().to_string()),
+            source,
+        })
 }
 
 fn tokio_runtime() -> Result<tokio::runtime::Runtime, RepositoryError> {
