@@ -2433,9 +2433,9 @@ fn repository_open_failures_are_structured_and_redacted_in_machine_modes() {
     assert_eq!(uninitialized["data"]["code"], "repository_not_initialized");
     assert_eq!(uninitialized["data"]["exit_code"], 3);
 
-    let secret_url = "s3://access:secret@example.com/bucket?token=sensitive";
+    let s3_url = "s3://test-bucket/team/repo";
     let unsupported_output = fileferry()
-        .args(["--repo", secret_url, "--json", "check"])
+        .args(["--repo", s3_url, "--json", "check"])
         .assert()
         .code(9)
         .stderr("")
@@ -2444,11 +2444,14 @@ fn repository_open_failures_are_structured_and_redacted_in_machine_modes() {
         .clone();
     let unsupported_text = String::from_utf8(unsupported_output.clone()).expect("unsupported utf8");
     let unsupported: Value = serde_json::from_slice(&unsupported_output).expect("unsupported json");
-    assert_eq!(unsupported["data"]["code"], "repository_url_unsupported");
+    assert_eq!(
+        unsupported["data"]["code"],
+        "repository_backend_unsupported"
+    );
     assert_eq!(unsupported["data"]["exit_code"], 9);
     assert!(unsupported_text.contains("s3://<redacted>"));
-    assert!(!unsupported_text.contains("secret"));
-    assert!(!unsupported_text.contains("sensitive"));
+    assert!(!unsupported_text.contains("test-bucket"));
+    assert!(!unsupported_text.contains("team/repo"));
 
     init_repo(&repo_url, passphrase);
     let wrong_password_output = fileferry()
@@ -2487,6 +2490,92 @@ fn repository_open_failures_are_structured_and_redacted_in_machine_modes() {
     assert_eq!(failed["event"], "command_failed");
     assert_eq!(failed["data"]["code"], "repository_bootstrap_decode_failed");
     assert_eq!(failed["data"]["exit_code"], 6);
+}
+
+#[test]
+fn s3_repository_commands_fail_as_unsupported_before_credentials_are_required() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    let destination = temp.path().join("restore");
+    let recovery = temp.path().join("recovery.ffrec");
+    fs::create_dir(&source).expect("source dir");
+
+    let key_slot_id = "a".repeat(64);
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        (
+            "backup",
+            vec!["backup".to_owned(), source.display().to_string()],
+        ),
+        ("snapshots", vec!["snapshots".to_owned()]),
+        ("ls", vec!["ls".to_owned()]),
+        (
+            "restore",
+            vec!["restore".to_owned(), destination.display().to_string()],
+        ),
+        ("check", vec!["check".to_owned()]),
+        (
+            "forget",
+            vec![
+                "forget".to_owned(),
+                "--keep-last".to_owned(),
+                "1".to_owned(),
+            ],
+        ),
+        ("prune", vec!["prune".to_owned(), "--dry-run".to_owned()]),
+        ("key add", vec!["key".to_owned(), "add".to_owned()]),
+        (
+            "key remove",
+            vec!["key".to_owned(), "remove".to_owned(), key_slot_id.clone()],
+        ),
+        (
+            "key rotate",
+            vec![
+                "key".to_owned(),
+                "rotate".to_owned(),
+                "--retire-key-slot".to_owned(),
+                key_slot_id,
+            ],
+        ),
+        (
+            "key export-recovery",
+            vec![
+                "key".to_owned(),
+                "export-recovery".to_owned(),
+                "--output".to_owned(),
+                recovery.display().to_string(),
+            ],
+        ),
+    ];
+
+    for (command_name, command_args) in cases {
+        let mut args = vec![
+            "--repo".to_owned(),
+            "s3://test-bucket/team/repo".to_owned(),
+            "--json".to_owned(),
+        ];
+        args.extend(command_args);
+
+        let output = fileferry()
+            .args(args)
+            .assert()
+            .code(9)
+            .stderr("")
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(output.clone()).expect("unsupported utf8");
+        let failure: Value = serde_json::from_slice(&output).expect("unsupported json");
+
+        assert_eq!(failure["command"], command_name);
+        assert_eq!(failure["status"], "failure");
+        assert_eq!(failure["data"]["code"], "repository_backend_unsupported");
+        assert_eq!(failure["data"]["exit_code"], 9);
+        assert!(text.contains("s3://<redacted>"));
+        assert!(!text.contains("test-bucket"));
+        assert!(!text.contains("team/repo"));
+        assert!(!text.contains("FILEFERRY_PASSWORD"));
+        assert!(!text.contains("FILEFERRY_S3_ACCESS_KEY_ID"));
+    }
 }
 
 #[test]

@@ -367,8 +367,10 @@ Restore currently covers directory
 entries, regular-file contents, Unix symlinks, and modified timestamps for
 restored regular files and directories from initialized local repositories.
 S3-compatible backup, restore, snapshots, ls, check, forget, prune, and key
-management are not implemented yet. Other metadata
-application is not implemented yet. Check failures in JSON and JSONL modes now
+management are not implemented yet; those command paths are explicitly
+reported as unsupported backend capability failures while S3 repository URLs
+remain redacted. Other metadata application is not implemented yet. Check
+failures in JSON and JSONL modes now
 emit machine-readable failure envelopes with stable codes and object-key
 context where available.
 `ferry check --read-data-subset <N|PERCENT>` reads a deterministic subset of

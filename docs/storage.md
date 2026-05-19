@@ -199,9 +199,12 @@ repository prefix, and deletes the `bootstrap` object it creates.
 S3-compatible storage now has the initial object-store adapter and a live
 round-trip test gate, and `ferry init` can create S3-compatible encrypted
 repository bootstraps. Common retry, timeout, backoff, and concurrency
-behavior exists in the policy wrapper. S3-compatible backup, restore,
-snapshots, ls, and check are not implemented yet. Before S3 storage is marked
-complete it still needs explicit provider capability checks,
-stale-or-surprising listing tests, missing-object tests, partial upload
-behavior, permission-error tests, multipart cleanup guidance, and provider
-evidence beyond the initial Backblaze-compatible round trip.
+behavior exists in the policy wrapper. CLI repository resolution uses the same
+local/S3 target parser for repository commands, but S3-compatible backup,
+restore, snapshots, ls, check, forget, prune, and key-management commands are
+still intentionally unsupported and fail with exit code `9` before credential
+or password access. Before S3 storage is marked complete it still needs
+explicit provider capability checks, stale-or-surprising listing tests,
+missing-object tests, partial upload behavior, permission-error tests,
+multipart cleanup guidance, and provider evidence beyond the initial
+Backblaze-compatible round trip.

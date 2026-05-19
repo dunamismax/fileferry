@@ -376,6 +376,13 @@ pub enum RepositoryError {
     #[error("repository URL {value} is not supported by this command yet")]
     UnsupportedRepository { value: Redacted },
 
+    #[error("{backend} repositories are not supported by {command} yet for {value}")]
+    UnsupportedRepositoryBackend {
+        backend: CliBackendKind,
+        command: &'static str,
+        value: Redacted,
+    },
+
     #[error("file repository URL {value} is invalid; expected file:///absolute/path")]
     InvalidFileRepositoryUrl { value: Redacted },
 
@@ -413,7 +420,7 @@ impl RepositoryError {
             | Self::MissingS3Environment { .. }
             | Self::InvalidS3Config { .. } => 2,
             Self::RecoveryOutputWrite { .. } => 5,
-            Self::UnsupportedRepository { .. } => 9,
+            Self::UnsupportedRepository { .. } | Self::UnsupportedRepositoryBackend { .. } => 9,
             Self::Runtime { .. } => 1,
         }
     }
@@ -826,9 +833,18 @@ struct RestoreMetadataWarning {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum CliBackendKind {
+pub enum CliBackendKind {
     Local,
     S3Compatible,
+}
+
+impl std::fmt::Display for CliBackendKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => formatter.write_str("local"),
+            Self::S3Compatible => formatter.write_str("S3-compatible"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -1166,6 +1182,9 @@ fn failure_code(error: &CliError) -> &'static str {
             RepositoryError::InvalidRecoveryOutput { .. } => "recovery_output_invalid",
             RepositoryError::RecoveryOutputWrite { .. } => "recovery_output_write_failed",
             RepositoryError::UnsupportedRepository { .. } => "repository_url_unsupported",
+            RepositoryError::UnsupportedRepositoryBackend { .. } => {
+                "repository_backend_unsupported"
+            }
             RepositoryError::InvalidFileRepositoryUrl { .. } => "repository_file_url_invalid",
             RepositoryError::InvalidS3RepositoryUrl { .. } => "repository_s3_url_invalid",
             RepositoryError::MissingS3Environment { .. } => "repository_s3_environment_missing",
@@ -1717,12 +1736,12 @@ fn key_add(
     config: &ResolvedConfig,
     new_password_file: Option<PathBuf>,
 ) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "key add", &[CliBackendKind::Local])?;
     let current_passphrase = repository_passphrase()?;
     let new_passphrase = new_repository_passphrase(new_password_file.as_deref())?;
     let runtime = tokio_runtime()?;
     let result = runtime.block_on(add_repository_key_slot(
-        &repository.store,
+        repository.store.as_ref(),
         &current_passphrase,
         &new_passphrase,
         KdfParams::default(),
@@ -1748,11 +1767,11 @@ fn key_remove(
     config: &ResolvedConfig,
     key_slot_id: String,
 ) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "key remove", &[CliBackendKind::Local])?;
     let current_passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let result = runtime.block_on(remove_repository_key_slot(
-        &repository.store,
+        repository.store.as_ref(),
         &current_passphrase,
         &key_slot_id,
     ))?;
@@ -1783,12 +1802,12 @@ fn key_rotate(
     new_password_file: Option<PathBuf>,
     retire_key_slot_ids: Vec<String>,
 ) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "key rotate", &[CliBackendKind::Local])?;
     let current_passphrase = repository_passphrase()?;
     let new_passphrase = new_repository_passphrase(new_password_file.as_deref())?;
     let runtime = tokio_runtime()?;
     let result = runtime.block_on(rotate_repository_key_slots(
-        &repository.store,
+        repository.store.as_ref(),
         &current_passphrase,
         &new_passphrase,
         &retire_key_slot_ids,
@@ -1824,11 +1843,12 @@ fn key_export_recovery(
     output: PathBuf,
 ) -> Result<Output, CliError> {
     ensure_recovery_output_destination(&output)?;
-    let repository = local_repository(config)?;
+    let repository =
+        repository_store_for_command(config, "key export-recovery", &[CliBackendKind::Local])?;
     let current_passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let result = runtime.block_on(export_repository_recovery(
-        &repository.store,
+        repository.store.as_ref(),
         &current_passphrase,
         KdfParams::default(),
     ))?;
@@ -1864,7 +1884,7 @@ fn backup(
     sources: Vec<PathBuf>,
     tags: Vec<String>,
 ) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "backup", &[CliBackendKind::Local])?;
     let passphrase = repository_passphrase()?;
     let roots = sources
         .iter()
@@ -1876,10 +1896,10 @@ fn backup(
         .collect::<Vec<_>>();
     let started_at_unix_seconds = unix_seconds_now()?;
     let runtime = tokio_runtime()?;
-    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
     let result = runtime.block_on(pipeline.write_snapshot(
-        &repository.store,
+        repository.store.as_ref(),
         &opened.master_key,
         BackupRequest {
             roots,
@@ -1994,16 +2014,16 @@ fn check(
     config: &ResolvedConfig,
     read_data_subset: Option<CheckReadDataSubset>,
 ) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "check", &[CliBackendKind::Local])?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
-    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
     let options = read_data_subset
         .map(CheckRepositoryOptions::subset)
         .unwrap_or_else(CheckRepositoryOptions::full);
     let data = runtime.block_on(pipeline.check_repository_with_options(
-        &repository.store,
+        repository.store.as_ref(),
         &opened.master_key,
         options,
     ))?;
@@ -2017,13 +2037,13 @@ fn forget(
     policy: RetentionPolicy,
     dry_run: bool,
 ) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "forget", &[CliBackendKind::Local])?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
-    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
     let manifests = runtime.block_on(
-        pipeline.read_committed_snapshot_manifests(&repository.store, &opened.master_key),
+        pipeline.read_committed_snapshot_manifests(repository.store.as_ref(), &opened.master_key),
     )?;
     let snapshots = manifests
         .iter()
@@ -2044,28 +2064,30 @@ fn forget(
         return Err(CoreError::ForgetNoSnapshotsMatched.into());
     }
 
-    let marker_writes = if dry_run {
-        BTreeMap::new()
-    } else {
-        runtime
-            .block_on(
-                pipeline.write_snapshot_forget_markers(&repository.store, &forgotten_snapshot_ids),
-            )?
-            .markers
-            .into_iter()
-            .map(|write| (write.snapshot_id, (write.marker_object, write.created)))
-            .collect()
-    };
+    let marker_writes =
+        if dry_run {
+            BTreeMap::new()
+        } else {
+            runtime
+                .block_on(pipeline.write_snapshot_forget_markers(
+                    repository.store.as_ref(),
+                    &forgotten_snapshot_ids,
+                ))?
+                .markers
+                .into_iter()
+                .map(|write| (write.snapshot_id, (write.marker_object, write.created)))
+                .collect()
+        };
     let data = forget_data(policy, plan, dry_run, marker_writes);
 
     emit_forget_command(mode, data)
 }
 
 fn prune(mode: OutputMode, config: &ResolvedConfig, dry_run: bool) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "prune", &[CliBackendKind::Local])?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
-    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
     let options = if dry_run {
         PruneRepositoryOptions::dry_run()
@@ -2073,7 +2095,7 @@ fn prune(mode: OutputMode, config: &ResolvedConfig, dry_run: bool) -> Result<Out
         PruneRepositoryOptions::sweep()
     };
     let data = runtime.block_on(pipeline.prune_repository(
-        &repository.store,
+        repository.store.as_ref(),
         &opened.master_key,
         options,
     ))?;
@@ -2090,7 +2112,7 @@ fn restore(
     dry_run: bool,
     overwrite: bool,
 ) -> Result<Output, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "restore", &[CliBackendKind::Local])?;
     let passphrase = repository_passphrase()?;
     let destination = absolute_source_path(&destination)?;
     let display_destination = redact_for_display(&destination.display().to_string());
@@ -2110,14 +2132,14 @@ fn restore(
     };
 
     let runtime = tokio_runtime()?;
-    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
     let manifests = runtime.block_on(
-        pipeline.read_committed_snapshot_manifests(&repository.store, &opened.master_key),
+        pipeline.read_committed_snapshot_manifests(repository.store.as_ref(), &opened.master_key),
     )?;
     let snapshot_id = select_snapshot(&manifests, &selection)?.snapshot_id.clone();
     let result = runtime.block_on(pipeline.restore_snapshot_to_destination(
-        &repository.store,
+        repository.store.as_ref(),
         &opened.master_key,
         RestoreDestinationRequest {
             snapshot_id,
@@ -2186,14 +2208,10 @@ fn restore(
     emit_restore_command(mode, data)
 }
 
-struct InitRepository {
+struct RepositoryStore {
     url: String,
     backend: CliBackendKind,
     store: Box<dyn ObjectStore>,
-}
-
-struct LocalRepository {
-    store: LocalStore,
 }
 
 struct LoadedRepositorySnapshots {
@@ -2203,55 +2221,90 @@ struct LoadedRepositorySnapshots {
 fn load_repository_snapshots(
     config: &ResolvedConfig,
 ) -> Result<LoadedRepositorySnapshots, CliError> {
-    let repository = local_repository(config)?;
+    let repository = repository_store_for_command(config, "snapshots", &[CliBackendKind::Local])?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
-    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
     let manifests = runtime.block_on(
-        pipeline.read_committed_snapshot_manifests(&repository.store, &opened.master_key),
+        pipeline.read_committed_snapshot_manifests(repository.store.as_ref(), &opened.master_key),
     )?;
 
     Ok(LoadedRepositorySnapshots { manifests })
 }
 
-fn init_repository_store(config: &ResolvedConfig) -> Result<InitRepository, RepositoryError> {
+fn init_repository_store(config: &ResolvedConfig) -> Result<RepositoryStore, RepositoryError> {
+    repository_store_for_command(
+        config,
+        "init",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )
+}
+
+fn repository_store_for_command(
+    config: &ResolvedConfig,
+    command: &'static str,
+    supported_backends: &[CliBackendKind],
+) -> Result<RepositoryStore, RepositoryError> {
     let url = config
         .repository_url
         .as_deref()
         .ok_or(RepositoryError::MissingRepository)?;
+    let target = repository_target(url)?;
 
-    if url.starts_with("s3://") {
-        let s3_config = s3_repository_config(url, &S3RepositoryEnvironment::current())?;
-        let store = S3Store::new(s3_config).map_err(|_| RepositoryError::InvalidS3Config {
-            reason: "S3 client configuration failed".to_owned(),
-        })?;
-        let store = PolicyObjectStore::from_store(store, StoragePolicy::default());
-        return Ok(InitRepository {
-            url: url.to_owned(),
-            backend: CliBackendKind::S3Compatible,
-            store: Box::new(store),
+    if !supported_backends.contains(&target.backend) {
+        return Err(RepositoryError::UnsupportedRepositoryBackend {
+            backend: target.backend,
+            command,
+            value: Redacted::new(url),
         });
     }
 
-    let path = local_repository_path(url)?;
-
-    Ok(InitRepository {
-        url: url.to_owned(),
-        backend: CliBackendKind::Local,
-        store: Box::new(LocalStore::new(path)),
-    })
+    match target.kind {
+        RepositoryTargetKind::Local { path } => Ok(RepositoryStore {
+            url: url.to_owned(),
+            backend: CliBackendKind::Local,
+            store: Box::new(LocalStore::new(path)),
+        }),
+        RepositoryTargetKind::S3 => {
+            let s3_config = s3_repository_config(url, &S3RepositoryEnvironment::current())?;
+            let store = S3Store::new(s3_config).map_err(|_| RepositoryError::InvalidS3Config {
+                reason: "S3 client configuration failed".to_owned(),
+            })?;
+            let store = PolicyObjectStore::from_store(store, StoragePolicy::default());
+            Ok(RepositoryStore {
+                url: url.to_owned(),
+                backend: CliBackendKind::S3Compatible,
+                store: Box::new(store),
+            })
+        }
+    }
 }
 
-fn local_repository(config: &ResolvedConfig) -> Result<LocalRepository, RepositoryError> {
-    let url = config
-        .repository_url
-        .as_deref()
-        .ok_or(RepositoryError::MissingRepository)?;
-    let path = local_repository_path(url)?;
+struct RepositoryTarget {
+    backend: CliBackendKind,
+    kind: RepositoryTargetKind,
+}
 
-    Ok(LocalRepository {
-        store: LocalStore::new(path),
+enum RepositoryTargetKind {
+    Local { path: PathBuf },
+    S3,
+}
+
+fn repository_target(url: &str) -> Result<RepositoryTarget, RepositoryError> {
+    if url.starts_with("s3://") {
+        let _parsed = parse_s3_repository_url(url)?;
+        return Ok(RepositoryTarget {
+            backend: CliBackendKind::S3Compatible,
+            kind: RepositoryTargetKind::S3,
+        });
+    }
+
+    Ok(RepositoryTarget {
+        backend: CliBackendKind::Local,
+        kind: RepositoryTargetKind::Local {
+            path: local_repository_path(url)?,
+        },
     })
 }
 

@@ -28,6 +28,10 @@ Last reviewed: 2026-05-19.
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, and encrypted
   S3-compatible repository bootstraps from `s3://bucket[/prefix]` URLs plus
   explicit S3 endpoint, region, and credential environment variables.
+- CLI repository resolution uses one shared local/S3 target parser before
+  repository command execution. Except for `init`, S3-compatible command
+  paths remain intentionally unsupported and fail with exit code `9` and
+  redacted repository URLs before password or S3 credential access.
 - `ferry backup` opens initialized local repositories, unlocks them with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates encrypted,
   compressed, deduplicated snapshots through the core backup pipeline, and
@@ -205,7 +209,9 @@ The repo is still pre-v1. Restore is wired into the CLI for initialized local
 repositories, directory entries, regular-file contents, Unix symlinks, and
 modified timestamps for restored regular files and directories, but broader
 metadata application and S3-compatible backup/restore/check/forget paths are
-not complete. `ferry check` supports full referenced-chunk verification and
+not complete. S3-compatible repository URLs are parsed through the shared
+repository resolver, but only S3-compatible `init` is implemented. `ferry
+check` supports full referenced-chunk verification and
 deterministic count/percentage referenced-chunk subsets for initialized local
 repositories. `ferry forget` is marker-only for initialized local repositories;
 it hides forgotten snapshots from normal snapshot discovery but does not
@@ -236,31 +242,6 @@ one active milestone end to end over making many small adjacent improvements.
 Choose the first unfinished milestone that can be completed honestly in the
 current session. If it is too large, split it into explicit sub-milestones in
 this section before coding.
-
-### Milestone C - S3 Command Parity Foundation
-
-Goal: Remove local-only CLI assumptions so implemented repository commands can
-open initialized S3-compatible repositories through the existing object-store
-abstraction.
-
-Definition of done:
-
-- Shared repository opening selects local or S3-compatible stores from the
-  resolved repository URL without leaking credentials.
-- Existing S3 init environment rules remain stable and documented.
-- Unsupported S3 command paths fail with documented exit code `9` or `3`
-  until that command is implemented end to end.
-- Tests use fake stores, isolated local abstractions, or gated live S3 paths
-  that cannot touch non-test repositories.
-- Docs continue to distinguish S3 init from S3 backup/restore/check/forget,
-  prune, and key management until each is implemented and verified.
-
-Non-goals:
-
-- Claiming S3 v1 support.
-- Multipart lifecycle changes.
-- Broad cloud-provider support beyond S3-compatible URLs.
-- Implementing every command in one pass.
 
 ### Milestone D - S3 Backup And Read Paths
 
@@ -924,6 +905,26 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone C S3 command parity foundation without
+  claiming S3 data-path support. Replaced the CLI's non-init local-only
+  repository resolver with a shared local/S3 repository target and store
+  resolver, kept S3-compatible `init` on the existing explicit environment
+  contract, and added command-level backend support gates. S3-compatible
+  `backup`, `restore`, `snapshots`, `ls`, `check`, `forget`, `prune`, and key
+  management paths now fail before password or S3 credential access with
+  exit code `9`, `repository_backend_unsupported`, and redacted
+  `s3://<redacted>` repository URLs. Invalid S3 URLs with embedded
+  credentials, query strings, or fragments still fail during URL parsing
+  before use. Updated `README.md`, `docs/cli-contract.md`,
+  `docs/storage.md`, and this file; removed Milestone C from the Active
+  Milestones queue so Milestone D is next. Verified with
+  `cargo test -p fileferry-cli repository_open_failures_are_structured_and_redacted_in_machine_modes --no-fail-fast`,
+  `cargo test -p fileferry-cli s3_repository_commands_fail_as_unsupported_before_credentials_are_required --no-fail-fast`,
+  `cargo test -p fileferry-cli s3_repository --no-fail-fast`,
+  `cargo test -p fileferry-cli init_s3 --no-fail-fast`,
+  `cargo test -p fileferry-core -p fileferry-cli --no-fail-fast`,
+  `cargo fmt --all`, `just fmt`, `just check`, `just test`, `just build`,
+  and `git diff --check`.
 - 2026-05-19 - Completed Milestone B local two-phase prune for initialized
   local repositories by implementing `ferry prune`. The command unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, supports `--dry-run`,

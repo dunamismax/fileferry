@@ -56,6 +56,11 @@ FILEFERRY_PASSWORD
 FILEFERRY_PASSWORD_FILE
 FILEFERRY_NEW_PASSWORD
 FILEFERRY_NEW_PASSWORD_FILE
+FILEFERRY_S3_ENDPOINT
+FILEFERRY_S3_REGION
+FILEFERRY_S3_ACCESS_KEY_ID
+FILEFERRY_S3_SECRET_ACCESS_KEY
+FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE
 FILEFERRY_LOG
 ```
 
@@ -525,6 +530,14 @@ create-only `PutObject` requests.
 Init requires `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` for both local
 and S3-compatible repositories. Human, JSON, and JSONL init output redacts S3
 repository URLs as `s3://<redacted>` and does not emit S3 credentials.
+
+Repository commands now resolve the repository backend through the same
+local/S3 target parser before command execution. S3-compatible URLs with
+embedded credentials, query strings, or fragments are rejected before use.
+Except for `init`, S3-compatible command paths are intentionally unsupported
+until the corresponding data path is implemented and verified; they fail with
+exit code `9` and `repository_backend_unsupported` while redacting the
+repository URL as `s3://<redacted>`.
 
 `ferry backup <SOURCE>...` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an encrypted,
