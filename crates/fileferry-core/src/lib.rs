@@ -3091,6 +3091,7 @@ impl BackupPipeline {
                         relative_path: entry.relative_path.clone(),
                         source_platform: entry.metadata.source_platform,
                         modified: entry.metadata.modified.clone(),
+                        unix_mode: entry.metadata.unix.as_ref().map(|metadata| metadata.mode),
                     });
                     continue;
                 }
@@ -3218,6 +3219,7 @@ impl BackupPipeline {
                 contents,
                 source_platform: entry.metadata.source_platform,
                 modified: entry.metadata.modified.clone(),
+                unix_mode: entry.metadata.unix.as_ref().map(|metadata| metadata.mode),
             });
         }
 
@@ -3294,6 +3296,7 @@ impl BackupPipeline {
                 destination_path,
                 source_platform: directory.source_platform,
                 modified: directory.modified,
+                unix_mode: directory.unix_mode,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -3320,6 +3323,7 @@ impl BackupPipeline {
                 bytes: byte_len,
                 source_platform: file.source_platform,
                 modified: file.modified,
+                unix_mode: file.unix_mode,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -3345,13 +3349,28 @@ impl BackupPipeline {
             });
         }
 
-        let metadata_planned = planned_files.len() + planned_directories.len();
+        let metadata_planned = planned_files.len()
+            + planned_directories.len()
+            + planned_files
+                .iter()
+                .filter(|file| file.unix_mode.is_some())
+                .count()
+            + planned_directories
+                .iter()
+                .filter(|directory| directory.unix_mode.is_some())
+                .count();
         if request.dry_run {
             for file in &planned_files {
                 plan_restored_modified_timestamp(
                     &file.relative_path,
                     file.source_platform,
                     &file.modified,
+                    &mut metadata_warnings,
+                );
+                plan_restored_unix_mode(
+                    &file.relative_path,
+                    file.source_platform,
+                    file.unix_mode,
                     &mut metadata_warnings,
                 );
             }
@@ -3361,6 +3380,12 @@ impl BackupPipeline {
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.modified,
+                    &mut metadata_warnings,
+                );
+                plan_restored_unix_mode(
+                    &directory.relative_path,
+                    directory.source_platform,
+                    directory.unix_mode,
                     &mut metadata_warnings,
                 );
             }
@@ -3374,6 +3399,13 @@ impl BackupPipeline {
                     RestoredMetadataTarget::RegularFile,
                     &mut metadata_warnings,
                 );
+                metadata_applied += apply_restored_unix_mode(
+                    &file.destination_path,
+                    &file.relative_path,
+                    file.source_platform,
+                    file.unix_mode,
+                    &mut metadata_warnings,
+                );
             }
 
             for directory in &planned_directories {
@@ -3383,6 +3415,13 @@ impl BackupPipeline {
                     directory.source_platform,
                     &directory.modified,
                     RestoredMetadataTarget::Directory,
+                    &mut metadata_warnings,
+                );
+                metadata_applied += apply_restored_unix_mode(
+                    &directory.destination_path,
+                    &directory.relative_path,
+                    directory.source_platform,
+                    directory.unix_mode,
                     &mut metadata_warnings,
                 );
             }
@@ -3901,6 +3940,7 @@ pub struct RestoredDirectory {
     pub relative_path: PathBuf,
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
+    pub unix_mode: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3909,6 +3949,7 @@ pub struct RestoredFile {
     pub contents: Vec<u8>,
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
+    pub unix_mode: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3955,6 +3996,7 @@ pub struct RestoreDestinationDirectory {
     pub destination_path: PathBuf,
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
+    pub unix_mode: Option<u32>,
     pub action: RestoreDestinationAction,
 }
 
@@ -3965,6 +4007,7 @@ pub struct RestoreDestinationFile {
     pub bytes: u64,
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
+    pub unix_mode: Option<u32>,
     pub action: RestoreDestinationAction,
     pub verified: bool,
 }
@@ -4424,6 +4467,9 @@ enum RestoredMetadataTarget {
     Directory,
 }
 
+const RESTORABLE_UNIX_MODE_BITS: u32 = 0o777;
+const UNRESTORED_UNIX_SPECIAL_MODE_BITS: u32 = 0o7000;
+
 fn apply_restored_modified_timestamp(
     destination_path: &Path,
     relative_path: &Path,
@@ -4461,6 +4507,92 @@ fn plan_restored_modified_timestamp(
     warnings: &mut Vec<RestoreMetadataWarning>,
 ) {
     let _ = restored_modified_time_or_warn(relative_path, source_platform, modified, warnings);
+}
+
+fn apply_restored_unix_mode(
+    destination_path: &Path,
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    unix_mode: Option<u32>,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) -> usize {
+    let Some(mode) = unix_mode else {
+        return 0;
+    };
+
+    warn_unrestored_unix_mode_bits(relative_path, source_platform, mode, warnings);
+
+    if !destination_supports_unix_mode() {
+        warnings.push(RestoreMetadataWarning {
+            relative_path: relative_path.to_path_buf(),
+            namespace: "unix",
+            field: "mode",
+            source_platform,
+            destination_platform: current_platform(),
+            reason: "unix mode cannot be represented on this destination platform".to_owned(),
+        });
+        return 0;
+    }
+
+    match set_restored_unix_mode(destination_path, mode & RESTORABLE_UNIX_MODE_BITS) {
+        Ok(()) => 1,
+        Err(source) => {
+            warnings.push(RestoreMetadataWarning {
+                relative_path: relative_path.to_path_buf(),
+                namespace: "unix",
+                field: "mode",
+                source_platform,
+                destination_platform: current_platform(),
+                reason: format!("unix mode could not be applied: {source}"),
+            });
+            0
+        }
+    }
+}
+
+fn plan_restored_unix_mode(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    unix_mode: Option<u32>,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    let Some(mode) = unix_mode else {
+        return;
+    };
+
+    warn_unrestored_unix_mode_bits(relative_path, source_platform, mode, warnings);
+
+    if !destination_supports_unix_mode() {
+        warnings.push(RestoreMetadataWarning {
+            relative_path: relative_path.to_path_buf(),
+            namespace: "unix",
+            field: "mode",
+            source_platform,
+            destination_platform: current_platform(),
+            reason: "unix mode cannot be represented on this destination platform".to_owned(),
+        });
+    }
+}
+
+fn warn_unrestored_unix_mode_bits(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    mode: u32,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    let special_bits = mode & UNRESTORED_UNIX_SPECIAL_MODE_BITS;
+    if special_bits == 0 {
+        return;
+    }
+
+    warnings.push(RestoreMetadataWarning {
+        relative_path: relative_path.to_path_buf(),
+        namespace: "unix",
+        field: "mode",
+        source_platform,
+        destination_platform: current_platform(),
+        reason: format!("unix mode special bits {special_bits:#o} are not restored"),
+    });
 }
 
 fn restored_modified_time_or_warn(
@@ -4538,6 +4670,31 @@ fn set_restored_modified_timestamp(
         RestoredMetadataTarget::Directory => fs::File::open(destination_path)?,
     };
     file.set_times(fs::FileTimes::new().set_modified(modified_time))
+}
+
+#[cfg(unix)]
+const fn destination_supports_unix_mode() -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+const fn destination_supports_unix_mode() -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn set_restored_unix_mode(destination_path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(destination_path, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_restored_unix_mode(_destination_path: &Path, _mode: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "unix mode is not supported on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -5167,6 +5324,10 @@ mod tests {
         (0..len)
             .map(|index| ((index * 31 + seed * 17 + index / 5) % 251) as u8)
             .collect()
+    }
+
+    fn metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
+        if cfg!(unix) { entries * 2 } else { entries }
     }
 
     struct ReverseListingStore<'a> {
@@ -7489,7 +7650,10 @@ mod tests {
 
         assert_eq!(restored.snapshot_id, result.snapshot_id);
         assert_eq!(restored.files.len(), 2);
-        assert_eq!(restored.metadata_planned, 3);
+        assert_eq!(
+            restored.metadata_planned,
+            metadata_field_count_for_file_and_directory_entries(3)
+        );
         assert_eq!(restored.bytes, 6);
         assert_eq!(restored.verified_files, 2);
         assert!(restored.files.iter().all(|file| file.verified));
@@ -7557,8 +7721,14 @@ mod tests {
             .await
             .expect("destination restore");
 
-        assert_eq!(restored.metadata_applied, 2);
-        assert_eq!(restored.metadata_planned, 2);
+        assert_eq!(
+            restored.metadata_applied,
+            metadata_field_count_for_file_and_directory_entries(2)
+        );
+        assert_eq!(
+            restored.metadata_planned,
+            metadata_field_count_for_file_and_directory_entries(2)
+        );
         assert_eq!(restored.metadata_warnings, Vec::new());
         assert_eq!(
             capture_metadata(destination.path().join("docs"))
@@ -7571,6 +7741,76 @@ mod tests {
                 .expect("restored file metadata")
                 .modified,
             MetadataValue::Captured(expected)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_applies_unix_permission_bits() {
+        use fileferry_testkit::FakeObjectStore;
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let docs = source.path().join("docs");
+        let file = docs.join("one.txt");
+        fs::create_dir(&docs).expect("create docs");
+        fs::write(&file, b"one").expect("write one");
+        fs::set_permissions(&docs, fs::Permissions::from_mode(0o750))
+            .expect("set source directory mode");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640))
+            .expect("set source file mode");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: vec![PathBuf::from("docs")],
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert_eq!(restored.metadata_applied, 4);
+        assert_eq!(restored.metadata_planned, 4);
+        assert_eq!(restored.metadata_warnings, Vec::new());
+        assert_eq!(
+            fs::metadata(destination.path().join("docs"))
+                .expect("restored directory metadata")
+                .permissions()
+                .mode()
+                & RESTORABLE_UNIX_MODE_BITS,
+            0o750
+        );
+        assert_eq!(
+            fs::metadata(destination.path().join("docs/one.txt"))
+                .expect("restored file metadata")
+                .permissions()
+                .mode()
+                & RESTORABLE_UNIX_MODE_BITS,
+            0o640
         );
     }
 
@@ -7646,6 +7886,42 @@ mod tests {
                         .to_owned(),
                 },
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_restored_unix_mode_masks_file_type_and_warns_for_special_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"sample").expect("write sample");
+        let mut warnings = Vec::new();
+
+        let applied = apply_restored_unix_mode(
+            &path,
+            Path::new("sample.txt"),
+            current_platform(),
+            Some(0o104755),
+            &mut warnings,
+        );
+
+        assert_eq!(applied, 1);
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & RESTORABLE_UNIX_MODE_BITS,
+            0o755
+        );
+        assert_eq!(
+            warnings,
+            vec![RestoreMetadataWarning {
+                relative_path: PathBuf::from("sample.txt"),
+                namespace: "unix",
+                field: "mode",
+                source_platform: current_platform(),
+                destination_platform: current_platform(),
+                reason: "unix mode special bits 0o4000 are not restored".to_owned(),
+            }]
         );
     }
 
@@ -7808,7 +8084,10 @@ mod tests {
 
         assert!(restored.dry_run);
         assert_eq!(restored.verified_files, 0);
-        assert_eq!(restored.metadata_planned, 2);
+        assert_eq!(
+            restored.metadata_planned,
+            metadata_field_count_for_file_and_directory_entries(2)
+        );
         assert_eq!(restored.metadata_applied, 0);
         assert_eq!(restored.metadata_warnings, Vec::new());
         assert_eq!(restored.files.len(), 1);

@@ -52,20 +52,21 @@ Last reviewed: 2026-05-20.
 - `ferry restore` opens initialized local and S3-compatible repositories,
   unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects
   snapshots by latest, snapshot id, or tag, restores all or path-scoped
-  directory entries, regular-file contents, Unix symlinks, and captured
-  modified timestamps for restored regular files and directories through the
-  core restore pipeline, enforces destination fail-if-exists safety unless
+  directory entries, regular-file contents, Unix symlinks, captured modified
+  timestamps for restored regular files and directories, and captured
+  regular-file and directory Unix permission bits where representable through
+  the core restore pipeline, enforces destination fail-if-exists safety unless
   `--overwrite` is supplied for regular files, preflights destination safety
   for selected directories, regular files, and symlinks before destination
   writes, rejects requested snapshot-relative restore paths that do not match
   manifest entries before destination writes, creates missing parent
   directories for path-scoped symlink restores after destination safety
   preflight, supports dry-run reporting including planned modified timestamp
-  metadata and timestamp planning warnings, returns partial-success exit code
-  `10` when metadata warnings are produced, and exposes tested human, JSON,
-  and JSONL-safe output paths. Authenticated manifests with invalid entry
-  topology are rejected as integrity failures before restore destination
-  writes.
+  metadata, captured Unix permission metadata, and metadata planning warnings,
+  returns partial-success exit code `10` when metadata warnings are produced,
+  and exposes tested human, JSON, and JSONL-safe output paths. Authenticated
+  manifests with invalid entry topology are rejected as integrity failures
+  before restore destination writes.
 - `ferry check` opens initialized local and S3-compatible repositories,
   unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
   authenticates committed manifests and chunk indexes, reads/decompresses
@@ -207,10 +208,10 @@ Last reviewed: 2026-05-20.
   timestamps, snapshot selection by id/tag/latest, and path-scoped regular-file
   content reassembly from encrypted chunks.
 - `fileferry-core` can restore directory entries, regular-file content, Unix
-  symlinks, and regular-file/directory modified timestamps to a destination
+  symlinks, regular-file/directory modified timestamps, and regular-file and
+  directory Unix permission bits where representable to a destination
   directory with destination safety checks, explicit overwrite policy, dry-run
-  reporting, timestamp metadata planning, and optional byte-for-byte
-  verification.
+  reporting, metadata planning, and optional byte-for-byte verification.
 - `fileferry-core` writes commit markers after encrypted snapshot manifests,
   can discover committed manifests from those markers, and has tested snapshot
   summary and immediate-entry listing primitives for future `snapshots` and
@@ -227,7 +228,8 @@ Last reviewed: 2026-05-20.
 
 The repo is still pre-v1. Restore is wired into the CLI for initialized local
 and S3-compatible repositories, directory entries, regular-file contents, Unix
-symlinks, and modified timestamps for restored regular files and directories,
+symlinks, modified timestamps for restored regular files and directories, and
+captured regular-file and directory Unix permission bits where representable,
 but broader metadata application is not complete.
 S3-compatible repository URLs are parsed through the shared repository
 resolver, and S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`,
@@ -858,6 +860,22 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-20 - Completed a Milestone G Unix permission restore slice without
+  claiming broader platform support. Restore now carries captured Unix mode
+  metadata for regular files and directories through core restore planning,
+  applies ordinary permission bits (`0o777`) on Unix destinations after entry
+  writes, counts captured Unix mode fields in `metadata_planned`, and records
+  structured `unix`/`mode` warnings for unrepresentable destination platforms,
+  apply failures, or captured special mode bits that are intentionally not
+  restored. CLI restore tests now expect the additional Unix metadata fields
+  in JSON/JSONL output on Unix and verify restored file permission bits
+  through the CLI. Updated `README.md`, `docs/cli-contract.md`,
+  `docs/platform-metadata.md`, and this file. No live S3 gates were enabled in
+  this session. Verified with `cargo test -p fileferry-core
+  restore_snapshot_to_destination --no-fail-fast`, `cargo test -p
+  fileferry-cli restore_ --no-fail-fast`, `just fmt`, `cargo test -p
+  fileferry-platform -p fileferry-core -p fileferry-cli --no-fail-fast`,
+  `just check`, `just test`, `just build`, and `git diff --check`.
 - 2026-05-20 - Completed a Milestone G metadata warning contract hardening
   slice without claiming broader platform support. Captured entry metadata now
   records the source platform for new manifests and deserializes older v0

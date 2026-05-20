@@ -366,7 +366,9 @@ commands work for initialized local and S3-compatible repositories.
 Restore currently covers directory
 entries, regular-file contents, Unix symlinks, and modified timestamps for
 restored regular files and directories from initialized local and
-S3-compatible repositories. Other metadata application is not implemented yet.
+S3-compatible repositories. On Unix destinations it also restores captured
+regular-file and directory permission bits where representable; ownership,
+special mode bits, and other metadata application are not implemented yet.
 Check failures
 in JSON and JSONL modes now
 emit machine-readable failure envelopes with stable codes and object-key

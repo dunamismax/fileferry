@@ -91,6 +91,14 @@ fn file_count_under(path: &Path) -> usize {
     count
 }
 
+fn expected_restore_metadata_fields(entries_with_file_or_directory_metadata: usize) -> usize {
+    if cfg!(unix) {
+        entries_with_file_or_directory_metadata * 2
+    } else {
+        entries_with_file_or_directory_metadata
+    }
+}
+
 fn set_modified_time(path: &Path, modified: SystemTime) {
     let file = fs::OpenOptions::new()
         .write(true)
@@ -1603,8 +1611,14 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     assert_eq!(restore["data"]["files_written"], 1);
     assert_eq!(restore["data"]["directories_written"], 0);
     assert_eq!(restore["data"]["symlinks_written"], 0);
-    assert_eq!(restore["data"]["metadata_planned"], 1);
-    assert_eq!(restore["data"]["metadata_applied"], 1);
+    assert_eq!(
+        restore["data"]["metadata_planned"],
+        expected_restore_metadata_fields(1)
+    );
+    assert_eq!(
+        restore["data"]["metadata_applied"],
+        expected_restore_metadata_fields(1)
+    );
     assert_eq!(restore["data"]["metadata_warnings"], serde_json::json!([]));
     assert_eq!(restore["data"]["bytes_written"], 4);
     assert_eq!(restore["data"]["verified_files"], 1);
@@ -1649,7 +1663,10 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
         backup["data"]["snapshot_id"]
     );
     assert_eq!(dry_run["data"]["dry_run"], true);
-    assert_eq!(dry_run["data"]["metadata_planned"], 4);
+    assert_eq!(
+        dry_run["data"]["metadata_planned"],
+        expected_restore_metadata_fields(4)
+    );
     assert_eq!(dry_run["data"]["metadata_applied"], 0);
     assert_eq!(dry_run["data"]["metadata_warnings"], serde_json::json!([]));
     assert_eq!(dry_run["data"]["verified_files"], 0);
@@ -1680,6 +1697,7 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
 #[cfg(unix)]
 #[test]
 fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1692,6 +1710,8 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
     fs::create_dir(&source).expect("create source");
     fs::create_dir_all(source.join("empty/nested")).expect("create empty tree");
     fs::write(source.join("target.txt"), b"target").expect("write target");
+    fs::set_permissions(source.join("target.txt"), fs::Permissions::from_mode(0o640))
+        .expect("set source file mode");
     symlink("target.txt", source.join("target.link")).expect("create symlink");
     let backup = backup_source(&repo_url, passphrase, &source);
 
@@ -1720,8 +1740,14 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
     assert_eq!(restore["data"]["directories_written"], 3);
     assert_eq!(restore["data"]["files_written"], 1);
     assert_eq!(restore["data"]["symlinks_written"], 1);
-    assert_eq!(restore["data"]["metadata_planned"], 4);
-    assert_eq!(restore["data"]["metadata_applied"], 4);
+    assert_eq!(
+        restore["data"]["metadata_planned"],
+        expected_restore_metadata_fields(4)
+    );
+    assert_eq!(
+        restore["data"]["metadata_applied"],
+        expected_restore_metadata_fields(4)
+    );
     assert_eq!(restore["data"]["metadata_warnings"], serde_json::json!([]));
     assert!(destination.join("empty/nested").is_dir());
     assert_eq!(
@@ -1731,6 +1757,14 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
     assert_eq!(
         fs::read_link(destination.join("target.link")).expect("restored symlink"),
         std::path::PathBuf::from("target.txt")
+    );
+    assert_eq!(
+        fs::metadata(destination.join("target.txt"))
+            .expect("restored target metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o640
     );
 
     let blocked_destination = temp.path().join("blocked");
@@ -1855,8 +1889,14 @@ fn restore_jsonl_emits_progress_events_without_stderr() {
     let completed: Value = serde_json::from_slice(lines[7]).expect("completed event");
     assert_eq!(completed["event"], "command_completed");
     assert_eq!(completed["data"]["files_written"], 1);
-    assert_eq!(completed["data"]["metadata_planned"], 2);
-    assert_eq!(completed["data"]["metadata_applied"], 2);
+    assert_eq!(
+        completed["data"]["metadata_planned"],
+        expected_restore_metadata_fields(2)
+    );
+    assert_eq!(
+        completed["data"]["metadata_applied"],
+        expected_restore_metadata_fields(2)
+    );
 }
 
 #[test]
