@@ -4,8 +4,9 @@ FileFerry storage is object-oriented. Backends store immutable byte objects by
 validated repository object keys; higher layers decide what those bytes mean.
 
 This document describes the current storage contract. It is not the complete
-v1 storage design yet, and it does not claim that backup or restore are
-implemented.
+v1 storage design yet, and it does not claim S3-compatible forget, prune, key
+management, release support, or platform support beyond the evidence stated
+here.
 
 ## Object Keys
 
@@ -163,9 +164,10 @@ of the endpoint, such as `us-west-001`. The current Backblaze test disables
 conditional create because Backblaze returns `501 NotImplemented` for the
 `If-None-Match` create-only request header used by `object_store`.
 
-## S3-Compatible CLI Init
+## S3-Compatible CLI Commands
 
-`ferry init` accepts S3-compatible repository URLs in this form:
+`ferry init`, `ferry backup`, `ferry snapshots`, `ferry ls`, `ferry restore`,
+and `ferry check` accept S3-compatible repository URLs in this form:
 
 ```sh
 FILEFERRY_PASSWORD='test-passphrase' \
@@ -188,23 +190,31 @@ development path because Backblaze rejects the create-only `PutObject` header
 used by the default conditional-create mode. That fallback is idempotent for
 same-byte retries but is not race-safe for concurrent writers.
 
-The CLI has a separate gated live init test. It runs only when
+The CLI has separate gated live init and data-path tests. The init test runs
+only when
 `FILEFERRY_S3_INIT_INTEGRATION=1` and the same S3 environment variables plus
 `FILEFERRY_S3_TEST_PREFIX` are set. The test appends a unique
 `cli-init-...` suffix under `FILEFERRY_S3_TEST_PREFIX`, initializes only that
 repository prefix, and deletes the `bootstrap` object it creates.
 
+The data-path test runs only when `FILEFERRY_S3_DATA_INTEGRATION=1` and the
+same S3 environment variables plus `FILEFERRY_S3_TEST_PREFIX` are set. It
+appends a unique `cli-data-...` suffix, initializes that repository prefix,
+runs backup, snapshots, ls, restore, and check through the `ferry` binary,
+deletes a referenced manifest to verify missing-object failure behavior, and
+then deletes objects under only that unique repository prefix.
+
 ## Not Implemented Yet
 
 S3-compatible storage now has the initial object-store adapter and a live
-round-trip test gate, and `ferry init` can create S3-compatible encrypted
-repository bootstraps. Common retry, timeout, backoff, and concurrency
-behavior exists in the policy wrapper. CLI repository resolution uses the same
-local/S3 target parser for repository commands, but S3-compatible backup,
-restore, snapshots, ls, check, forget, prune, and key-management commands are
+round-trip test gate, and `ferry init`, `ferry backup`, `ferry snapshots`,
+`ferry ls`, `ferry restore`, and `ferry check` use S3-compatible encrypted
+repositories through the same core repository pipeline as the local backend.
+Common retry, timeout, backoff, and concurrency behavior exists in the policy
+wrapper. S3-compatible `forget`, `prune`, and key-management commands are
 still intentionally unsupported and fail with exit code `9` before credential
-or password access. Before S3 storage is marked complete it still needs
-explicit provider capability checks, stale-or-surprising listing tests,
-missing-object tests, partial upload behavior, permission-error tests,
-multipart cleanup guidance, and provider evidence beyond the initial
+or password access. Before S3 storage is marked complete it still needs live
+provider evidence for the data-path gate, explicit provider capability checks,
+stale-or-surprising listing tests, partial upload behavior, permission-error
+tests, multipart cleanup guidance, and provider evidence beyond the initial
 Backblaze-compatible round trip.

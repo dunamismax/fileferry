@@ -2434,24 +2434,26 @@ fn repository_open_failures_are_structured_and_redacted_in_machine_modes() {
     assert_eq!(uninitialized["data"]["exit_code"], 3);
 
     let s3_url = "s3://test-bucket/team/repo";
-    let unsupported_output = fileferry()
+    let missing_s3_env_output = fileferry()
         .args(["--repo", s3_url, "--json", "check"])
         .assert()
-        .code(9)
+        .code(2)
         .stderr("")
         .get_output()
         .stdout
         .clone();
-    let unsupported_text = String::from_utf8(unsupported_output.clone()).expect("unsupported utf8");
-    let unsupported: Value = serde_json::from_slice(&unsupported_output).expect("unsupported json");
+    let missing_s3_env_text =
+        String::from_utf8(missing_s3_env_output.clone()).expect("missing s3 env utf8");
+    let missing_s3_env: Value =
+        serde_json::from_slice(&missing_s3_env_output).expect("missing s3 env json");
     assert_eq!(
-        unsupported["data"]["code"],
-        "repository_backend_unsupported"
+        missing_s3_env["data"]["code"],
+        "repository_s3_environment_missing"
     );
-    assert_eq!(unsupported["data"]["exit_code"], 9);
-    assert!(unsupported_text.contains("s3://<redacted>"));
-    assert!(!unsupported_text.contains("test-bucket"));
-    assert!(!unsupported_text.contains("team/repo"));
+    assert_eq!(missing_s3_env["data"]["exit_code"], 2);
+    assert!(missing_s3_env_text.contains("FILEFERRY_S3_ENDPOINT"));
+    assert!(!missing_s3_env_text.contains("test-bucket"));
+    assert!(!missing_s3_env_text.contains("team/repo"));
 
     init_repo(&repo_url, passphrase);
     let wrong_password_output = fileferry()
@@ -2493,14 +2495,12 @@ fn repository_open_failures_are_structured_and_redacted_in_machine_modes() {
 }
 
 #[test]
-fn s3_repository_commands_fail_as_unsupported_before_credentials_are_required() {
+fn s3_data_path_commands_require_s3_environment_before_password() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source = temp.path().join("source");
     let destination = temp.path().join("restore");
-    let recovery = temp.path().join("recovery.ffrec");
     fs::create_dir(&source).expect("source dir");
 
-    let key_slot_id = "a".repeat(64);
     let cases: Vec<(&str, Vec<String>)> = vec![
         (
             "backup",
@@ -2513,6 +2513,45 @@ fn s3_repository_commands_fail_as_unsupported_before_credentials_are_required() 
             vec!["restore".to_owned(), destination.display().to_string()],
         ),
         ("check", vec!["check".to_owned()]),
+    ];
+
+    for (command_name, command_args) in cases {
+        let mut args = vec![
+            "--repo".to_owned(),
+            "s3://test-bucket/team/repo".to_owned(),
+            "--json".to_owned(),
+        ];
+        args.extend(command_args);
+
+        let output = fileferry()
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr("")
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(output.clone()).expect("missing env utf8");
+        let failure: Value = serde_json::from_slice(&output).expect("missing env json");
+
+        assert_eq!(failure["command"], command_name);
+        assert_eq!(failure["status"], "failure");
+        assert_eq!(failure["data"]["code"], "repository_s3_environment_missing");
+        assert_eq!(failure["data"]["exit_code"], 2);
+        assert!(text.contains("FILEFERRY_S3_ENDPOINT"));
+        assert!(!text.contains("test-bucket"));
+        assert!(!text.contains("team/repo"));
+        assert!(!text.contains("FILEFERRY_PASSWORD"));
+        assert!(!text.contains("FILEFERRY_S3_ACCESS_KEY_ID"));
+    }
+}
+
+#[test]
+fn unsupported_s3_repository_commands_fail_before_credentials_are_required() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let recovery = temp.path().join("recovery.ffrec");
+    let key_slot_id = "a".repeat(64);
+    let cases: Vec<(&str, Vec<String>)> = vec![
         (
             "forget",
             vec![
@@ -3002,8 +3041,194 @@ fn init_s3_live_integration_when_env_is_enabled() {
         .expect("cleanup bootstrap");
 }
 
+#[test]
+fn s3_data_path_live_integration_when_env_is_enabled() {
+    if std::env::var("FILEFERRY_S3_DATA_INTEGRATION")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+
+    let bucket = required_env("FILEFERRY_S3_BUCKET");
+    let endpoint = required_env("FILEFERRY_S3_ENDPOINT");
+    let region = required_env("FILEFERRY_S3_REGION");
+    let access_key_id = required_env("FILEFERRY_S3_ACCESS_KEY_ID");
+    let secret_access_key = required_env("FILEFERRY_S3_SECRET_ACCESS_KEY");
+    let test_prefix = required_env("FILEFERRY_S3_TEST_PREFIX");
+    let repo_prefix = format!("{test_prefix}/cli-data-{}", unique_test_id());
+    let repo_url = format!("s3://{bucket}/{repo_prefix}");
+    let passphrase = "s3-data-test-passphrase";
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    let destination = temp.path().join("restore");
+    fs::create_dir_all(source.join("nested")).expect("create source tree");
+    fs::write(source.join("sample.txt"), b"s3 sample").expect("write sample");
+    fs::write(source.join("nested").join("keep.txt"), b"s3 nested").expect("write nested");
+
+    s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "init"])
+        .assert()
+        .success()
+        .stderr("");
+
+    let backup_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "backup",
+            "--tag",
+            "s3-data",
+            source.to_str().expect("source path"),
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let backup_text = String::from_utf8(backup_output.clone()).expect("backup utf8");
+    let backup: Value = serde_json::from_slice(&backup_output).expect("backup json");
+    let snapshot_id = backup["data"]["snapshot_id"].as_str().expect("snapshot id");
+    assert_eq!(backup["command"], "backup");
+    assert_eq!(backup["status"], "success");
+    assert_eq!(backup["data"]["tags"], json!(["s3-data"]));
+    assert_eq!(backup["data"]["files_backed_up"], 2);
+    assert!(!backup_text.contains(&bucket));
+    assert!(!backup_text.contains(&repo_prefix));
+    assert!(!backup_text.contains(&access_key_id));
+    assert!(!backup_text.contains(&secret_access_key));
+
+    let snapshots_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(
+        snapshots["data"]["snapshots"][0]["snapshot_id"],
+        snapshot_id
+    );
+
+    let ls_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "ls",
+            "--snapshot",
+            snapshot_id,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let listing: Value = serde_json::from_slice(&ls_output).expect("ls json");
+    let listed_paths = listing["data"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("entry path"))
+        .collect::<Vec<_>>();
+    assert!(listed_paths.contains(&"nested"));
+    assert!(listed_paths.contains(&"sample.txt"));
+
+    let restore_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "restore",
+            "--snapshot",
+            snapshot_id,
+            destination.to_str().expect("destination path"),
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let restore: Value = serde_json::from_slice(&restore_output).expect("restore json");
+    assert_eq!(restore["data"]["snapshot_id"], snapshot_id);
+    assert_eq!(
+        fs::read(destination.join("sample.txt")).expect("restored sample"),
+        b"s3 sample"
+    );
+    assert_eq!(
+        fs::read(destination.join("nested").join("keep.txt")).expect("restored nested"),
+        b"s3 nested"
+    );
+
+    let check_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "check"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let check: Value = serde_json::from_slice(&check_output).expect("check json");
+    assert_eq!(check["status"], "success");
+    assert!(check["data"]["chunk_objects_checked"].as_u64().unwrap_or(0) > 0);
+
+    let manifest_key = format!("objects/manifest/{}/{}", &snapshot_id[..2], snapshot_id);
+    let cleanup_store = s3_cleanup_store(
+        &bucket,
+        &region,
+        &endpoint,
+        &access_key_id,
+        &secret_access_key,
+        &repo_prefix,
+    );
+    let runtime = tokio::runtime::Runtime::new().expect("s3 data cleanup runtime");
+    runtime
+        .block_on(cleanup_store.delete(&ObjectKey::new(&manifest_key).expect("manifest key")))
+        .expect("delete manifest for missing-object check");
+
+    let missing_manifest_output =
+        s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+            .env("FILEFERRY_PASSWORD", passphrase)
+            .args(["--repo", &repo_url, "--json", "check"])
+            .assert()
+            .code(6)
+            .stderr("")
+            .get_output()
+            .stdout
+            .clone();
+    let missing_manifest: Value =
+        serde_json::from_slice(&missing_manifest_output).expect("missing manifest json");
+    assert_eq!(
+        missing_manifest["data"]["code"],
+        "repository_referenced_object_missing"
+    );
+    assert_eq!(missing_manifest["data"]["object_key"], manifest_key);
+
+    let keys = runtime
+        .block_on(cleanup_store.list_prefix(&ObjectKeyPrefix::root()))
+        .expect("list s3 data cleanup keys");
+    for key in keys {
+        runtime
+            .block_on(cleanup_store.delete(&key))
+            .expect("delete s3 data cleanup key");
+    }
+}
+
 fn required_env(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for S3 init integration"))
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for S3 integration"))
 }
 
 fn unique_test_id() -> String {
@@ -3012,6 +3237,43 @@ fn unique_test_id() -> String {
         .expect("time")
         .as_nanos();
     format!("{}-{nanos}", std::process::id())
+}
+
+fn s3_fileferry(
+    endpoint: &str,
+    region: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+) -> Command {
+    let mut command = fileferry();
+    command
+        .env("FILEFERRY_S3_ENDPOINT", endpoint)
+        .env("FILEFERRY_S3_REGION", region)
+        .env("FILEFERRY_S3_ACCESS_KEY_ID", access_key_id)
+        .env("FILEFERRY_S3_SECRET_ACCESS_KEY", secret_access_key)
+        .env("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE", "1");
+    command
+}
+
+fn s3_cleanup_store(
+    bucket: &str,
+    region: &str,
+    endpoint: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+    repo_prefix: &str,
+) -> S3Store {
+    let cleanup_config = S3StoreConfig::new(
+        bucket.to_owned(),
+        region.to_owned(),
+        endpoint.to_owned(),
+        access_key_id.to_owned(),
+        secret_access_key.to_owned(),
+        ObjectKeyPrefix::new(repo_prefix.to_owned()).expect("s3 cleanup prefix"),
+    )
+    .expect("s3 cleanup config")
+    .with_conditional_create(false);
+    S3Store::new(cleanup_config).expect("s3 cleanup store")
 }
 
 fn find_first_file(root: std::path::PathBuf) -> std::path::PathBuf {

@@ -353,8 +353,8 @@ The repo contains the initial Rust workspace, crate boundaries, CLI shell, CI
 workflow, planning docs, tested crypto primitives, local and S3-compatible
 storage groundwork, and core backup/restore/check primitives. The CLI
 currently exposes `version`, `completion`, local and S3-compatible repository
-`init`, and local repository `backup`, `restore`, `snapshots`, `ls`, and
-`check`; it also exposes local repository `forget` as marker-only retention
+`init`, `backup`, `restore`, `snapshots`, `ls`, and `check`; it also exposes
+local repository `forget` as marker-only retention
 state and local repository `prune` as a two-phase delete path for objects
 reachable only from forgotten snapshots, `ferry key add` as an append-only
 passphrase key-slot addition command, and `ferry key remove` as marker-based
@@ -365,18 +365,18 @@ and marker-removes explicitly selected external key slots, plus
 recovery-package export protected by the current repository passphrase.
 Restore currently covers directory
 entries, regular-file contents, Unix symlinks, and modified timestamps for
-restored regular files and directories from initialized local repositories.
-S3-compatible backup, restore, snapshots, ls, check, forget, prune, and key
-management are not implemented yet; those command paths are explicitly
-reported as unsupported backend capability failures while S3 repository URLs
-remain redacted. Other metadata application is not implemented yet. Check
-failures in JSON and JSONL modes now
+restored regular files and directories from initialized local and
+S3-compatible repositories. S3-compatible forget, prune, and key management
+are not implemented yet; those command paths are explicitly reported as
+unsupported backend capability failures while S3 repository URLs remain
+redacted. Other metadata application is not implemented yet. Check failures
+in JSON and JSONL modes now
 emit machine-readable failure envelopes with stable codes and object-key
 context where available.
 `ferry check --read-data-subset <N|PERCENT>` reads a deterministic subset of
-referenced chunk data for initialized local repositories. `ferry forget`
-evaluates retention keep rules, supports dry-run, writes forget markers only
-when not in dry-run, and does not delete objects itself. `ferry prune` is
+referenced chunk data for initialized local and S3-compatible repositories.
+`ferry forget` evaluates retention keep rules, supports dry-run, writes forget
+markers only when not in dry-run, and does not delete objects itself. `ferry prune` is
 local-only, supports dry-run, writes encrypted prune plan/completion state,
 resumes an incomplete sweep when repository commit/forget state still
 matches the marked plan, and deletes only forgotten-snapshot commit markers,

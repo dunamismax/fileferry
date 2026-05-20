@@ -58,6 +58,19 @@ The CLI test creates a unique `cli-init-...` repository prefix under
 `FILEFERRY_S3_TEST_PREFIX`, runs `ferry init`, verifies the JSON output is
 redacted, and deletes only the `bootstrap` object it created.
 
+The CLI S3 data-path integration test uses the same variables, plus its own
+opt-in gate:
+
+```sh
+export FILEFERRY_S3_DATA_INTEGRATION=1
+cargo test -p fileferry-cli s3_data_path_live_integration_when_env_is_enabled
+```
+
+The data-path test creates a unique `cli-data-...` repository prefix under
+`FILEFERRY_S3_TEST_PREFIX`, runs `ferry init`, `backup`, `snapshots`, `ls`,
+`restore`, and `check`, verifies a missing referenced manifest fails closed,
+and deletes only objects under that unique repository prefix.
+
 ## Backblaze S3 Notes
 
 Backblaze documents S3-compatible endpoints as:

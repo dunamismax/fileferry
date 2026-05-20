@@ -1884,7 +1884,11 @@ fn backup(
     sources: Vec<PathBuf>,
     tags: Vec<String>,
 ) -> Result<Output, CliError> {
-    let repository = repository_store_for_command(config, "backup", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "backup",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let passphrase = repository_passphrase()?;
     let roots = sources
         .iter()
@@ -2014,7 +2018,11 @@ fn check(
     config: &ResolvedConfig,
     read_data_subset: Option<CheckReadDataSubset>,
 ) -> Result<Output, CliError> {
-    let repository = repository_store_for_command(config, "check", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "check",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
@@ -2112,7 +2120,11 @@ fn restore(
     dry_run: bool,
     overwrite: bool,
 ) -> Result<Output, CliError> {
-    let repository = repository_store_for_command(config, "restore", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "restore",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let passphrase = repository_passphrase()?;
     let destination = absolute_source_path(&destination)?;
     let display_destination = redact_for_display(&destination.display().to_string());
@@ -2221,7 +2233,11 @@ struct LoadedRepositorySnapshots {
 fn load_repository_snapshots(
     config: &ResolvedConfig,
 ) -> Result<LoadedRepositorySnapshots, CliError> {
-    let repository = repository_store_for_command(config, "snapshots", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "snapshots",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;

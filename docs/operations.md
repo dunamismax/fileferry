@@ -116,9 +116,13 @@ Evidence added or retained:
 - `fileferry-cli` tests: missing referenced manifests/chunks, tampered
   chunks, malformed commits, corrupted metadata, stale local temp/uncommitted
   partial objects, local prune JSON/JSONL output, malformed prune state exit
-  mapping, and JSON permission failure envelopes.
+  mapping, JSON permission failure envelopes, S3 data-path missing-environment
+  failure ordering, and a gated live S3 data-path drill for init, backup,
+  snapshots, ls, restore, check, and missing referenced manifests.
 
-This evidence is local-backend evidence only. It does not claim automatic
-repair, cleanup of stale temporary files, S3-compatible prune,
-S3-compatible backup, S3-compatible restore, S3-compatible check,
-platform-wide permission behavior, or release support on every target.
+The non-gated evidence is local-backend evidence only. The S3-compatible data
+path has a gated live test but still needs provider evidence from an
+environment where `FILEFERRY_S3_DATA_INTEGRATION=1` is configured. This does
+not claim automatic repair, cleanup of stale temporary files, S3-compatible
+forget, S3-compatible prune, S3-compatible key management, platform-wide
+permission behavior, or release support on every target.

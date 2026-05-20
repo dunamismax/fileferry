@@ -9,7 +9,7 @@ and verification.
 Treat unchecked boxes as plan. Move stable material into `docs/`, `README.md`,
 or runbooks as the implementation matures.
 
-Last reviewed: 2026-05-19.
+Last reviewed: 2026-05-20.
 
 ---
 
@@ -29,36 +29,41 @@ Last reviewed: 2026-05-19.
   S3-compatible repository bootstraps from `s3://bucket[/prefix]` URLs plus
   explicit S3 endpoint, region, and credential environment variables.
 - CLI repository resolution uses one shared local/S3 target parser before
-  repository command execution. Except for `init`, S3-compatible command
-  paths remain intentionally unsupported and fail with exit code `9` and
-  redacted repository URLs before password or S3 credential access.
-- `ferry backup` opens initialized local repositories, unlocks them with
-  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates encrypted,
-  compressed, deduplicated snapshots through the core backup pipeline, and
-  exposes tested human, JSON, and JSONL-safe output paths.
-- `ferry snapshots` and `ferry ls` open initialized local repositories,
-  authenticate committed encrypted manifests, and expose tested human, JSON,
-  and JSONL-safe output paths.
-- `ferry restore` opens initialized local repositories, unlocks with
-  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects snapshots by
-  latest, snapshot id, or tag, restores all or path-scoped directory entries,
-  regular-file contents, Unix symlinks, and captured modified timestamps for
-  restored regular files and directories through the core restore pipeline,
-  enforces destination fail-if-exists safety unless `--overwrite` is supplied
-  for regular files, preflights destination safety for selected directories,
-  regular files, and symlinks before destination writes, rejects requested
-  snapshot-relative restore paths that do not match manifest entries before
-  destination writes, creates missing parent directories for path-scoped
-  symlink restores after destination safety preflight, supports dry-run
-  reporting including planned modified timestamp metadata and timestamp
-  planning warnings, returns partial-success exit code `10` when metadata
-  warnings are produced, and exposes tested human, JSON, and JSONL-safe output
-  paths. Authenticated manifests with invalid entry topology are rejected as
-  integrity failures before restore destination writes.
-- `ferry check` opens initialized local repositories, unlocks with
-  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
-  manifests and chunk indexes, reads/decompresses every referenced chunk, and
-  verifies keyed chunk identities. It also accepts
+  repository command execution. S3-compatible `init`, `backup`, `snapshots`,
+  `ls`, `restore`, and `check` use the shared S3 store resolver and explicit
+  S3 endpoint, region, and credential environment variables. S3-compatible
+  `forget`, `prune`, and key-management paths remain intentionally
+  unsupported and fail with exit code `9` and redacted repository URLs before
+  password or S3 credential access.
+- `ferry backup` opens initialized local and S3-compatible repositories,
+  unlocks them with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
+  creates encrypted, compressed, deduplicated snapshots through the core
+  backup pipeline, and exposes tested human, JSON, and JSONL-safe output
+  paths.
+- `ferry snapshots` and `ferry ls` open initialized local and S3-compatible
+  repositories, authenticate committed encrypted manifests, and expose tested
+  human, JSON, and JSONL-safe output paths.
+- `ferry restore` opens initialized local and S3-compatible repositories,
+  unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects
+  snapshots by latest, snapshot id, or tag, restores all or path-scoped
+  directory entries, regular-file contents, Unix symlinks, and captured
+  modified timestamps for restored regular files and directories through the
+  core restore pipeline, enforces destination fail-if-exists safety unless
+  `--overwrite` is supplied for regular files, preflights destination safety
+  for selected directories, regular files, and symlinks before destination
+  writes, rejects requested snapshot-relative restore paths that do not match
+  manifest entries before destination writes, creates missing parent
+  directories for path-scoped symlink restores after destination safety
+  preflight, supports dry-run reporting including planned modified timestamp
+  metadata and timestamp planning warnings, returns partial-success exit code
+  `10` when metadata warnings are produced, and exposes tested human, JSON,
+  and JSONL-safe output paths. Authenticated manifests with invalid entry
+  topology are rejected as integrity failures before restore destination
+  writes.
+- `ferry check` opens initialized local and S3-compatible repositories,
+  unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
+  authenticates committed manifests and chunk indexes, reads/decompresses
+  every referenced chunk, and verifies keyed chunk identities. It also accepts
   `--read-data-subset <N|PERCENT>` for deterministic count-based or
   percentage-based referenced-chunk subsets after committed metadata has been
   authenticated and validated. Runtime check failures in JSON and JSONL modes
@@ -206,14 +211,16 @@ Last reviewed: 2026-05-19.
   named `ferry`.
 
 The repo is still pre-v1. Restore is wired into the CLI for initialized local
-repositories, directory entries, regular-file contents, Unix symlinks, and
-modified timestamps for restored regular files and directories, but broader
-metadata application and S3-compatible backup/restore/check/forget paths are
-not complete. S3-compatible repository URLs are parsed through the shared
-repository resolver, but only S3-compatible `init` is implemented. `ferry
-check` supports full referenced-chunk verification and
-deterministic count/percentage referenced-chunk subsets for initialized local
-repositories. `ferry forget` is marker-only for initialized local repositories;
+and S3-compatible repositories, directory entries, regular-file contents, Unix
+symlinks, and modified timestamps for restored regular files and directories,
+but broader metadata application and S3-compatible forget/prune/key-management
+paths are not complete. S3-compatible repository URLs are parsed through the
+shared repository resolver, and S3-compatible `init`, `backup`, `snapshots`,
+`ls`, `restore`, and `check` use the existing encrypted object-store pipeline.
+`ferry check` supports full referenced-chunk verification and deterministic
+count/percentage referenced-chunk subsets for initialized local and
+S3-compatible repositories. `ferry forget` is marker-only for initialized
+local repositories;
 it hides forgotten snapshots from normal snapshot discovery but does not
 delete objects itself. `ferry prune` reclaims local storage through encrypted
 two-phase prune plan/completion state for objects proven unreachable from
@@ -243,28 +250,31 @@ Choose the first unfinished milestone that can be completed honestly in the
 current session. If it is too large, split it into explicit sub-milestones in
 this section before coding.
 
-### Milestone D - S3 Backup And Read Paths
+### Milestone D2 - S3 Data-Path Provider Evidence
 
-Goal: Implement the smallest complete S3-compatible data-path slice: backup,
-snapshots, ls, restore, and check for initialized S3-compatible repositories.
+Goal: Prove the implemented S3-compatible data-path slice against an isolated
+live S3-compatible repository before extending retention or key management.
 
 Definition of done:
 
-- `backup`, `snapshots`, `ls`, `restore`, and `check` work against
-  initialized S3-compatible repositories with the same encryption and
-  authentication model as local repositories.
-- Command output preserves stdout/stderr separation and existing JSON/JSONL
-  contracts.
-- Object-store retries, timeouts, idempotent writes, and missing-object
-  behavior are exercised through tests.
-- Live Backblaze B2 testing is gated and follows
+- Run the gated `FILEFERRY_S3_DATA_INTEGRATION=1` CLI drill against the
+  isolated Backblaze B2 development prefix described in
   `docs/backblaze-b2-dev-storage.md`.
-- Docs state exactly which S3-compatible commands are implemented and which
-  remain unsupported.
+- Confirm `init`, `backup`, `snapshots`, `ls`, `restore`, and `check` work
+  against the initialized S3-compatible repository with the same encryption
+  and authentication model as local repositories.
+- Confirm missing referenced S3 objects fail closed with integrity exit code
+  `6` and safe machine-readable object-key context.
+- Confirm command output preserves stdout/stderr separation and existing
+  JSON/JSONL contracts.
+- Record the observed provider evidence in `BUILD.md` Recent Work and any
+  durable operations notes that changed.
 
 Non-goals:
 
-- S3-compatible forget, prune, or key management unless split and completed.
+- New S3-compatible command implementation beyond the existing data-path
+  slice.
+- S3-compatible forget, prune, or key management.
 - Native Backblaze B2 APIs.
 - New storage providers.
 - Platform support claims.
@@ -905,6 +915,34 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-20 - Implemented the Milestone D S3 backup/read command slice
+  without claiming live provider verification. `ferry backup`, `ferry
+  snapshots`, `ferry ls`, `ferry restore`, and `ferry check` now accept
+  initialized S3-compatible repositories through the shared repository store
+  resolver, using the same encrypted core pipeline and CLI JSON/JSONL output
+  shapes as local repositories. S3-compatible `forget`, `prune`, and key
+  management remain unsupported before password or S3 credential access with
+  exit code `9` and `repository_backend_unsupported`. Added CLI coverage for
+  S3 data-path commands requiring explicit S3 environment before password
+  access, kept unsupported S3 coverage for retention/key/prune paths, and
+  added a gated `FILEFERRY_S3_DATA_INTEGRATION=1` live data-path drill that
+  runs init, backup, snapshots, ls, restore, check, and a missing referenced
+  manifest failure under an isolated prefix. S3 live environment variables
+  were unset in this session, so Milestone D2 remains active for provider
+  evidence before S3 retention or key-management work. Updated `README.md`,
+  `docs/cli-contract.md`, `docs/storage.md`, `docs/operations.md`, and this
+  file. Verified with `cargo test -p fileferry-cli
+  s3_data_path_commands_require_s3_environment_before_password
+  --no-fail-fast`, `cargo test -p fileferry-cli
+  unsupported_s3_repository_commands_fail_before_credentials_are_required
+  --no-fail-fast`, `cargo test -p fileferry-cli
+  s3_data_path_live_integration_when_env_is_enabled --no-fail-fast` (gated;
+  env unset, so no live provider contact), `cargo test -p fileferry-cli
+  s3_repository --no-fail-fast`, `cargo test -p fileferry-cli
+  repository_open_failures_are_structured_and_redacted_in_machine_modes
+  --no-fail-fast`, `cargo test -p fileferry-core -p fileferry-cli
+  --no-fail-fast`, `cargo fmt --all`, `just fmt`, `just check`, `just test`,
+  `just build`, and `git diff --check`.
 - 2026-05-19 - Completed Milestone C S3 command parity foundation without
   claiming S3 data-path support. Replaced the CLI's non-init local-only
   repository resolver with a shared local/S3 repository target and store

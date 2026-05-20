@@ -534,27 +534,29 @@ repository URLs as `s3://<redacted>` and does not emit S3 credentials.
 Repository commands now resolve the repository backend through the same
 local/S3 target parser before command execution. S3-compatible URLs with
 embedded credentials, query strings, or fragments are rejected before use.
-Except for `init`, S3-compatible command paths are intentionally unsupported
-until the corresponding data path is implemented and verified; they fail with
-exit code `9` and `repository_backend_unsupported` while redacting the
-repository URL as `s3://<redacted>`.
+S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`, and `check`
+use the explicit S3 environment contract above and redact repository URLs as
+`s3://<redacted>`. S3-compatible `forget`, `prune`, and key-management
+commands are intentionally unsupported until those paths are implemented and
+verified; they fail with exit code `9` and `repository_backend_unsupported`
+before password or S3 credential access.
 
-`ferry backup <SOURCE>...` opens an initialized local repository with
-`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an encrypted,
-compressed, deduplicated snapshot through the core backup pipeline, and commits
-it so `ferry snapshots` and `ferry ls` can discover it. `--tag <TAG>` may be
-repeated. JSON output follows the Backup data schema above; JSONL output emits
-the implemented progress phases listed above. Source paths are local
-filesystem paths. S3-compatible backup is not implemented yet.
+`ferry backup <SOURCE>...` opens an initialized local or S3-compatible
+repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an
+encrypted, compressed, deduplicated snapshot through the core backup pipeline,
+and commits it so `ferry snapshots` and `ferry ls` can discover it. `--tag
+<TAG>` may be repeated. JSON output follows the Backup data schema above;
+JSONL output emits the implemented progress phases listed above. Source paths
+are local filesystem paths.
 
-`ferry restore <DESTINATION>` opens an initialized local repository with
-`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects `latest` by default
-or accepts `--snapshot <ID>` / `--tag <TAG>` / `--latest`, and restores
-directory entries, regular-file contents, and Unix symlinks under the
-destination directory. `--path <PATH>` may be repeated to restore
-snapshot-relative paths. If any requested snapshot-relative path matches no
-manifest entry, the command fails with exit code `7` before destination
-writes. The command fails if a destination file already exists unless
+`ferry restore <DESTINATION>` opens an initialized local or S3-compatible
+repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects
+`latest` by default or accepts `--snapshot <ID>` / `--tag <TAG>` /
+`--latest`, and restores directory entries, regular-file contents, and Unix
+symlinks under the destination directory. `--path <PATH>` may be repeated to
+restore snapshot-relative paths. If any requested snapshot-relative path
+matches no manifest entry, the command fails with exit code `7` before
+destination writes. The command fails if a destination file already exists unless
 `--overwrite` is supplied. Destination safety for the selected directory,
 regular-file, and symlink entries is preflighted before any destination writes
 begin. Restored symlink destination paths and symlinked ancestors are rejected
@@ -577,11 +579,11 @@ system time range, restore reports a `metadata_warnings` item and exits with
 partial-success code `10`; JSON and JSONL modes keep those warnings on
 stdout.
 
-`ferry check` opens an initialized local repository with `FILEFERRY_PASSWORD`
-or `FILEFERRY_PASSWORD_FILE`, authenticates committed snapshot manifests,
-authenticates chunk indexes, reads every referenced chunk object, decompresses
-chunk payloads, and verifies keyed chunk identities. JSON output follows the
-Check data schema above with `read_data_mode: "full"` and
+`ferry check` opens an initialized local or S3-compatible repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
+snapshot manifests, authenticates chunk indexes, reads every referenced chunk
+object, decompresses chunk payloads, and verifies keyed chunk identities. JSON
+output follows the Check data schema above with `read_data_mode: "full"` and
 `read_data_subset: null` when no subset is requested. With
 `--read-data-subset <N|PERCENT>`, check still authenticates all committed
 metadata and validates manifest/index references, then reads a deterministic
@@ -643,7 +645,7 @@ were available. JSONL output emits `plan`, `mark`, `verify_reachability`,
 `sweep`, and `complete` progress phases. S3-compatible prune is not
 implemented yet.
 
-`ferry snapshots` opens an initialized local repository with
+`ferry snapshots` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
 snapshot manifests that have not been marked forgotten, and emits human, JSON,
 or JSONL-safe snapshot summaries.
@@ -651,9 +653,10 @@ If a committed snapshot marker references a missing manifest object, the
 command fails closed with an integrity failure instead of treating the
 repository as uninitialized.
 
-`ferry ls` opens an initialized local repository, selects `latest` by default
-or accepts `--snapshot <ID>` / `--tag <TAG>`, and lists immediate entries at a
-snapshot-relative path. JSON output uses `"."` for the snapshot root path.
+`ferry ls` opens an initialized local or S3-compatible repository, selects
+`latest` by default or accepts `--snapshot <ID>` / `--tag <TAG>`, and lists
+immediate entries at a snapshot-relative path. JSON output uses `"."` for the
+snapshot root path.
 
 `ferry key add` opens an initialized local repository with the existing
 passphrase from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then writes
