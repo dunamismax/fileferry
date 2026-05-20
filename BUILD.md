@@ -30,11 +30,9 @@ Last reviewed: 2026-05-20.
   explicit S3 endpoint, region, and credential environment variables.
 - CLI repository resolution uses one shared local/S3 target parser before
   repository command execution. S3-compatible `init`, `backup`, `snapshots`,
-  `ls`, `restore`, `check`, `forget`, and key-management paths use the shared
-  S3 store resolver and explicit S3 endpoint, region, and credential
-  environment variables. S3-compatible `prune` remains intentionally
-  unsupported and fails with exit code `9` and redacted repository URLs before
-  password or S3 credential access.
+  `ls`, `restore`, `check`, `forget`, `prune`, and key-management paths use
+  the shared S3 store resolver and explicit S3 endpoint, region, and
+  credential environment variables.
 - S3-compatible data-path provider evidence has passed against the private
   Backblaze B2 development bucket under an isolated `fileferry/dev/...` test
   prefix. The live drill confirmed `init`, `backup`, `snapshots`, `ls`,
@@ -88,29 +86,31 @@ Last reviewed: 2026-05-20.
   integrity failures with snapshot id, object key, and path context where
   available. Metadata identity mismatches retain the repository object key in
   CLI machine-readable failure output.
-- `ferry forget` opens initialized local and S3-compatible repositories, unlocks with
-  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates currently
-  visible committed encrypted manifests, evaluates `fileferry-policy` keep
-  rules, supports dry-run, and writes immutable snapshot forget markers only
-  when not in dry-run. It does not delete chunks, manifests, indexes, or
-  commit objects; storage reclamation is handled by the separate local-only
-  `ferry prune` command.
+- `ferry forget` opens initialized local and S3-compatible repositories,
+  unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
+  authenticates currently visible committed encrypted manifests, evaluates
+  `fileferry-policy` keep rules, supports dry-run, and writes immutable
+  snapshot forget markers only when not in dry-run. It does not delete
+  chunks, manifests, indexes, or commit objects; storage reclamation is
+  handled by the separate `ferry prune` command.
   JSON and JSONL output report candidate snapshots, kept snapshots, forgotten
   snapshots, item-level reasons, dry-run status, marker objects written, and
   explicit `object_deletion: false`.
-- `ferry prune` opens initialized local repositories, unlocks with
-  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, computes objects
-  reachable from forgotten snapshots and not reachable from non-forgotten
-  committed snapshots, supports dry-run, writes encrypted durable prune plan
-  state before sweeping, resumes incomplete sweeps when commit/forget marker
-  state still matches the marked plan, and writes encrypted completion state
-  after sweep. It deletes only planned commit markers, forget markers,
-  manifests, indexes, and chunks; it never deletes bootstrap, key slots,
-  key-slot removal markers, policy/config objects, upload state, prune state,
-  unknown objects, or non-forgotten snapshot data. JSON and JSONL output
-  report candidate, retained, deleted, and missing objects, byte counts where
-  known, dry-run status, completion status, and recovery state. S3-compatible
-  prune is not implemented.
+- `ferry prune` opens initialized local and S3-compatible repositories,
+  unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, computes
+  objects reachable from forgotten snapshots and not reachable from
+  non-forgotten committed snapshots, supports dry-run, writes encrypted
+  durable prune plan state before sweeping, resumes incomplete sweeps when
+  commit/forget marker state still matches the marked plan, and writes
+  encrypted completion state after sweep. It deletes only planned commit
+  markers, forget markers, manifests, indexes, and chunks; it never deletes
+  bootstrap, key slots, key-slot removal markers, policy/config objects,
+  upload state, prune state, unknown objects, or non-forgotten snapshot data.
+  JSON and JSONL output report candidate, retained, deleted, and missing
+  objects, byte counts where known, dry-run status, completion status, and
+  recovery state. S3-compatible prune uses the same immutable encrypted
+  prune state and object-store pipeline as local prune and does not require
+  rename operations for correctness.
 - `ferry key add` opens initialized local and S3-compatible repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, and writes one immutable
   additional passphrase key-slot object from `--new-password-file`,
@@ -222,25 +222,26 @@ Last reviewed: 2026-05-20.
 The repo is still pre-v1. Restore is wired into the CLI for initialized local
 and S3-compatible repositories, directory entries, regular-file contents, Unix
 symlinks, and modified timestamps for restored regular files and directories,
-but broader metadata application and S3-compatible prune are not complete.
+but broader metadata application is not complete.
 S3-compatible repository URLs are parsed through the shared repository
 resolver, and S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`,
-`check`, `forget`, and key-management commands use the existing encrypted
-object-store pipeline.
+`check`, `forget`, `prune`, and key-management commands use the existing
+encrypted object-store pipeline.
 `ferry check` supports full referenced-chunk verification and deterministic
 count/percentage referenced-chunk subsets for initialized local and
 S3-compatible repositories. `ferry forget` is marker-only for initialized
 local and S3-compatible repositories; it hides forgotten snapshots from
 normal snapshot discovery but does not delete objects itself. `ferry prune`
-reclaims local storage through encrypted two-phase prune plan/completion state
-for objects proven unreachable from non-forgotten committed snapshots. Key
+reclaims local and S3-compatible storage through encrypted two-phase prune
+plan/completion state for objects proven unreachable from non-forgotten
+committed snapshots. Key
 management is implemented for initialized local and S3-compatible
 repositories, with `key remove` limited to marker-based removal of externally
 added key slots, `key rotate` limited to unlock rotation that adds one new
 slot and marker-removes explicitly selected externally added slots, and
 `key export-recovery` limited to an encrypted recovery package protected by
 the current repository passphrase. Recovery import, full repository rekey,
-bootstrap-slot removal, and S3-compatible prune are not implemented. Describe
+and bootstrap-slot removal are not implemented. Describe
 backup, restore, check, forget, prune, key management, repository, storage,
 crypto, or platform behavior only to the level backed by code, tests, and
 platform evidence.
@@ -258,27 +259,6 @@ one active milestone end to end over making many small adjacent improvements.
 Choose the first unfinished milestone that can be completed honestly in the
 current session. If it is too large, split it into explicit sub-milestones in
 this section before coding.
-
-### Milestone F - S3 Two-Phase Prune
-
-Goal: Implement recoverable two-phase prune for S3-compatible repositories
-after local prune and S3 command parity are proven.
-
-Definition of done:
-
-- S3 prune uses immutable/recoverable state and does not require rename
-  operations for correctness.
-- Dry-run, mark, sweep, interruption, resume, missing objects, stale objects,
-  permission failures, and retry behavior are tested.
-- Multipart or partial-upload cleanup guidance is documented where relevant.
-- Live tests are gated and isolated from non-test repositories.
-- README and docs clearly state the S3 prune support boundary.
-
-Non-goals:
-
-- Repair of arbitrary S3 repository corruption.
-- Provider-specific lifecycle policies as core behavior.
-- Release support claims before the v1 evidence path passes.
 
 ### Milestone G - Metadata And Platform Hardening
 
@@ -632,7 +612,7 @@ Minimum v1 bar:
 - [x] `ferry snapshots` and `ferry ls` have human, JSON, and JSONL-safe
       behavior where appropriate.
 - [x] `ferry check` verifies metadata and configurable data subsets.
-- [ ] `ferry forget` and `ferry prune` implement retention and two-phase
+- [x] `ferry forget` and `ferry prune` implement retention and two-phase
       deletion safely.
 - [x] Key add/remove/rotate/export-recovery paths exist and are tested.
 - [x] Local backend passes interruption and corruption tests.
@@ -872,6 +852,32 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-20 - Completed Milestone F S3 two-phase prune implementation
+  without claiming new live provider evidence. `ferry prune` now accepts
+  initialized S3-compatible repositories through the shared S3 repository
+  resolver and the same encrypted object-store prune pipeline as local
+  repositories. S3 prune writes immutable encrypted prune-plan and
+  prune-completion state, does not require rename operations for correctness,
+  supports dry-run/sweep/resume behavior through the existing core path, and
+  keeps repair of arbitrary S3 corruption and provider lifecycle policies out
+  of scope. Added CLI coverage proving S3 prune requires explicit S3
+  environment before password access, added a gated
+  `FILEFERRY_S3_PRUNE_INTEGRATION=1` live drill for init, backup, forget,
+  prune dry-run, prune sweep, snapshots, durable prune state, and
+  unique-prefix cleanup, added core coverage for stale/unknown retained
+  listed objects and delete permission failure, and added storage policy
+  coverage for retryable delete failures. The live S3 prune gate was not
+  enabled in this session, so no new Backblaze provider contact or provider
+  evidence was produced. Updated `README.md`, `docs/cli-contract.md`,
+  `docs/repository-format.md`, `docs/storage.md`, `docs/operations.md`,
+  `docs/backblaze-b2-dev-storage.md`, and this file. Verified with
+  `cargo test -p fileferry-cli s3_data_path_commands_require_s3_environment_before_password --no-fail-fast`,
+  `cargo test -p fileferry-cli s3_prune_live_integration_when_env_is_enabled --no-fail-fast`
+  (gated; env unset, so no live provider contact), `cargo test -p
+  fileferry-core prune_ --no-fail-fast`, `cargo test -p fileferry-storage
+  policy_store_retries_retryable_delete_errors --no-fail-fast`, `cargo test
+  -p fileferry-core -p fileferry-cli --no-fail-fast`, `just fmt`,
+  `just check`, `just test`, `just build`, and `git diff --check`.
 - 2026-05-20 - Completed Milestone E S3 retention and key-management command
   parity without claiming new live provider evidence. S3-compatible `forget`,
   `key add`, `key remove`, `key rotate`, and `key export-recovery` now use

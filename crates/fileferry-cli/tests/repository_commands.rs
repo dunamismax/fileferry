@@ -2524,6 +2524,7 @@ fn s3_data_path_commands_require_s3_environment_before_password() {
                 "1".to_owned(),
             ],
         ),
+        ("prune", vec!["prune".to_owned(), "--dry-run".to_owned()]),
         ("key add", vec!["key".to_owned(), "add".to_owned()]),
         (
             "key remove",
@@ -2573,42 +2574,6 @@ fn s3_data_path_commands_require_s3_environment_before_password() {
         assert_eq!(failure["data"]["code"], "repository_s3_environment_missing");
         assert_eq!(failure["data"]["exit_code"], 2);
         assert!(text.contains("FILEFERRY_S3_ENDPOINT"));
-        assert!(!text.contains("test-bucket"));
-        assert!(!text.contains("team/repo"));
-        assert!(!text.contains("FILEFERRY_PASSWORD"));
-        assert!(!text.contains("FILEFERRY_S3_ACCESS_KEY_ID"));
-    }
-}
-
-#[test]
-fn unsupported_s3_repository_commands_fail_before_credentials_are_required() {
-    let cases: Vec<(&str, Vec<String>)> =
-        vec![("prune", vec!["prune".to_owned(), "--dry-run".to_owned()])];
-
-    for (command_name, command_args) in cases {
-        let mut args = vec![
-            "--repo".to_owned(),
-            "s3://test-bucket/team/repo".to_owned(),
-            "--json".to_owned(),
-        ];
-        args.extend(command_args);
-
-        let output = fileferry()
-            .args(args)
-            .assert()
-            .code(9)
-            .stderr("")
-            .get_output()
-            .stdout
-            .clone();
-        let text = String::from_utf8(output.clone()).expect("unsupported utf8");
-        let failure: Value = serde_json::from_slice(&output).expect("unsupported json");
-
-        assert_eq!(failure["command"], command_name);
-        assert_eq!(failure["status"], "failure");
-        assert_eq!(failure["data"]["code"], "repository_backend_unsupported");
-        assert_eq!(failure["data"]["exit_code"], 9);
-        assert!(text.contains("s3://<redacted>"));
         assert!(!text.contains("test-bucket"));
         assert!(!text.contains("team/repo"));
         assert!(!text.contains("FILEFERRY_PASSWORD"));
@@ -3208,6 +3173,157 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
         runtime
             .block_on(cleanup_store.delete(&key))
             .expect("delete s3 data cleanup key");
+    }
+}
+
+#[test]
+fn s3_prune_live_integration_when_env_is_enabled() {
+    if std::env::var("FILEFERRY_S3_PRUNE_INTEGRATION")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+
+    let bucket = required_env("FILEFERRY_S3_BUCKET");
+    let endpoint = required_env("FILEFERRY_S3_ENDPOINT");
+    let region = required_env("FILEFERRY_S3_REGION");
+    let access_key_id = required_env("FILEFERRY_S3_ACCESS_KEY_ID");
+    let secret_access_key = required_env("FILEFERRY_S3_SECRET_ACCESS_KEY");
+    let test_prefix = required_env("FILEFERRY_S3_TEST_PREFIX");
+    let repo_prefix = format!("{test_prefix}/cli-prune-{}", unique_test_id());
+    let repo_url = format!("s3://{bucket}/{repo_prefix}");
+    let passphrase = "s3-prune-test-passphrase";
+    let temp = tempfile::tempdir().expect("tempdir");
+    let keep_source = temp.path().join("keep-source");
+    let drop_source = temp.path().join("drop-source");
+    fs::create_dir(&keep_source).expect("create keep source");
+    fs::create_dir(&drop_source).expect("create drop source");
+    fs::write(keep_source.join("keep.txt"), b"s3 keep prune").expect("write keep");
+    fs::write(drop_source.join("drop.txt"), b"s3 drop prune").expect("write drop");
+
+    let sensitive_values = [
+        bucket.as_str(),
+        repo_prefix.as_str(),
+        access_key_id.as_str(),
+        secret_access_key.as_str(),
+    ];
+    let s3_context = S3LiveCommandContext {
+        endpoint: &endpoint,
+        region: &region,
+        access_key_id: &access_key_id,
+        secret_access_key: &secret_access_key,
+        passphrase,
+        sensitive_values: &sensitive_values,
+    };
+
+    run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "init"], 0);
+    run_s3_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "backup",
+            "--tag",
+            "keep",
+            keep_source.to_str().expect("keep source path"),
+        ],
+        0,
+    );
+    run_s3_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "backup",
+            "--tag",
+            "drop",
+            drop_source.to_str().expect("drop source path"),
+        ],
+        0,
+    );
+    run_s3_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--keep-tag",
+            "keep",
+        ],
+        0,
+    );
+
+    let prune_dry_run_output = run_s3_json_command(
+        &s3_context,
+        ["--repo", &repo_url, "--json", "prune", "--dry-run"],
+        0,
+    );
+    let prune_dry_run: Value =
+        serde_json::from_slice(&prune_dry_run_output).expect("prune dry-run json");
+    assert_eq!(prune_dry_run["data"]["dry_run"], true);
+    assert_eq!(prune_dry_run["data"]["completed"], true);
+    assert_eq!(prune_dry_run["data"]["recovery_state"], "dry_run");
+    assert!(
+        prune_dry_run["data"]["candidate_object_count"]
+            .as_u64()
+            .expect("candidate count")
+            >= 4
+    );
+    assert_eq!(prune_dry_run["data"]["deleted_object_count"], 0);
+
+    let prune_output =
+        run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "prune"], 0);
+    let prune: Value = serde_json::from_slice(&prune_output).expect("prune json");
+    assert_eq!(prune["data"]["dry_run"], false);
+    assert_eq!(prune["data"]["completed"], true);
+    assert_eq!(prune["data"]["recovery_state"], "completed");
+    assert_eq!(
+        prune["data"]["deleted_object_count"],
+        prune["data"]["candidate_object_count"]
+    );
+    assert!(
+        prune["data"]["candidate_objects"]
+            .as_array()
+            .expect("candidate objects")
+            .iter()
+            .any(|object| object["kind"] == "commit")
+    );
+
+    let snapshots_output =
+        run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "snapshots"], 0);
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(snapshots["data"]["snapshots"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshots["data"]["snapshots"][0]["tags"], json!(["keep"]));
+
+    let cleanup_store = s3_cleanup_store(
+        &bucket,
+        &region,
+        &endpoint,
+        &access_key_id,
+        &secret_access_key,
+        &repo_prefix,
+    );
+    let runtime = tokio::runtime::Runtime::new().expect("s3 prune cleanup runtime");
+    let keys = runtime
+        .block_on(cleanup_store.list_prefix(&ObjectKeyPrefix::root()))
+        .expect("list s3 prune cleanup keys");
+    assert!(
+        keys.iter()
+            .any(|key| key.as_str().starts_with("objects/prune-plan/"))
+    );
+    assert!(
+        keys.iter()
+            .any(|key| key.as_str().starts_with("objects/prune-completion/"))
+    );
+    for key in keys {
+        runtime
+            .block_on(cleanup_store.delete(&key))
+            .expect("delete s3 prune cleanup key");
     }
 }
 

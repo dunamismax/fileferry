@@ -4,8 +4,8 @@ FileFerry storage is object-oriented. Backends store immutable byte objects by
 validated repository object keys; higher layers decide what those bytes mean.
 
 This document describes the current storage contract. It is not the complete
-v1 storage design yet, and it does not claim S3-compatible prune, release
-support, or platform support beyond the evidence stated here.
+v1 storage design yet, and it does not claim release support, platform
+support, or live S3 prune provider evidence beyond the evidence stated here.
 
 ## Object Keys
 
@@ -166,7 +166,7 @@ conditional create because Backblaze returns `501 NotImplemented` for the
 ## S3-Compatible CLI Commands
 
 `ferry init`, `ferry backup`, `ferry snapshots`, `ferry ls`, `ferry restore`,
-`ferry check`, `ferry forget`, and `ferry key ...` commands accept
+`ferry check`, `ferry forget`, `ferry prune`, and `ferry key ...` commands accept
 S3-compatible repository URLs in this form:
 
 ```sh
@@ -214,18 +214,28 @@ longer unlock the repository, and then deletes objects under only that unique
 repository prefix. The recovery export is written to a local temporary file;
 it is not stored in S3.
 
+The S3 prune test runs only when `FILEFERRY_S3_PRUNE_INTEGRATION=1` and the
+same S3 environment variables plus `FILEFERRY_S3_TEST_PREFIX` are set. It
+appends a unique `cli-prune-...` suffix, initializes that repository prefix,
+runs backup, forget, prune dry-run, prune sweep, and snapshots through the
+`ferry` binary, verifies prune plan/completion objects exist, and deletes
+objects under only that unique repository prefix.
+
+S3 prune deletes existing repository objects and writes small encrypted
+prune-state objects through `put_if_absent`; it does not initiate multipart
+uploads. Multipart or partial-upload cleanup remains part of the broader S3
+backup/upload hardening path, not prune itself.
+
 ## Not Implemented Yet
 
 S3-compatible storage now has the initial object-store adapter and live
-round-trip, data-path, and retention/key-management test gates. `ferry init`,
-`ferry backup`, `ferry snapshots`, `ferry ls`, `ferry restore`,
-`ferry check`, `ferry forget`, and `ferry key ...` commands use
+round-trip, data-path, retention/key-management, and prune test gates.
+`ferry init`, `ferry backup`, `ferry snapshots`, `ferry ls`, `ferry restore`,
+`ferry check`, `ferry forget`, `ferry prune`, and `ferry key ...` commands use
 S3-compatible encrypted repositories through the same core repository
 pipeline as the local backend. Common retry, timeout, backoff, and
-concurrency behavior exists in the policy wrapper. S3-compatible `prune` is
-still intentionally unsupported and fails with exit code `9` before
-credential or password access. Before S3 storage is marked complete it still
-needs S3 prune implementation and provider evidence, explicit provider
-capability checks, stale-or-surprising listing tests, partial upload behavior,
-permission-error tests, multipart cleanup guidance, and provider evidence
-beyond the initial Backblaze-compatible round trip.
+concurrency behavior exists in the policy wrapper. Before S3 storage is
+marked complete it still needs provider evidence for the new prune gate,
+explicit provider capability checks, broader stale-or-surprising listing
+tests, partial upload behavior, multipart cleanup guidance, and provider
+evidence beyond the initial Backblaze-compatible round trip.

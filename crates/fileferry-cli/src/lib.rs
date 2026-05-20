@@ -2111,7 +2111,11 @@ fn forget(
 }
 
 fn prune(mode: OutputMode, config: &ResolvedConfig, dry_run: bool) -> Result<Output, CliError> {
-    let repository = repository_store_for_command(config, "prune", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "prune",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;

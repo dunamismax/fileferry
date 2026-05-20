@@ -535,11 +535,8 @@ Repository commands now resolve the repository backend through the same
 local/S3 target parser before command execution. S3-compatible URLs with
 embedded credentials, query strings, or fragments are rejected before use.
 S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`, `check`,
-`forget`, and key-management commands use the explicit S3 environment
-contract above and redact repository URLs as `s3://<redacted>`.
-S3-compatible `prune` is intentionally unsupported until S3 two-phase prune
-is implemented and verified; it fails with exit code `9` and
-`repository_backend_unsupported` before password or S3 credential access.
+`forget`, `prune`, and key-management commands use the explicit S3
+environment contract above and redact repository URLs as `s3://<redacted>`.
 
 `ferry backup <SOURCE>...` opens an initialized local or S3-compatible
 repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an
@@ -610,7 +607,7 @@ integrity errors with snapshot id, object key, and path context when available.
 visible committed snapshot manifests, evaluates retention keep rules, and
 writes immutable snapshot forget markers for snapshots not retained by those
 rules. It never deletes chunks, manifests, indexes, or commit objects; object
-deletion is handled only by the separate local-only `ferry prune` command.
+deletion is handled only by the separate `ferry prune` command.
 `--dry-run` evaluates the same plan but writes no forget markers. The
 implemented keep rules are `--keep-last <N>`, `--keep-hourly <N>`,
 `--keep-daily <N>`,
@@ -623,15 +620,15 @@ item-level reasons, dry-run status, and marker objects written. JSONL output
 emits `load_snapshots`, `evaluate_policy`, `write_forget_state`, and
 `complete` progress phases.
 
-`ferry prune` opens an initialized local repository with `FILEFERRY_PASSWORD`
-or `FILEFERRY_PASSWORD_FILE` and deletes only objects that are reachable from
-forgotten committed snapshots and not reachable from any non-forgotten
-committed snapshot. It never deletes `bootstrap`, key-slot objects,
-key-slot-removal markers, policy objects, upload-state objects, unknown
-objects, or S3-compatible repository objects. `--dry-run` uses the same
-reachability logic but writes no prune state and deletes nothing. A real prune
-writes an encrypted durable prune plan under `objects/prune-plan/` before
-deleting candidates, then writes an encrypted completion object under
+`ferry prune` opens an initialized local or S3-compatible repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` and deletes only objects
+that are reachable from forgotten committed snapshots and not reachable from
+any non-forgotten committed snapshot. It never deletes `bootstrap`, key-slot
+objects, key-slot-removal markers, policy objects, upload-state objects,
+unknown objects, or prune state. `--dry-run` uses the same reachability logic
+but writes no prune state and deletes nothing. A real prune writes an
+encrypted durable prune plan under `objects/prune-plan/` before deleting
+candidates, then writes an encrypted completion object under
 `objects/prune-completion/` after the sweep. If a previous plan has no
 completion object, the next real prune resumes it. Missing candidate objects
 during sweep are reported as already gone, not as corruption. Before and
@@ -642,8 +639,10 @@ new commit or forget marker aborts the sweep with exit code `8` and
 integrity failure with exit code `6`. JSON and JSONL output report candidate,
 retained, deleted, and missing objects plus byte counts where object bytes
 were available. JSONL output emits `plan`, `mark`, `verify_reachability`,
-`sweep`, and `complete` progress phases. S3-compatible prune is not
-implemented yet.
+`sweep`, and `complete` progress phases. S3-compatible prune uses the same
+encrypted object-store prune pipeline and does not require rename operations
+for correctness; provider-specific lifecycle policies and arbitrary S3 repair
+remain out of scope.
 
 `ferry snapshots` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

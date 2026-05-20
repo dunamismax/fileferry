@@ -306,7 +306,7 @@ committed or in-progress objects are protected from deletion.
 
 ## Prune Mark, Sweep, And Recovery
 
-Current local prune is two-phase:
+Current local and S3-compatible prune is two-phase:
 
 1. Mark: compute a prune plan and write one encrypted prune-plan object under
    `objects/prune-plan/<prefix>/<plan-id>`. The plan identifies candidate
@@ -321,8 +321,9 @@ Current local prune is two-phase:
 
 Current implementation status:
 
-- `ferry prune` is implemented only for initialized local filesystem
-  repositories.
+- `ferry prune` is implemented for initialized local filesystem and
+  S3-compatible repositories through the shared encrypted object-store
+  pipeline.
 - Candidate objects are limited to commit markers, forget markers, encrypted
   manifests, encrypted indexes, and encrypted chunks reachable from forgotten
   committed snapshots and not reachable from non-forgotten committed
@@ -331,7 +332,9 @@ Current implementation status:
   `objects/policy/`, `objects/upload/`, prune state, or unknown objects.
 - Prune plan and completion objects are encrypted and authenticated as
   `prune-mark` objects with the repository prune subkey.
-- S3-compatible prune is not implemented.
+- S3-compatible prune relies on immutable prune state, idempotent object
+  deletes, and prefix listing. It does not require rename operations for
+  correctness and does not use provider-specific lifecycle policies.
 
 Recovery rules:
 

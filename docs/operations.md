@@ -111,8 +111,11 @@ Evidence added or retained:
   metadata, malformed commits, manifest/index mismatches, invalid manifests,
   permission-denied source reads, immutable bootstrap write conflicts, local
   prune dry-runs, successful prune sweeps, interrupted prune resume, missing
-  prune candidates, malformed prune state, and commit/forget state-change
+  prune candidates, retained stale/unknown listed objects, prune delete
+  permission failures, malformed prune state, and commit/forget state-change
   guardrails.
+- `fileferry-storage` policy tests: retryable put and delete failures,
+  permanent immutable-write conflicts, timeouts, and concurrency limiting.
 - `fileferry-cli` tests: missing referenced manifests/chunks, tampered
   chunks, malformed commits, corrupted metadata, stale local temp/uncommitted
   partial objects, local prune JSON/JSONL output, malformed prune state exit
@@ -120,11 +123,16 @@ Evidence added or retained:
   failure ordering, a gated live S3 data-path drill for init, backup,
   snapshots, ls, restore, check, and missing referenced manifests, and a
   gated live S3 retention/key-management drill for forget, key add, key
-  remove, key rotate, and key export-recovery.
+  remove, key rotate, and key export-recovery, plus a gated live S3 prune
+  drill for dry-run, sweep, durable prune state, snapshots, and unique-prefix
+  cleanup.
 
-The non-gated evidence is local-backend evidence only. The S3-compatible data
-path and retention/key-management paths have gated live tests but still need
-provider evidence from environments where `FILEFERRY_S3_DATA_INTEGRATION=1`
-and `FILEFERRY_S3_RETENTION_KEY_INTEGRATION=1` are configured. This does not
-claim automatic repair, cleanup of stale temporary files, S3-compatible prune,
-platform-wide permission behavior, or release support on every target.
+The non-gated evidence uses local and in-memory object stores. The
+S3-compatible data path, retention/key-management path, and prune path have
+gated live tests but still need provider evidence from environments where
+`FILEFERRY_S3_DATA_INTEGRATION=1`,
+`FILEFERRY_S3_RETENTION_KEY_INTEGRATION=1`, and
+`FILEFERRY_S3_PRUNE_INTEGRATION=1` are configured. This does not claim
+automatic repair, cleanup of stale temporary files, provider-specific S3
+lifecycle management, platform-wide permission behavior, or release support
+on every target.

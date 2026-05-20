@@ -354,37 +354,36 @@ workflow, planning docs, tested crypto primitives, local and S3-compatible
 storage groundwork, and core backup/restore/check primitives. The CLI
 currently exposes `version`, `completion`, local and S3-compatible repository
 `init`, `backup`, `restore`, `snapshots`, `ls`, `check`, and marker-only
-`forget`; it also exposes local repository `prune` as a two-phase delete path
-for objects reachable only from forgotten snapshots, `ferry key add` as an
-append-only passphrase key-slot addition command, `ferry key remove` as
-marker-based external key-slot removal, `ferry key rotate` as unlock rotation
-that adds one new passphrase key slot and marker-removes explicitly selected
-external key slots, plus `ferry key export-recovery --output <FILE>` as an
-encrypted recovery-package export protected by the current repository
-passphrase. The key-management commands work for initialized local and
-S3-compatible repositories.
+`forget`; it also exposes local and S3-compatible repository `prune` as a
+two-phase delete path for objects reachable only from forgotten snapshots,
+`ferry key add` as an append-only passphrase key-slot addition command,
+`ferry key remove` as marker-based external key-slot removal,
+`ferry key rotate` as unlock rotation that adds one new passphrase key slot
+and marker-removes explicitly selected external key slots, plus
+`ferry key export-recovery --output <FILE>` as an encrypted recovery-package
+export protected by the current repository passphrase. The key-management
+commands work for initialized local and S3-compatible repositories.
 Restore currently covers directory
 entries, regular-file contents, Unix symlinks, and modified timestamps for
 restored regular files and directories from initialized local and
-S3-compatible repositories. S3-compatible prune is not implemented yet; that
-command path is explicitly reported as an unsupported backend capability
-failure while S3 repository URLs remain redacted. Other metadata application
-is not implemented yet. Check failures
+S3-compatible repositories. Other metadata application is not implemented yet.
+Check failures
 in JSON and JSONL modes now
 emit machine-readable failure envelopes with stable codes and object-key
 context where available.
 `ferry check --read-data-subset <N|PERCENT>` reads a deterministic subset of
 referenced chunk data for initialized local and S3-compatible repositories.
 `ferry forget` evaluates retention keep rules, supports dry-run, writes forget
-markers only when not in dry-run, and does not delete objects itself. `ferry prune` is
-local-only, supports dry-run, writes encrypted prune plan/completion state,
-resumes an incomplete sweep when repository commit/forget state still
-matches the marked plan, and deletes only forgotten-snapshot commit markers,
-forget markers, manifests, indexes, and chunks that are not reachable from
-non-forgotten committed snapshots. It does not clean stale temporary objects,
-repair corrupted repositories, compact beyond unreachable-object deletion, or
-implement S3-compatible prune. `ferry key add` writes one immutable
-additional key slot for the existing repository master key; it does not
+markers only when not in dry-run, and does not delete objects itself.
+`ferry prune` supports initialized local and S3-compatible repositories,
+supports dry-run, writes encrypted prune plan/completion state, resumes an
+incomplete sweep when repository commit/forget state still matches the marked
+plan, and deletes only forgotten-snapshot commit markers, forget markers,
+manifests, indexes, and chunks that are not reachable from non-forgotten
+committed snapshots. It does not clean stale temporary objects, repair
+corrupted repositories, compact beyond unreachable-object deletion, or provide
+provider-specific S3 lifecycle policy management. `ferry key add` writes one
+immutable additional key slot for the existing repository master key; it does not
 re-encrypt repository objects or recover lost keys. `ferry key remove` writes
 one immutable `key-slot-removals/<key-slot-id>` marker for an externally
 added key slot; it does not delete key-slot objects, remove the original

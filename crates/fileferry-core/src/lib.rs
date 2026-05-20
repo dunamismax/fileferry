@@ -5172,6 +5172,49 @@ mod tests {
         }
     }
 
+    struct DenyDeleteStore<'a> {
+        inner: &'a fileferry_testkit::FakeObjectStore,
+    }
+
+    impl ObjectStore for DenyDeleteStore<'_> {
+        fn capabilities(&self) -> fileferry_storage::StorageCapabilities {
+            self.inner.capabilities()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            key: &'a ObjectKey,
+            bytes: &'a [u8],
+        ) -> fileferry_storage::StorageFuture<'a, PutStatus> {
+            self.inner.put_if_absent(key, bytes)
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, Vec<u8>> {
+            self.inner.get(key)
+        }
+
+        fn exists<'a>(&'a self, key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, bool> {
+            self.inner.exists(key)
+        }
+
+        fn delete<'a>(&'a self, key: &'a ObjectKey) -> fileferry_storage::StorageFuture<'a, ()> {
+            Box::pin(async move {
+                Err(StorageError::ObjectIo {
+                    operation: "delete object",
+                    key: key.clone(),
+                    source: io::Error::new(io::ErrorKind::PermissionDenied, "delete denied"),
+                })
+            })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            prefix: &'a ObjectKeyPrefix,
+        ) -> fileferry_storage::StorageFuture<'a, Vec<ObjectKey>> {
+            self.inner.list_prefix(prefix)
+        }
+    }
+
     #[derive(Debug)]
     struct ConflictingBootstrapStore;
 
@@ -6766,6 +6809,7 @@ mod tests {
 
     #[tokio::test]
     async fn prune_sweeps_forgotten_snapshot_objects_and_keeps_retained_data() {
+        use fileferry_storage::ObjectKey;
         use fileferry_testkit::FakeObjectStore;
 
         let first_source = tempfile::tempdir().expect("first source");
@@ -6810,6 +6854,11 @@ mod tests {
             .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
             .await
             .expect("forget first");
+        let stale_unknown =
+            ObjectKey::new("objects/unknown/stale-listed-object").expect("stale object key");
+        store
+            .overwrite_for_tests(stale_unknown.clone(), b"stale bytes".to_vec())
+            .await;
 
         let pruned = pipeline
             .prune_repository(
@@ -6823,6 +6872,13 @@ mod tests {
         assert!(!pruned.dry_run);
         assert!(pruned.completed);
         assert_eq!(pruned.deleted_object_count, pruned.candidate_object_count);
+        assert!(
+            pruned
+                .retained_objects
+                .iter()
+                .any(|object| object.object_key == stale_unknown.as_str()
+                    && object.kind == PruneObjectKind::Other)
+        );
         assert!(
             !store
                 .exists(&first.commit_object)
@@ -6846,6 +6902,12 @@ mod tests {
                 .exists(&second.manifest_object)
                 .await
                 .expect("second manifest exists")
+        );
+        assert!(
+            store
+                .exists(&stale_unknown)
+                .await
+                .expect("stale object retained")
         );
         let visible = pipeline
             .read_committed_snapshot_manifests(&store, &created.repository.master_key)
@@ -6941,6 +7003,81 @@ mod tests {
                 .expect("missing object")
                 .object_key,
             externally_removed.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_fails_closed_when_candidate_delete_is_denied() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let first_source = tempfile::tempdir().expect("first source");
+        fs::write(first_source.path().join("file.txt"), varied_bytes(9, 2048)).expect("write one");
+        let second_source = tempfile::tempdir().expect("second source");
+        fs::write(
+            second_source.path().join("file.txt"),
+            varied_bytes(10, 2048),
+        )
+        .expect("write two");
+
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+        let first = pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![first_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("first snapshot");
+        pipeline
+            .write_snapshot(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![second_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("second snapshot");
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget first");
+
+        let denied_store = DenyDeleteStore { inner: &store };
+        let denied = pipeline
+            .prune_repository(
+                &denied_store,
+                &created.repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect_err("delete denied");
+
+        assert!(matches!(
+            denied,
+            CoreError::Storage {
+                source: StorageError::ObjectIo { .. }
+            }
+        ));
+        assert!(
+            store
+                .exists(&first.commit_object)
+                .await
+                .expect("candidate retained after denied delete")
         );
     }
 

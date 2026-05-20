@@ -1397,6 +1397,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_store_retries_retryable_delete_errors() {
+        let inner = TransientDeleteStore::new(2);
+        let attempts = inner.attempts.clone();
+        let store = PolicyObjectStore::from_store(
+            inner,
+            test_policy(
+                3,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                1,
+            ),
+        );
+
+        store
+            .delete(&key("chunks/retry-delete/blob"))
+            .await
+            .expect("delete retry succeeds");
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
     async fn policy_store_does_not_retry_permanent_conflicts() {
         let store = PolicyObjectStore::from_store(
             ConflictStore,
@@ -1610,6 +1632,73 @@ mod tests {
 
         fn delete<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, ()> {
             Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct TransientDeleteStore {
+        remaining_failures: AtomicUsize,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl TransientDeleteStore {
+        fn new(remaining_failures: usize) -> Self {
+            Self {
+                remaining_failures: AtomicUsize::new(remaining_failures),
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl ObjectStore for TransientDeleteStore {
+        fn capabilities(&self) -> StorageCapabilities {
+            StorageCapabilities::in_memory_fake()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            _key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> StorageFuture<'a, PutStatus> {
+            Box::pin(async move { Ok(PutStatus::Created) })
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move { Err(StorageError::ObjectNotFound { key: key.clone() }) })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(true) })
+        }
+
+        fn delete<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                if self
+                    .remaining_failures
+                    .fetch_update(
+                        AtomicOrdering::SeqCst,
+                        AtomicOrdering::SeqCst,
+                        |remaining| remaining.checked_sub(1),
+                    )
+                    .is_ok()
+                {
+                    return Err(StorageError::ObjectIo {
+                        operation: "test transient delete",
+                        key: key.clone(),
+                        source: io::Error::new(io::ErrorKind::TimedOut, "temporary failure"),
+                    });
+                }
+
+                Ok(())
+            })
         }
 
         fn list_prefix<'a>(
