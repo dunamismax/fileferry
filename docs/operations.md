@@ -117,12 +117,14 @@ Evidence added or retained:
   chunks, malformed commits, corrupted metadata, stale local temp/uncommitted
   partial objects, local prune JSON/JSONL output, malformed prune state exit
   mapping, JSON permission failure envelopes, S3 data-path missing-environment
-  failure ordering, and a gated live S3 data-path drill for init, backup,
-  snapshots, ls, restore, check, and missing referenced manifests.
+  failure ordering, a gated live S3 data-path drill for init, backup,
+  snapshots, ls, restore, check, and missing referenced manifests, and a
+  gated live S3 retention/key-management drill for forget, key add, key
+  remove, key rotate, and key export-recovery.
 
 The non-gated evidence is local-backend evidence only. The S3-compatible data
-path has a gated live test but still needs provider evidence from an
-environment where `FILEFERRY_S3_DATA_INTEGRATION=1` is configured. This does
-not claim automatic repair, cleanup of stale temporary files, S3-compatible
-forget, S3-compatible prune, S3-compatible key management, platform-wide
-permission behavior, or release support on every target.
+path and retention/key-management paths have gated live tests but still need
+provider evidence from environments where `FILEFERRY_S3_DATA_INTEGRATION=1`
+and `FILEFERRY_S3_RETENTION_KEY_INTEGRATION=1` are configured. This does not
+claim automatic repair, cleanup of stale temporary files, S3-compatible prune,
+platform-wide permission behavior, or release support on every target.

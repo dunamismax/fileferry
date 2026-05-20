@@ -534,12 +534,12 @@ repository URLs as `s3://<redacted>` and does not emit S3 credentials.
 Repository commands now resolve the repository backend through the same
 local/S3 target parser before command execution. S3-compatible URLs with
 embedded credentials, query strings, or fragments are rejected before use.
-S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`, and `check`
-use the explicit S3 environment contract above and redact repository URLs as
-`s3://<redacted>`. S3-compatible `forget`, `prune`, and key-management
-commands are intentionally unsupported until those paths are implemented and
-verified; they fail with exit code `9` and `repository_backend_unsupported`
-before password or S3 credential access.
+S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`, `check`,
+`forget`, and key-management commands use the explicit S3 environment
+contract above and redact repository URLs as `s3://<redacted>`.
+S3-compatible `prune` is intentionally unsupported until S3 two-phase prune
+is implemented and verified; it fails with exit code `9` and
+`repository_backend_unsupported` before password or S3 credential access.
 
 `ferry backup <SOURCE>...` opens an initialized local or S3-compatible
 repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an
@@ -605,7 +605,7 @@ entry paths, non-file chunk references, regular-file size/chunk-length
 mismatches, or non-directory ancestors fail as `snapshot_manifest_invalid`
 integrity errors with snapshot id, object key, and path context when available.
 
-`ferry forget` opens an initialized local repository with
+`ferry forget` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates currently
 visible committed snapshot manifests, evaluates retention keep rules, and
 writes immutable snapshot forget markers for snapshots not retained by those
@@ -621,7 +621,7 @@ forget no currently visible snapshots fails with exit code `7` and
 `2`. JSON output reports candidate, kept, and forgotten snapshot items,
 item-level reasons, dry-run status, and marker objects written. JSONL output
 emits `load_snapshots`, `evaluate_policy`, `write_forget_state`, and
-`complete` progress phases. S3-compatible forget is not implemented yet.
+`complete` progress phases.
 
 `ferry prune` opens an initialized local repository with `FILEFERRY_PASSWORD`
 or `FILEFERRY_PASSWORD_FILE` and deletes only objects that are reachable from
@@ -658,10 +658,11 @@ repository as uninitialized.
 immediate entries at a snapshot-relative path. JSON output uses `"."` for the
 snapshot root path.
 
-`ferry key add` opens an initialized local repository with the existing
-passphrase from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then writes
-one immutable additional passphrase key-slot object. The new passphrase must
-come from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`ferry key add` opens an initialized local or S3-compatible repository with
+the existing passphrase from `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`, then writes one immutable additional passphrase
+key-slot object. The new passphrase must come from `--new-password-file`,
+`FILEFERRY_NEW_PASSWORD`, or
 `FILEFERRY_NEW_PASSWORD_FILE`; the command does not prompt interactively.
 Output includes the repository id, new key-slot id, total visible key-slot
 count, KDF parameters, and `reencrypted_repository_objects: false`. The
@@ -671,8 +672,8 @@ or policy/config objects, and does not recover a lost master key. Wrong
 existing passphrases fail with exit code `4`; malformed key-slot or bootstrap
 state fails closed as an integrity failure with exit code `6`.
 
-`ferry key remove <KEY_SLOT_ID>` opens an initialized local repository with
-the current passphrase from `FILEFERRY_PASSWORD` or
+`ferry key remove <KEY_SLOT_ID>` opens an initialized local or S3-compatible
+repository with the current passphrase from `FILEFERRY_PASSWORD` or
 `FILEFERRY_PASSWORD_FILE`, then writes one immutable
 `key-slot-removals/<key-slot-id>` marker for an externally added key slot. It
 does not delete `key-slots/<key-slot-id>` objects, remove the original
@@ -687,8 +688,8 @@ removed key-slot id, visible key-slot count, removal marker object,
 `reencrypted_repository_objects: false`.
 
 `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...` opens an initialized
-local repository with the current passphrase from `FILEFERRY_PASSWORD` or
-`FILEFERRY_PASSWORD_FILE`, reads the new passphrase from
+local or S3-compatible repository with the current passphrase from
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, reads the new passphrase from
 `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
 `FILEFERRY_NEW_PASSWORD_FILE`, writes one immutable new key-slot object for
 the existing repository master key, proves that new slot unlocks the master
@@ -704,11 +705,12 @@ key-slot count, removal marker objects, removal marker creation count, KDF
 parameters, `deleted_key_slot_objects: false`, and
 `reencrypted_repository_objects: false`.
 
-`ferry key export-recovery --output <FILE>` opens an initialized local
-repository with the current passphrase from `FILEFERRY_PASSWORD` or
-`FILEFERRY_PASSWORD_FILE`, creates one standalone encrypted recovery export
-file, and writes it only if the destination file does not already exist. The
-export is encrypted and authenticated with Argon2id v1.3 and
+`ferry key export-recovery --output <FILE>` opens an initialized local or
+S3-compatible repository with the current passphrase from
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates one standalone
+encrypted recovery export file, and writes it only if the destination file
+does not already exist. The export is encrypted and authenticated with
+Argon2id v1.3 and
 XChaCha20-Poly1305 using associated data documented in `docs/security.md`.
 The current implementation protects the export with the current repository
 passphrase; recovery import is not implemented, and the command does not
@@ -720,7 +722,6 @@ includes the repository id, export id, redacted destination, visible key-slot
 count, creation time, KDF parameters, AEAD algorithm, warning text,
 `recovery_import_implemented: false`, `raw_master_key_exported: false`, and
 `reencrypted_repository_objects: false`.
-S3-compatible key management is not implemented yet.
 
 ## Local Backend Failure Evidence
 

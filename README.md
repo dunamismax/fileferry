@@ -353,23 +353,23 @@ The repo contains the initial Rust workspace, crate boundaries, CLI shell, CI
 workflow, planning docs, tested crypto primitives, local and S3-compatible
 storage groundwork, and core backup/restore/check primitives. The CLI
 currently exposes `version`, `completion`, local and S3-compatible repository
-`init`, `backup`, `restore`, `snapshots`, `ls`, and `check`; it also exposes
-local repository `forget` as marker-only retention
-state and local repository `prune` as a two-phase delete path for objects
-reachable only from forgotten snapshots, `ferry key add` as an append-only
-passphrase key-slot addition command, and `ferry key remove` as marker-based
-external key-slot removal for initialized local repositories, and
-`ferry key rotate` as unlock rotation that adds one new passphrase key slot
-and marker-removes explicitly selected external key slots, plus
-`ferry key export-recovery --output <FILE>` as a local-only encrypted
-recovery-package export protected by the current repository passphrase.
+`init`, `backup`, `restore`, `snapshots`, `ls`, `check`, and marker-only
+`forget`; it also exposes local repository `prune` as a two-phase delete path
+for objects reachable only from forgotten snapshots, `ferry key add` as an
+append-only passphrase key-slot addition command, `ferry key remove` as
+marker-based external key-slot removal, `ferry key rotate` as unlock rotation
+that adds one new passphrase key slot and marker-removes explicitly selected
+external key slots, plus `ferry key export-recovery --output <FILE>` as an
+encrypted recovery-package export protected by the current repository
+passphrase. The key-management commands work for initialized local and
+S3-compatible repositories.
 Restore currently covers directory
 entries, regular-file contents, Unix symlinks, and modified timestamps for
 restored regular files and directories from initialized local and
-S3-compatible repositories. S3-compatible forget, prune, and key management
-are not implemented yet; those command paths are explicitly reported as
-unsupported backend capability failures while S3 repository URLs remain
-redacted. Other metadata application is not implemented yet. Check failures
+S3-compatible repositories. S3-compatible prune is not implemented yet; that
+command path is explicitly reported as an unsupported backend capability
+failure while S3 repository URLs remain redacted. Other metadata application
+is not implemented yet. Check failures
 in JSON and JSONL modes now
 emit machine-readable failure envelopes with stable codes and object-key
 context where available.

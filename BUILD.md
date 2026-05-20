@@ -30,10 +30,10 @@ Last reviewed: 2026-05-20.
   explicit S3 endpoint, region, and credential environment variables.
 - CLI repository resolution uses one shared local/S3 target parser before
   repository command execution. S3-compatible `init`, `backup`, `snapshots`,
-  `ls`, `restore`, and `check` use the shared S3 store resolver and explicit
-  S3 endpoint, region, and credential environment variables. S3-compatible
-  `forget`, `prune`, and key-management paths remain intentionally
-  unsupported and fail with exit code `9` and redacted repository URLs before
+  `ls`, `restore`, `check`, `forget`, and key-management paths use the shared
+  S3 store resolver and explicit S3 endpoint, region, and credential
+  environment variables. S3-compatible `prune` remains intentionally
+  unsupported and fails with exit code `9` and redacted repository URLs before
   password or S3 credential access.
 - S3-compatible data-path provider evidence has passed against the private
   Backblaze B2 development bucket under an isolated `fileferry/dev/...` test
@@ -88,7 +88,7 @@ Last reviewed: 2026-05-20.
   integrity failures with snapshot id, object key, and path context where
   available. Metadata identity mismatches retain the repository object key in
   CLI machine-readable failure output.
-- `ferry forget` opens initialized local repositories, unlocks with
+- `ferry forget` opens initialized local and S3-compatible repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates currently
   visible committed encrypted manifests, evaluates `fileferry-policy` keep
   rules, supports dry-run, and writes immutable snapshot forget markers only
@@ -111,7 +111,7 @@ Last reviewed: 2026-05-20.
   report candidate, retained, deleted, and missing objects, byte counts where
   known, dry-run status, completion status, and recovery state. S3-compatible
   prune is not implemented.
-- `ferry key add` opens initialized local repositories, unlocks with
+- `ferry key add` opens initialized local and S3-compatible repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, and writes one immutable
   additional passphrase key-slot object from `--new-password-file`,
   `FILEFERRY_NEW_PASSWORD`, or `FILEFERRY_NEW_PASSWORD_FILE`. It does not
@@ -120,20 +120,21 @@ Last reviewed: 2026-05-20.
   objects, and does not recover lost keys. Human, JSON, and JSONL-safe output
   report the new key-slot id, total visible key-slot count, KDF parameters,
   and `reencrypted_repository_objects: false`.
-- `ferry key remove <KEY_SLOT_ID>` opens initialized local repositories,
-  unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, and writes
-  one immutable `key-slot-removals/<key-slot-id>` marker for an externally
-  added key slot only after the supplied current passphrase proves a remaining
-  non-removed unlock path. It does not delete `key-slots/<key-slot-id>`
-  objects, remove the original bootstrap key slot, create a new master key,
-  rewrite chunks, manifests, indexes, commit markers, forget markers, or
-  policy/config objects, re-encrypt repository objects, or recover lost keys.
+- `ferry key remove <KEY_SLOT_ID>` opens initialized local and S3-compatible
+  repositories, unlocks with `FILEFERRY_PASSWORD` or
+  `FILEFERRY_PASSWORD_FILE`, and writes one immutable
+  `key-slot-removals/<key-slot-id>` marker for an externally added key slot
+  only after the supplied current passphrase proves a remaining non-removed
+  unlock path. It does not delete `key-slots/<key-slot-id>` objects, remove
+  the original bootstrap key slot, create a new master key, rewrite chunks,
+  manifests, indexes, commit markers, forget markers, or policy/config
+  objects, re-encrypt repository objects, or recover lost keys.
   Human, JSON, and JSONL-safe output report the removed key-slot id, total
   visible key-slot count, marker object, marker creation status, and explicit
   `deleted_key_slot_objects: false` and
   `reencrypted_repository_objects: false`.
 - `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...` opens initialized
-  local repositories, unlocks with `FILEFERRY_PASSWORD` or
+  local and S3-compatible repositories, unlocks with `FILEFERRY_PASSWORD` or
   `FILEFERRY_PASSWORD_FILE`, writes one immutable additional passphrase
   key-slot object from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
   `FILEFERRY_NEW_PASSWORD_FILE`, proves the new slot unlocks the existing
@@ -141,14 +142,14 @@ Last reviewed: 2026-05-20.
   markers for explicitly selected externally added key slots. It does not
   create a new master key, remove the original bootstrap key slot, remove
   unselected key slots, delete `key-slots/<key-slot-id>` objects, rewrite or
-  re-encrypt repository objects, recover lost keys, or implement
-  S3-compatible key management. Human, JSON, and JSONL-safe output report the
-  added key-slot id, removed key-slot ids, total visible key-slot count,
-  marker objects, marker creation count, KDF parameters, and explicit
+  re-encrypt repository objects, or recover lost keys. Human, JSON, and
+  JSONL-safe output report the added key-slot id, removed key-slot ids, total
+  visible key-slot count, marker objects, marker creation count, KDF
+  parameters, and explicit
   `deleted_key_slot_objects: false` and
   `reencrypted_repository_objects: false`.
-- `ferry key export-recovery --output <FILE>` opens initialized local
-  repositories, unlocks with `FILEFERRY_PASSWORD` or
+- `ferry key export-recovery --output <FILE>` opens initialized local and
+  S3-compatible repositories, unlocks with `FILEFERRY_PASSWORD` or
   `FILEFERRY_PASSWORD_FILE`, writes a standalone encrypted recovery package
   to a destination file that must not already exist, and protects that package
   with the current repository passphrase. The export records repository id,
@@ -156,10 +157,10 @@ Last reviewed: 2026-05-20.
   nonce, encrypted master-key bytes, and a keyed master-key check for future
   verification. It does not print or store raw master-key material, implement
   recovery import, recover lost passphrases, create a new master key, rewrite
-  the bootstrap slot, rewrite or re-encrypt repository objects, or implement
-  S3-compatible key management. Human, JSON, and JSONL-safe output report the
-  repository id, export id, redacted destination, visible key-slot count,
-  creation time, KDF parameters, AEAD algorithm, warning text, and explicit
+  the bootstrap slot, or rewrite or re-encrypt repository objects. Human,
+  JSON, and JSONL-safe output report the repository id, export id, redacted
+  destination, visible key-slot count, creation time, KDF parameters, AEAD
+  algorithm, warning text, and explicit
   `recovery_import_implemented: false`, `raw_master_key_exported: false`, and
   `reencrypted_repository_objects: false`.
 - CLI config discovery, profiles, environment precedence, redacted
@@ -221,28 +222,28 @@ Last reviewed: 2026-05-20.
 The repo is still pre-v1. Restore is wired into the CLI for initialized local
 and S3-compatible repositories, directory entries, regular-file contents, Unix
 symlinks, and modified timestamps for restored regular files and directories,
-but broader metadata application and S3-compatible forget/prune/key-management
-paths are not complete. S3-compatible repository URLs are parsed through the
-shared repository resolver, and S3-compatible `init`, `backup`, `snapshots`,
-`ls`, `restore`, and `check` use the existing encrypted object-store pipeline.
+but broader metadata application and S3-compatible prune are not complete.
+S3-compatible repository URLs are parsed through the shared repository
+resolver, and S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`,
+`check`, `forget`, and key-management commands use the existing encrypted
+object-store pipeline.
 `ferry check` supports full referenced-chunk verification and deterministic
 count/percentage referenced-chunk subsets for initialized local and
 S3-compatible repositories. `ferry forget` is marker-only for initialized
-local repositories;
-it hides forgotten snapshots from normal snapshot discovery but does not
-delete objects itself. `ferry prune` reclaims local storage through encrypted
-two-phase prune plan/completion state for objects proven unreachable from
-non-forgotten committed snapshots. `ferry key add` and `ferry key remove` are
-implemented for initialized local repositories only; `key remove` is limited
-to marker-based removal of externally added key slots, `key rotate` is
-limited to unlock rotation that adds one new slot and marker-removes
-explicitly selected externally added slots, and `key export-recovery` is
-limited to a local-only encrypted recovery package protected by the current
-repository passphrase. Recovery import, full repository rekey, bootstrap-slot
-removal, and S3-compatible key management are not
-implemented. Describe backup, restore, check, forget, prune, key
-management, repository, storage, crypto, or platform behavior only to the
-level backed by code, tests, and platform evidence.
+local and S3-compatible repositories; it hides forgotten snapshots from
+normal snapshot discovery but does not delete objects itself. `ferry prune`
+reclaims local storage through encrypted two-phase prune plan/completion state
+for objects proven unreachable from non-forgotten committed snapshots. Key
+management is implemented for initialized local and S3-compatible
+repositories, with `key remove` limited to marker-based removal of externally
+added key slots, `key rotate` limited to unlock rotation that adds one new
+slot and marker-removes explicitly selected externally added slots, and
+`key export-recovery` limited to an encrypted recovery package protected by
+the current repository passphrase. Recovery import, full repository rekey,
+bootstrap-slot removal, and S3-compatible prune are not implemented. Describe
+backup, restore, check, forget, prune, key management, repository, storage,
+crypto, or platform behavior only to the level backed by code, tests, and
+platform evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
@@ -257,29 +258,6 @@ one active milestone end to end over making many small adjacent improvements.
 Choose the first unfinished milestone that can be completed honestly in the
 current session. If it is too large, split it into explicit sub-milestones in
 this section before coding.
-
-### Milestone E - S3 Retention And Key Management
-
-Goal: Extend marker-based forget and key-management commands to
-S3-compatible repositories after S3 read/write data paths are proven.
-
-Definition of done:
-
-- `forget`, `key add`, `key remove`, `key rotate`, and
-  `key export-recovery` either work against initialized S3-compatible
-  repositories or fail with explicit documented unsupported behavior.
-- Marker writes remain immutable and retry-safe on object storage.
-- Wrong-password, missing-object, malformed-marker, permission, and retry
-  behavior map to documented exit-code families.
-- Tests cover fake/object-store behavior and gated live S3 behavior where
-  practical.
-- Docs do not claim S3 prune until Milestone F is complete.
-
-Non-goals:
-
-- S3-compatible prune.
-- Full repository rekey.
-- New backend providers.
 
 ### Milestone F - S3 Two-Phase Prune
 
@@ -894,6 +872,32 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-20 - Completed Milestone E S3 retention and key-management command
+  parity without claiming new live provider evidence. S3-compatible `forget`,
+  `key add`, `key remove`, `key rotate`, and `key export-recovery` now use
+  the shared S3 repository resolver and the same encrypted core object-store
+  pipeline as local repositories; S3-compatible `prune` remains explicitly
+  unsupported with exit code `9` before password or S3 credential access.
+  Added CLI coverage proving S3 retention/key commands require explicit S3
+  environment before password access, kept the unsupported S3 prune guardrail,
+  and added a gated
+  `FILEFERRY_S3_RETENTION_KEY_INTEGRATION=1` live drill for init, backup,
+  forget, snapshots, key add, key remove, key rotate, key export-recovery,
+  removed-key unlock failure, and unique-prefix cleanup. The live gate was not
+  enabled in this session, so no new Backblaze provider contact or provider
+  evidence was produced. Updated `README.md`, `docs/cli-contract.md`,
+  `docs/storage.md`, `docs/operations.md`,
+  `docs/backblaze-b2-dev-storage.md`, and this file. Verified with
+  `cargo test -p fileferry-cli s3_data_path_commands_require_s3_environment_before_password --no-fail-fast`,
+  `cargo test -p fileferry-cli unsupported_s3_repository_commands_fail_before_credentials_are_required --no-fail-fast`,
+  `cargo test -p fileferry-cli s3_retention_key_management_live_integration_when_env_is_enabled --no-fail-fast`
+  (gated; env unset, so no live provider contact), `cargo test -p
+  fileferry-cli key_ --no-fail-fast`, `cargo test -p fileferry-cli forget_
+  --no-fail-fast`, `cargo test -p fileferry-core repository_key
+  --no-fail-fast`, `cargo test -p fileferry-core forget_ --no-fail-fast`,
+  `cargo test -p fileferry-core -p fileferry-cli --no-fail-fast`,
+  `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check`.
 - 2026-05-20 - Completed Milestone D2 S3 data-path provider evidence against
   the private Backblaze B2 development bucket `dunamismax-b2` in region
   `us-east-005`, using unique prefixes under `fileferry/dev`. Hardened the

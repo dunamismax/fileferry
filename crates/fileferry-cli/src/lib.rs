@@ -1736,7 +1736,11 @@ fn key_add(
     config: &ResolvedConfig,
     new_password_file: Option<PathBuf>,
 ) -> Result<Output, CliError> {
-    let repository = repository_store_for_command(config, "key add", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "key add",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let current_passphrase = repository_passphrase()?;
     let new_passphrase = new_repository_passphrase(new_password_file.as_deref())?;
     let runtime = tokio_runtime()?;
@@ -1767,7 +1771,11 @@ fn key_remove(
     config: &ResolvedConfig,
     key_slot_id: String,
 ) -> Result<Output, CliError> {
-    let repository = repository_store_for_command(config, "key remove", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "key remove",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let current_passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let result = runtime.block_on(remove_repository_key_slot(
@@ -1802,7 +1810,11 @@ fn key_rotate(
     new_password_file: Option<PathBuf>,
     retire_key_slot_ids: Vec<String>,
 ) -> Result<Output, CliError> {
-    let repository = repository_store_for_command(config, "key rotate", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "key rotate",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let current_passphrase = repository_passphrase()?;
     let new_passphrase = new_repository_passphrase(new_password_file.as_deref())?;
     let runtime = tokio_runtime()?;
@@ -1843,8 +1855,11 @@ fn key_export_recovery(
     output: PathBuf,
 ) -> Result<Output, CliError> {
     ensure_recovery_output_destination(&output)?;
-    let repository =
-        repository_store_for_command(config, "key export-recovery", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "key export-recovery",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let current_passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let result = runtime.block_on(export_repository_recovery(
@@ -2045,7 +2060,11 @@ fn forget(
     policy: RetentionPolicy,
     dry_run: bool,
 ) -> Result<Output, CliError> {
-    let repository = repository_store_for_command(config, "forget", &[CliBackendKind::Local])?;
+    let repository = repository_store_for_command(
+        config,
+        "forget",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
     let passphrase = repository_passphrase()?;
     let runtime = tokio_runtime()?;
     let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;

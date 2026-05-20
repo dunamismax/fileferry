@@ -71,6 +71,21 @@ The data-path test creates a unique `cli-data-...` repository prefix under
 `restore`, and `check`, verifies a missing referenced manifest fails closed,
 and deletes only objects under that unique repository prefix.
 
+The CLI S3 retention/key-management integration test uses the same variables,
+plus its own opt-in gate:
+
+```sh
+export FILEFERRY_S3_RETENTION_KEY_INTEGRATION=1
+cargo test -p fileferry-cli s3_retention_key_management_live_integration_when_env_is_enabled
+```
+
+The retention/key-management test creates a unique `cli-retention-key-...`
+repository prefix under `FILEFERRY_S3_TEST_PREFIX`, runs `ferry init`,
+`backup`, `forget`, `snapshots`, `key add`, `key remove`, `key rotate`, and
+`key export-recovery`, verifies removed key slots no longer unlock the
+repository, writes the recovery export only to a local temporary file, and
+deletes only objects under that unique repository prefix.
+
 ## Backblaze S3 Notes
 
 Backblaze documents S3-compatible endpoints as:

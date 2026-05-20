@@ -2500,6 +2500,8 @@ fn s3_data_path_commands_require_s3_environment_before_password() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source = temp.path().join("source");
     let destination = temp.path().join("restore");
+    let recovery = temp.path().join("recovery.ffrec");
+    let key_slot_id = "a".repeat(64);
     fs::create_dir(&source).expect("source dir");
 
     let cases: Vec<(&str, Vec<String>)> = vec![
@@ -2514,6 +2516,37 @@ fn s3_data_path_commands_require_s3_environment_before_password() {
             vec!["restore".to_owned(), destination.display().to_string()],
         ),
         ("check", vec!["check".to_owned()]),
+        (
+            "forget",
+            vec![
+                "forget".to_owned(),
+                "--keep-last".to_owned(),
+                "1".to_owned(),
+            ],
+        ),
+        ("key add", vec!["key".to_owned(), "add".to_owned()]),
+        (
+            "key remove",
+            vec!["key".to_owned(), "remove".to_owned(), key_slot_id.clone()],
+        ),
+        (
+            "key rotate",
+            vec![
+                "key".to_owned(),
+                "rotate".to_owned(),
+                "--retire-key-slot".to_owned(),
+                key_slot_id,
+            ],
+        ),
+        (
+            "key export-recovery",
+            vec![
+                "key".to_owned(),
+                "export-recovery".to_owned(),
+                "--output".to_owned(),
+                recovery.display().to_string(),
+            ],
+        ),
     ];
 
     for (command_name, command_args) in cases {
@@ -2549,43 +2582,8 @@ fn s3_data_path_commands_require_s3_environment_before_password() {
 
 #[test]
 fn unsupported_s3_repository_commands_fail_before_credentials_are_required() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let recovery = temp.path().join("recovery.ffrec");
-    let key_slot_id = "a".repeat(64);
-    let cases: Vec<(&str, Vec<String>)> = vec![
-        (
-            "forget",
-            vec![
-                "forget".to_owned(),
-                "--keep-last".to_owned(),
-                "1".to_owned(),
-            ],
-        ),
-        ("prune", vec!["prune".to_owned(), "--dry-run".to_owned()]),
-        ("key add", vec!["key".to_owned(), "add".to_owned()]),
-        (
-            "key remove",
-            vec!["key".to_owned(), "remove".to_owned(), key_slot_id.clone()],
-        ),
-        (
-            "key rotate",
-            vec![
-                "key".to_owned(),
-                "rotate".to_owned(),
-                "--retire-key-slot".to_owned(),
-                key_slot_id,
-            ],
-        ),
-        (
-            "key export-recovery",
-            vec![
-                "key".to_owned(),
-                "export-recovery".to_owned(),
-                "--output".to_owned(),
-                recovery.display().to_string(),
-            ],
-        ),
-    ];
+    let cases: Vec<(&str, Vec<String>)> =
+        vec![("prune", vec!["prune".to_owned(), "--dry-run".to_owned()])];
 
     for (command_name, command_args) in cases {
         let mut args = vec![
@@ -3213,6 +3211,265 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
     }
 }
 
+#[test]
+fn s3_retention_key_management_live_integration_when_env_is_enabled() {
+    if std::env::var("FILEFERRY_S3_RETENTION_KEY_INTEGRATION")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+
+    let bucket = required_env("FILEFERRY_S3_BUCKET");
+    let endpoint = required_env("FILEFERRY_S3_ENDPOINT");
+    let region = required_env("FILEFERRY_S3_REGION");
+    let access_key_id = required_env("FILEFERRY_S3_ACCESS_KEY_ID");
+    let secret_access_key = required_env("FILEFERRY_S3_SECRET_ACCESS_KEY");
+    let test_prefix = required_env("FILEFERRY_S3_TEST_PREFIX");
+    let repo_prefix = format!("{test_prefix}/cli-retention-key-{}", unique_test_id());
+    let repo_url = format!("s3://{bucket}/{repo_prefix}");
+    let passphrase = "s3-retention-key-passphrase";
+    let added_passphrase = "s3-added-passphrase";
+    let old_passphrase = "s3-old-passphrase";
+    let rotated_passphrase = "s3-rotated-passphrase";
+    let temp = tempfile::tempdir().expect("tempdir");
+    let keep_source = temp.path().join("keep-source");
+    let drop_source = temp.path().join("drop-source");
+    let recovery = temp.path().join("recovery.ffrec");
+    fs::create_dir(&keep_source).expect("create keep source");
+    fs::create_dir(&drop_source).expect("create drop source");
+    fs::write(keep_source.join("keep.txt"), b"s3 keep").expect("write keep");
+    fs::write(drop_source.join("drop.txt"), b"s3 drop").expect("write drop");
+
+    let sensitive_values = [
+        bucket.as_str(),
+        repo_prefix.as_str(),
+        access_key_id.as_str(),
+        secret_access_key.as_str(),
+    ];
+    let s3_context = S3LiveCommandContext {
+        endpoint: &endpoint,
+        region: &region,
+        access_key_id: &access_key_id,
+        secret_access_key: &secret_access_key,
+        passphrase,
+        sensitive_values: &sensitive_values,
+    };
+
+    run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "init"], 0);
+    run_s3_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "backup",
+            "--tag",
+            "keep",
+            keep_source.to_str().expect("keep source path"),
+        ],
+        0,
+    );
+    run_s3_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "backup",
+            "--tag",
+            "drop",
+            drop_source.to_str().expect("drop source path"),
+        ],
+        0,
+    );
+
+    let forget_output = run_s3_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--keep-tag",
+            "keep",
+        ],
+        0,
+    );
+    let forget: Value = serde_json::from_slice(&forget_output).expect("forget json");
+    assert_eq!(forget["data"]["snapshots_forgotten"], 1);
+    assert_eq!(forget["data"]["marker_objects_written"], 1);
+    assert_eq!(forget["data"]["object_deletion"], false);
+    assert!(
+        forget["data"]["forgotten_snapshots"][0]["marker_object"]
+            .as_str()
+            .expect("forget marker")
+            .starts_with("forgets/")
+    );
+
+    let snapshots_output =
+        run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "snapshots"], 0);
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(snapshots["data"]["snapshots"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshots["data"]["snapshots"][0]["tags"], json!(["keep"]));
+
+    let key_add_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .output()
+        .expect("run key add");
+    let key_add_output = assert_redacted_s3_output(key_add_output, 0, &sensitive_values);
+    let key_add_text = String::from_utf8(key_add_output.clone()).expect("key add utf8");
+    let key_add: Value = serde_json::from_slice(&key_add_output).expect("key add json");
+    let added_key_slot_id = key_add["data"]["key_slot_id"]
+        .as_str()
+        .expect("added slot id")
+        .to_owned();
+    assert_eq!(key_add["data"]["key_slots"], 2);
+    assert_eq!(key_add["data"]["reencrypted_repository_objects"], false);
+    assert!(!key_add_text.contains(passphrase));
+    assert!(!key_add_text.contains(added_passphrase));
+
+    let added_context = S3LiveCommandContext {
+        passphrase: added_passphrase,
+        ..s3_context
+    };
+    run_s3_json_command(
+        &added_context,
+        ["--repo", &repo_url, "--json", "snapshots"],
+        0,
+    );
+
+    let key_remove_output = run_s3_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "key",
+            "remove",
+            &added_key_slot_id,
+        ],
+        0,
+    );
+    let key_remove: Value = serde_json::from_slice(&key_remove_output).expect("key remove json");
+    assert_eq!(key_remove["data"]["removed_key_slot_id"], added_key_slot_id);
+    assert_eq!(key_remove["data"]["removal_marker_created"], true);
+    assert_eq!(key_remove["data"]["deleted_key_slot_objects"], false);
+
+    let removed_unlock_output = run_s3_json_command(
+        &added_context,
+        ["--repo", &repo_url, "--json", "snapshots"],
+        4,
+    );
+    let removed_unlock: Value =
+        serde_json::from_slice(&removed_unlock_output).expect("removed unlock json");
+    assert_eq!(removed_unlock["data"]["code"], "repository_unlock_failed");
+
+    let old_slot_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", old_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .output()
+        .expect("run old key add");
+    let old_slot_output = assert_redacted_s3_output(old_slot_output, 0, &sensitive_values);
+    let old_slot: Value = serde_json::from_slice(&old_slot_output).expect("old key add json");
+    let old_key_slot_id = old_slot["data"]["key_slot_id"]
+        .as_str()
+        .expect("old slot id")
+        .to_owned();
+
+    let key_rotate_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", old_passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", rotated_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "key",
+            "rotate",
+            "--retire-key-slot",
+            &old_key_slot_id,
+        ])
+        .output()
+        .expect("run key rotate");
+    let key_rotate_output = assert_redacted_s3_output(key_rotate_output, 0, &sensitive_values);
+    let key_rotate_text = String::from_utf8(key_rotate_output.clone()).expect("rotate utf8");
+    let key_rotate: Value = serde_json::from_slice(&key_rotate_output).expect("rotate json");
+    assert_eq!(
+        key_rotate["data"]["removed_key_slot_ids"],
+        json!([old_key_slot_id])
+    );
+    assert_eq!(key_rotate["data"]["removal_markers_created"], 1);
+    assert_eq!(key_rotate["data"]["deleted_key_slot_objects"], false);
+    assert_eq!(key_rotate["data"]["reencrypted_repository_objects"], false);
+    assert!(!key_rotate_text.contains(old_passphrase));
+    assert!(!key_rotate_text.contains(rotated_passphrase));
+
+    let rotated_context = S3LiveCommandContext {
+        passphrase: rotated_passphrase,
+        ..s3_context
+    };
+    run_s3_json_command(
+        &rotated_context,
+        ["--repo", &repo_url, "--json", "snapshots"],
+        0,
+    );
+
+    let old_context = S3LiveCommandContext {
+        passphrase: old_passphrase,
+        ..s3_context
+    };
+    let old_unlock_output = run_s3_json_command(
+        &old_context,
+        ["--repo", &repo_url, "--json", "snapshots"],
+        4,
+    );
+    let old_unlock: Value = serde_json::from_slice(&old_unlock_output).expect("old unlock json");
+    assert_eq!(old_unlock["data"]["code"], "repository_unlock_failed");
+
+    let export_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", rotated_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "key",
+            "export-recovery",
+            "--output",
+            recovery.to_str().expect("recovery path"),
+        ])
+        .output()
+        .expect("run export recovery");
+    let export_output = assert_redacted_s3_output(export_output, 0, &sensitive_values);
+    let export_text = String::from_utf8(export_output.clone()).expect("export utf8");
+    let export: Value = serde_json::from_slice(&export_output).expect("export json");
+    assert_eq!(export["data"]["raw_master_key_exported"], false);
+    assert_eq!(export["data"]["reencrypted_repository_objects"], false);
+    assert!(recovery.is_file());
+    assert!(!export_text.contains(rotated_passphrase));
+
+    let cleanup_store = s3_cleanup_store(
+        &bucket,
+        &region,
+        &endpoint,
+        &access_key_id,
+        &secret_access_key,
+        &repo_prefix,
+    );
+    let runtime = tokio::runtime::Runtime::new().expect("s3 retention cleanup runtime");
+    let keys = runtime
+        .block_on(cleanup_store.list_prefix(&ObjectKeyPrefix::root()))
+        .expect("list s3 retention cleanup keys");
+    for key in keys {
+        runtime
+            .block_on(cleanup_store.delete(&key))
+            .expect("delete s3 retention cleanup key");
+    }
+}
+
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for S3 integration"))
 }
@@ -3241,6 +3498,7 @@ fn s3_fileferry(
     command
 }
 
+#[derive(Clone, Copy)]
 struct S3LiveCommandContext<'a> {
     endpoint: &'a str,
     region: &'a str,
