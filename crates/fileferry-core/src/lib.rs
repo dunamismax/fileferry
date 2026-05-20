@@ -10,7 +10,8 @@ use fileferry_crypto::{
     unlock_master_key,
 };
 use fileferry_platform::{
-    EntryKind, EntryMetadata, MetadataValue, PlatformError, Timestamp, capture_metadata,
+    EntryKind, EntryMetadata, MetadataValue, PlatformError, PlatformKind, Timestamp,
+    capture_metadata, current_platform,
 };
 use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, StorageError};
 use secrecy::SecretString;
@@ -3088,6 +3089,7 @@ impl BackupPipeline {
                 EntryKind::Directory => {
                     directories.push(RestoredDirectory {
                         relative_path: entry.relative_path.clone(),
+                        source_platform: entry.metadata.source_platform,
                         modified: entry.metadata.modified.clone(),
                     });
                     continue;
@@ -3103,14 +3105,20 @@ impl BackupPipeline {
                         MetadataValue::Unsupported => {
                             metadata_warnings.push(RestoreMetadataWarning {
                                 relative_path: entry.relative_path.clone(),
+                                namespace: "portable",
                                 field: "symlink_target",
+                                source_platform: entry.metadata.source_platform,
+                                destination_platform: current_platform(),
                                 reason: "symlink target was not captured".to_owned(),
                             });
                         }
                         MetadataValue::Denied(reason) => {
                             metadata_warnings.push(RestoreMetadataWarning {
                                 relative_path: entry.relative_path.clone(),
+                                namespace: "portable",
                                 field: "symlink_target",
+                                source_platform: entry.metadata.source_platform,
+                                destination_platform: current_platform(),
                                 reason: format!("symlink target was denied: {reason}"),
                             });
                         }
@@ -3208,6 +3216,7 @@ impl BackupPipeline {
             files.push(RestoredFile {
                 relative_path: entry.relative_path.clone(),
                 contents,
+                source_platform: entry.metadata.source_platform,
                 modified: entry.metadata.modified.clone(),
             });
         }
@@ -3283,6 +3292,7 @@ impl BackupPipeline {
             planned_directories.push(RestoreDestinationDirectory {
                 relative_path: directory.relative_path,
                 destination_path,
+                source_platform: directory.source_platform,
                 modified: directory.modified,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
@@ -3308,6 +3318,7 @@ impl BackupPipeline {
                 relative_path: file.relative_path,
                 destination_path,
                 bytes: byte_len,
+                source_platform: file.source_platform,
                 modified: file.modified,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
@@ -3339,6 +3350,7 @@ impl BackupPipeline {
             for file in &planned_files {
                 plan_restored_modified_timestamp(
                     &file.relative_path,
+                    file.source_platform,
                     &file.modified,
                     &mut metadata_warnings,
                 );
@@ -3347,6 +3359,7 @@ impl BackupPipeline {
             for directory in &planned_directories {
                 plan_restored_modified_timestamp(
                     &directory.relative_path,
+                    directory.source_platform,
                     &directory.modified,
                     &mut metadata_warnings,
                 );
@@ -3356,6 +3369,7 @@ impl BackupPipeline {
                 metadata_applied += apply_restored_modified_timestamp(
                     &file.destination_path,
                     &file.relative_path,
+                    file.source_platform,
                     &file.modified,
                     RestoredMetadataTarget::RegularFile,
                     &mut metadata_warnings,
@@ -3366,6 +3380,7 @@ impl BackupPipeline {
                 metadata_applied += apply_restored_modified_timestamp(
                     &directory.destination_path,
                     &directory.relative_path,
+                    directory.source_platform,
                     &directory.modified,
                     RestoredMetadataTarget::Directory,
                     &mut metadata_warnings,
@@ -3884,6 +3899,7 @@ pub struct RestoreContentResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoredDirectory {
     pub relative_path: PathBuf,
+    pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
 }
 
@@ -3891,6 +3907,7 @@ pub struct RestoredDirectory {
 pub struct RestoredFile {
     pub relative_path: PathBuf,
     pub contents: Vec<u8>,
+    pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
 }
 
@@ -3936,6 +3953,7 @@ pub struct RestoreDestinationResult {
 pub struct RestoreDestinationDirectory {
     pub relative_path: PathBuf,
     pub destination_path: PathBuf,
+    pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
     pub action: RestoreDestinationAction,
 }
@@ -3945,6 +3963,7 @@ pub struct RestoreDestinationFile {
     pub relative_path: PathBuf,
     pub destination_path: PathBuf,
     pub bytes: u64,
+    pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
     pub action: RestoreDestinationAction,
     pub verified: bool,
@@ -3967,7 +3986,10 @@ pub enum RestoreDestinationAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoreMetadataWarning {
     pub relative_path: PathBuf,
+    pub namespace: &'static str,
     pub field: &'static str,
+    pub source_platform: PlatformKind,
+    pub destination_platform: PlatformKind,
     pub reason: String,
 }
 
@@ -4405,11 +4427,13 @@ enum RestoredMetadataTarget {
 fn apply_restored_modified_timestamp(
     destination_path: &Path,
     relative_path: &Path,
+    source_platform: PlatformKind,
     modified: &MetadataValue<Timestamp>,
     target: RestoredMetadataTarget,
     warnings: &mut Vec<RestoreMetadataWarning>,
 ) -> usize {
-    let Some(modified_time) = restored_modified_time_or_warn(relative_path, modified, warnings)
+    let Some(modified_time) =
+        restored_modified_time_or_warn(relative_path, source_platform, modified, warnings)
     else {
         return 0;
     };
@@ -4419,7 +4443,10 @@ fn apply_restored_modified_timestamp(
         Err(source) => {
             warnings.push(RestoreMetadataWarning {
                 relative_path: relative_path.to_path_buf(),
+                namespace: "portable",
                 field: "modified",
+                source_platform,
+                destination_platform: current_platform(),
                 reason: format!("modified timestamp could not be applied: {source}"),
             });
             0
@@ -4429,14 +4456,16 @@ fn apply_restored_modified_timestamp(
 
 fn plan_restored_modified_timestamp(
     relative_path: &Path,
+    source_platform: PlatformKind,
     modified: &MetadataValue<Timestamp>,
     warnings: &mut Vec<RestoreMetadataWarning>,
 ) {
-    let _ = restored_modified_time_or_warn(relative_path, modified, warnings);
+    let _ = restored_modified_time_or_warn(relative_path, source_platform, modified, warnings);
 }
 
 fn restored_modified_time_or_warn(
     relative_path: &Path,
+    source_platform: PlatformKind,
     modified: &MetadataValue<Timestamp>,
     warnings: &mut Vec<RestoreMetadataWarning>,
 ) -> Option<SystemTime> {
@@ -4445,7 +4474,10 @@ fn restored_modified_time_or_warn(
         MetadataValue::Unsupported => {
             warnings.push(RestoreMetadataWarning {
                 relative_path: relative_path.to_path_buf(),
+                namespace: "portable",
                 field: "modified",
+                source_platform,
+                destination_platform: current_platform(),
                 reason: "modified timestamp was not captured".to_owned(),
             });
             return None;
@@ -4453,7 +4485,10 @@ fn restored_modified_time_or_warn(
         MetadataValue::Denied(reason) => {
             warnings.push(RestoreMetadataWarning {
                 relative_path: relative_path.to_path_buf(),
+                namespace: "portable",
                 field: "modified",
+                source_platform,
+                destination_platform: current_platform(),
                 reason: format!("modified timestamp was denied during backup: {reason}"),
             });
             return None;
@@ -4463,7 +4498,10 @@ fn restored_modified_time_or_warn(
     let Some(modified_time) = system_time_from_timestamp(*timestamp) else {
         warnings.push(RestoreMetadataWarning {
             relative_path: relative_path.to_path_buf(),
+            namespace: "portable",
             field: "modified",
+            source_platform,
+            destination_platform: current_platform(),
             reason: "modified timestamp is outside the supported system time range".to_owned(),
         });
         return None;
@@ -7546,6 +7584,7 @@ mod tests {
         let applied = apply_restored_modified_timestamp(
             &path,
             Path::new("sample.txt"),
+            current_platform(),
             &MetadataValue::Unsupported,
             RestoredMetadataTarget::RegularFile,
             &mut warnings,
@@ -7556,7 +7595,10 @@ mod tests {
             warnings,
             vec![RestoreMetadataWarning {
                 relative_path: PathBuf::from("sample.txt"),
+                namespace: "portable",
                 field: "modified",
+                source_platform: current_platform(),
+                destination_platform: current_platform(),
                 reason: "modified timestamp was not captured".to_owned(),
             }]
         );
@@ -7568,11 +7610,13 @@ mod tests {
 
         plan_restored_modified_timestamp(
             Path::new("denied.txt"),
+            current_platform(),
             &MetadataValue::Denied("permission denied".to_owned()),
             &mut warnings,
         );
         plan_restored_modified_timestamp(
             Path::new("invalid.txt"),
+            current_platform(),
             &MetadataValue::Captured(Timestamp {
                 seconds: 0,
                 nanoseconds: 1_000_000_000,
@@ -7585,13 +7629,19 @@ mod tests {
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("denied.txt"),
+                    namespace: "portable",
                     field: "modified",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
                     reason: "modified timestamp was denied during backup: permission denied"
                         .to_owned(),
                 },
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("invalid.txt"),
+                    namespace: "portable",
                     field: "modified",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
                     reason: "modified timestamp is outside the supported system time range"
                         .to_owned(),
                 },
@@ -8404,6 +8454,7 @@ mod tests {
             relative_path: PathBuf::from(relative_path),
             metadata: EntryMetadata {
                 kind,
+                source_platform: current_platform(),
                 size_bytes,
                 modified: MetadataValue::Captured(Timestamp {
                     seconds: 1,

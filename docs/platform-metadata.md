@@ -58,16 +58,19 @@ events. A strict mode may promote those warnings to failure.
 Restore applies content first, then portable metadata, then platform-specific
 metadata that the destination can represent.
 
-Current implementation status: initialized local repository restores apply
-captured modified timestamps for restored regular files and directories after
-content writes and verification. Dry-run restore reports the count of
-regular-file and directory modified timestamp fields selected for restore and
-can surface denied, unsupported, or invalid timestamp warnings without writing
-destination entries. Current restores do not restore symlink timestamps,
-creation/birth time, ownership, mode bits, ACLs, xattrs, resource forks,
-Windows attributes, BSD flags, sparse extents, or other platform-specific
-metadata yet. A timestamp that was selected for application but could not be
-applied is reported as a metadata warning; a restore with only metadata
+Current implementation status: initialized local and S3-compatible repository
+restores apply captured modified timestamps for restored regular files and
+directories after content writes and verification. Dry-run restore reports the
+count of regular-file and directory modified timestamp fields selected for
+restore and can surface denied, unsupported, or invalid timestamp warnings
+without writing destination entries. Captured entry metadata records the source
+platform for new manifests; older v0 manifests that lack this field are read as
+`unknown`. Current restores do not restore symlink timestamps, creation/birth
+time, ownership, mode bits, ACLs, xattrs, resource forks, Windows attributes,
+BSD flags, sparse extents, or other platform-specific metadata yet. A
+timestamp that was selected for application but could not be applied is
+reported as a metadata warning with entry id, metadata namespace, field, source
+platform, destination platform, and reason; a restore with only metadata
 warnings returns partial-success exit code `10`.
 
 When metadata cannot be represented on the destination platform, FileFerry must:

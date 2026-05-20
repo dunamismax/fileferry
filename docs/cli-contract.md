@@ -255,8 +255,13 @@ SnapshotSummary
   entry_count: integer
 
 RestoreMetadataWarning
+  entry_id: snapshot entry identifier; currently the snapshot-relative path
   path: snapshot-relative string
+  namespace: metadata namespace, for example "portable"
   field: string
+  source_platform: "windows" | "macos" | "linux" | "freebsd" | "netbsd" |
+                   "openbsd" | "unix" | "unknown"
+  destination_platform: same values as source_platform
   reason: string
 
 SnapshotEntry
@@ -273,8 +278,13 @@ TimestampValue
   denial_reason: string, present only when status is "denied"
 
 RestoreMetadataWarning
+  entry_id: snapshot entry identifier; currently the snapshot-relative path
   path: snapshot-relative string
+  namespace: metadata namespace, for example "portable"
   field: string
+  source_platform: "windows" | "macos" | "linux" | "freebsd" | "netbsd" |
+                   "openbsd" | "unix" | "unknown"
+  destination_platform: same values as source_platform
   reason: string
 
 CheckFinding

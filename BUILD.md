@@ -182,10 +182,16 @@ Last reviewed: 2026-05-20.
 - `fileferry-policy` has a tested parser for count-based and tag-based
   retention keep rules.
 - `docs/platform-metadata.md` defines the v1 metadata capture target and
-  restore reporting behavior for unrepresentable metadata.
+  restore reporting behavior for unrepresentable metadata. Current restore
+  metadata warnings include item-level namespace, field, source platform,
+  destination platform, and reason context in machine output.
 - `fileferry-platform` has initial tested portable metadata capture for entry
-  kind, regular-file size, timestamps where exposed by `std`, symlink targets,
-  and Unix mode/ownership where available.
+  kind, source platform, regular-file size, timestamps where exposed by `std`,
+  symlink targets, and Unix mode/ownership where available. It also has
+  focused tests for path normalization facts, Windows reserved-name detection,
+  observed case behavior, Unix symlink capture, long-path metadata capture
+  where the filesystem allows it, and permission-denied metadata reads where
+  the platform exposes them.
 - `fileferry-testkit` has a tested in-memory fake object store for future
   repository and pipeline tests.
 - `fileferry-core` has a tested deterministic source walker with wildcard
@@ -852,6 +858,25 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-20 - Completed a Milestone G metadata warning contract hardening
+  slice without claiming broader platform support. Captured entry metadata now
+  records the source platform for new manifests and deserializes older v0
+  manifests without that field as `unknown`. Restore metadata warnings now
+  carry snapshot entry id, metadata namespace, metadata field, source
+  platform, destination platform, and reason through core results and CLI JSON
+  and JSONL output while preserving human stderr warnings and partial-success
+  exit code `10`. Added platform-owned tests for normalized relative path
+  facts, Windows reserved-name detection without host support claims, observed
+  case behavior, Unix symlink target capture, long-path metadata capture where
+  the filesystem allows it, permission-denied metadata reads where exposed,
+  and backwards-compatible metadata deserialization. Updated
+  `docs/cli-contract.md`, `docs/platform-metadata.md`,
+  `docs/repository-format.md`, and this file. Verified with
+  `cargo test -p fileferry-platform --no-fail-fast`, `cargo test -p
+  fileferry-core restore_snapshot_to_destination --no-fail-fast`, `cargo test
+  -p fileferry-cli restore_jsonl_metadata_warnings_stay_on_stdout
+  --no-fail-fast`, `cargo test -p fileferry-core -p fileferry-cli
+  --no-fail-fast`, `just fmt`, `just check`, `just test`, and `just build`.
 - 2026-05-20 - Completed Milestone F S3 two-phase prune implementation
   without claiming new live provider evidence. `ferry prune` now accepts
   initialized S3-compatible repositories through the shared S3 repository

@@ -171,7 +171,9 @@ Required manifest fields before format freeze:
 - Tags and host/profile metadata, encrypted.
 - File, directory, symlink, and special-file records.
 - Chunk references for regular file content.
-- Platform metadata records or references.
+- Platform metadata records or references, including the captured source
+  platform for new manifests. Older v0 manifests without a source-platform
+  field are treated as `unknown` by current readers.
 - Index ids required to restore the snapshot.
 - Backup command summary fields that are safe after encryption.
 

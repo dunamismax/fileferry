@@ -10,7 +10,7 @@ use fileferry_core::{
     snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
-use fileferry_platform::{EntryKind, MetadataValue};
+use fileferry_platform::{EntryKind, MetadataValue, PlatformKind};
 use fileferry_policy::{
     PolicyError, RetentionAction, RetentionCount, RetentionDecision, RetentionPlan,
     RetentionPolicy, RetentionSnapshot,
@@ -826,8 +826,12 @@ enum CliRestoreOverwritePolicy {
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 struct RestoreMetadataWarning {
+    entry_id: String,
     path: String,
+    namespace: String,
     field: String,
+    source_platform: PlatformKind,
+    destination_platform: PlatformKind,
     reason: String,
 }
 
@@ -2231,8 +2235,12 @@ fn restore(
             .metadata_warnings
             .into_iter()
             .map(|warning| RestoreMetadataWarning {
+                entry_id: display_snapshot_path(&warning.relative_path),
                 path: display_snapshot_path(&warning.relative_path),
+                namespace: warning.namespace.to_owned(),
                 field: warning.field.to_owned(),
+                source_platform: warning.source_platform,
+                destination_platform: warning.destination_platform,
                 reason: warning.reason,
             })
             .collect(),
@@ -3470,8 +3478,12 @@ mod tests {
                 metadata_planned: 1,
                 metadata_applied: 0,
                 metadata_warnings: vec![RestoreMetadataWarning {
+                    entry_id: "sample.txt".to_owned(),
                     path: "sample.txt".to_owned(),
+                    namespace: "portable".to_owned(),
                     field: "modified".to_owned(),
+                    source_platform: PlatformKind::Linux,
+                    destination_platform: PlatformKind::Linux,
                     reason: "modified timestamp was not captured".to_owned(),
                 }],
                 bytes_written: 6,
@@ -3502,8 +3514,12 @@ mod tests {
                 metadata_planned: 1,
                 metadata_applied: 0,
                 metadata_warnings: vec![RestoreMetadataWarning {
+                    entry_id: "sample.txt".to_owned(),
                     path: "sample.txt".to_owned(),
+                    namespace: "portable".to_owned(),
                     field: "modified".to_owned(),
+                    source_platform: PlatformKind::Linux,
+                    destination_platform: PlatformKind::Linux,
                     reason: "modified timestamp was not captured".to_owned(),
                 }],
                 bytes_written: 6,
@@ -3520,7 +3536,14 @@ mod tests {
 
         assert_eq!(output.exit_code, 10);
         assert_eq!(output.stderr, "");
-        assert!(lines.iter().any(|event| event["event"] == "warning"));
+        let warning = lines
+            .iter()
+            .find(|event| event["event"] == "warning")
+            .expect("warning event");
+        assert_eq!(warning["data"]["entry_id"], "sample.txt");
+        assert_eq!(warning["data"]["namespace"], "portable");
+        assert_eq!(warning["data"]["source_platform"], "linux");
+        assert_eq!(warning["data"]["destination_platform"], "linux");
         assert_eq!(
             lines.last().expect("completed event")["event"],
             "command_completed"

@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsStr,
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -41,6 +42,35 @@ pub enum MetadataValue<T> {
     Denied(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformKind {
+    Windows,
+    Macos,
+    Linux,
+    Freebsd,
+    Netbsd,
+    Openbsd,
+    Unix,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseBehavior {
+    CaseSensitive,
+    CaseInsensitive,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathFacts {
+    pub normalized_relative: bool,
+    pub has_parent_component: bool,
+    pub has_root_or_prefix: bool,
+    pub has_windows_reserved_name: bool,
+    pub segment_count: usize,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Timestamp {
     pub seconds: i64,
@@ -50,6 +80,8 @@ pub struct Timestamp {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct EntryMetadata {
     pub kind: EntryKind,
+    #[serde(default)]
+    pub source_platform: PlatformKind,
     pub size_bytes: Option<u64>,
     pub modified: MetadataValue<Timestamp>,
     pub created: MetadataValue<Timestamp>,
@@ -101,6 +133,7 @@ pub fn capture_metadata(path: impl AsRef<Path>) -> Result<EntryMetadata, Platfor
 
     Ok(EntryMetadata {
         kind,
+        source_platform: current_platform(),
         size_bytes: if file_type.is_file() {
             Some(metadata.len())
         } else {
@@ -111,6 +144,96 @@ pub fn capture_metadata(path: impl AsRef<Path>) -> Result<EntryMetadata, Platfor
         symlink_target,
         unix: unix_metadata(&metadata),
     })
+}
+
+pub const fn current_platform() -> PlatformKind {
+    if cfg!(windows) {
+        PlatformKind::Windows
+    } else if cfg!(target_os = "macos") {
+        PlatformKind::Macos
+    } else if cfg!(target_os = "linux") {
+        PlatformKind::Linux
+    } else if cfg!(target_os = "freebsd") {
+        PlatformKind::Freebsd
+    } else if cfg!(target_os = "netbsd") {
+        PlatformKind::Netbsd
+    } else if cfg!(target_os = "openbsd") {
+        PlatformKind::Openbsd
+    } else if cfg!(unix) {
+        PlatformKind::Unix
+    } else {
+        PlatformKind::Unknown
+    }
+}
+
+pub fn path_facts(path: impl AsRef<Path>) -> PathFacts {
+    let mut normalized = PathBuf::new();
+    let mut has_parent_component = false;
+    let mut has_root_or_prefix = false;
+    let mut has_windows_reserved_name = false;
+    let mut segment_count = 0_usize;
+
+    for component in path.as_ref().components() {
+        match component {
+            Component::Normal(segment) => {
+                segment_count += 1;
+                normalized.push(segment);
+                has_windows_reserved_name |= is_windows_reserved_name(segment);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => has_parent_component = true,
+            Component::RootDir | Component::Prefix(_) => has_root_or_prefix = true,
+        }
+    }
+
+    PathFacts {
+        normalized_relative: !has_parent_component
+            && !has_root_or_prefix
+            && normalized == path.as_ref(),
+        has_parent_component,
+        has_root_or_prefix,
+        has_windows_reserved_name,
+        segment_count,
+    }
+}
+
+pub fn is_windows_reserved_name(segment: &OsStr) -> bool {
+    let Some(name) = segment.to_str() else {
+        return false;
+    };
+    let stem = name
+        .trim_end_matches([' ', '.'])
+        .split_once('.')
+        .map_or(name.trim_end_matches([' ', '.']), |(stem, _)| stem);
+    let upper = stem.to_ascii_uppercase();
+
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || reserved_numbered_device(&upper, "COM")
+        || reserved_numbered_device(&upper, "LPT")
+}
+
+fn reserved_numbered_device(upper: &str, prefix: &str) -> bool {
+    let Some(number) = upper.strip_prefix(prefix) else {
+        return false;
+    };
+
+    matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+}
+
+pub fn probe_case_behavior(directory: impl AsRef<Path>) -> io::Result<CaseBehavior> {
+    let directory = directory.as_ref();
+    let lower = directory.join("fileferry-case-probe");
+    let upper = directory.join("FILEFERRY-CASE-PROBE");
+
+    fs::write(&lower, b"case")?;
+    let behavior = if upper.exists() {
+        CaseBehavior::CaseInsensitive
+    } else {
+        CaseBehavior::CaseSensitive
+    };
+    fs::remove_file(&lower)?;
+
+    Ok(behavior)
 }
 
 fn metadata_value_from_time(result: io::Result<SystemTime>) -> MetadataValue<Timestamp> {
@@ -177,6 +300,7 @@ mod tests {
         let metadata = capture_metadata(&path).expect("metadata");
 
         assert_eq!(metadata.kind, EntryKind::RegularFile);
+        assert_eq!(metadata.source_platform, current_platform());
         assert_eq!(metadata.size_bytes, Some(5));
         assert!(matches!(
             metadata.modified,
@@ -196,6 +320,23 @@ mod tests {
 
         assert_eq!(metadata.kind, EntryKind::Directory);
         assert_eq!(metadata.size_bytes, None);
+    }
+
+    #[test]
+    fn deserializes_older_metadata_without_source_platform_as_unknown() {
+        let metadata: EntryMetadata = serde_json::from_str(
+            r#"{
+                "kind": "regular_file",
+                "size_bytes": 5,
+                "modified": { "captured": { "seconds": 1, "nanoseconds": 0 } },
+                "created": "unsupported",
+                "symlink_target": "unsupported",
+                "unix": null
+            }"#,
+        )
+        .expect("deserialize metadata");
+
+        assert_eq!(metadata.source_platform, PlatformKind::Unknown);
     }
 
     #[cfg(unix)]
@@ -227,5 +368,86 @@ mod tests {
         let error = capture_metadata(&missing).expect_err("missing path");
 
         assert!(error.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn classifies_normalized_relative_paths_and_parent_components() {
+        let relative = Path::new("dir").join("file.txt");
+        let facts = path_facts(&relative);
+
+        assert!(facts.normalized_relative);
+        assert!(!facts.has_parent_component);
+        assert!(!facts.has_root_or_prefix);
+        assert_eq!(facts.segment_count, 2);
+
+        let escaping = Path::new("dir").join("..").join("file.txt");
+        let facts = path_facts(&escaping);
+
+        assert!(!facts.normalized_relative);
+        assert!(facts.has_parent_component);
+    }
+
+    #[test]
+    fn detects_windows_reserved_names_without_host_claims() {
+        assert!(is_windows_reserved_name(OsStr::new("CON")));
+        assert!(is_windows_reserved_name(OsStr::new("nul.txt")));
+        assert!(is_windows_reserved_name(OsStr::new("LPT9")));
+        assert!(!is_windows_reserved_name(OsStr::new("COM10")));
+        assert!(!is_windows_reserved_name(OsStr::new("regular.txt")));
+
+        let facts = path_facts(Path::new("backup").join("aux.log"));
+        assert!(facts.has_windows_reserved_name);
+    }
+
+    #[test]
+    fn probes_observed_case_behavior_for_temp_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let behavior = probe_case_behavior(temp.path()).expect("probe case behavior");
+
+        assert!(matches!(
+            behavior,
+            CaseBehavior::CaseSensitive | CaseBehavior::CaseInsensitive
+        ));
+    }
+
+    #[test]
+    fn captures_metadata_for_long_relative_tree_where_filesystem_allows_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut directory = temp.path().to_path_buf();
+        for index in 0..8 {
+            directory.push(format!("segment-{index:02}-fileferry"));
+        }
+        fs::create_dir_all(&directory).expect("create long directory tree");
+        let file = directory.join("sample.txt");
+        fs::write(&file, b"long path").expect("write long path file");
+
+        let metadata = capture_metadata(&file).expect("long path metadata");
+
+        assert_eq!(metadata.kind, EntryKind::RegularFile);
+        assert_eq!(metadata.size_bytes, Some(9));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reports_permission_denied_when_parent_search_is_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let locked_dir = temp.path().join("locked");
+        fs::create_dir(&locked_dir).expect("create locked dir");
+        let child = locked_dir.join("child.txt");
+        fs::write(&child, b"child").expect("write child");
+        let original = fs::metadata(&locked_dir)
+            .expect("locked metadata")
+            .permissions();
+
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000))
+            .expect("deny parent search");
+        let result = capture_metadata(&child);
+        fs::set_permissions(&locked_dir, original).expect("restore parent permissions");
+
+        if let Err(PlatformError::MetadataRead { source, .. }) = result {
+            assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+        }
     }
 }
