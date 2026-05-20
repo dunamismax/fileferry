@@ -35,6 +35,14 @@ Last reviewed: 2026-05-20.
   `forget`, `prune`, and key-management paths remain intentionally
   unsupported and fail with exit code `9` and redacted repository URLs before
   password or S3 credential access.
+- S3-compatible data-path provider evidence has passed against the private
+  Backblaze B2 development bucket under an isolated `fileferry/dev/...` test
+  prefix. The live drill confirmed `init`, `backup`, `snapshots`, `ls`,
+  `restore`, and `check` against an initialized S3-compatible repository,
+  safe JSON stdout/stderr separation, restored bytes, full check success, and
+  missing referenced object failure during `check` with integrity exit code
+  `6`, `repository_check_missing_object`, and machine-readable object-key
+  context.
 - `ferry backup` opens initialized local and S3-compatible repositories,
   unlocks them with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
   creates encrypted, compressed, deduplicated snapshots through the core
@@ -249,35 +257,6 @@ one active milestone end to end over making many small adjacent improvements.
 Choose the first unfinished milestone that can be completed honestly in the
 current session. If it is too large, split it into explicit sub-milestones in
 this section before coding.
-
-### Milestone D2 - S3 Data-Path Provider Evidence
-
-Goal: Prove the implemented S3-compatible data-path slice against an isolated
-live S3-compatible repository before extending retention or key management.
-
-Definition of done:
-
-- Run the gated `FILEFERRY_S3_DATA_INTEGRATION=1` CLI drill against the
-  isolated Backblaze B2 development prefix described in
-  `docs/backblaze-b2-dev-storage.md`.
-- Confirm `init`, `backup`, `snapshots`, `ls`, `restore`, and `check` work
-  against the initialized S3-compatible repository with the same encryption
-  and authentication model as local repositories.
-- Confirm missing referenced S3 objects fail closed with integrity exit code
-  `6` and safe machine-readable object-key context.
-- Confirm command output preserves stdout/stderr separation and existing
-  JSON/JSONL contracts.
-- Record the observed provider evidence in `BUILD.md` Recent Work and any
-  durable operations notes that changed.
-
-Non-goals:
-
-- New S3-compatible command implementation beyond the existing data-path
-  slice.
-- S3-compatible forget, prune, or key management.
-- Native Backblaze B2 APIs.
-- New storage providers.
-- Platform support claims.
 
 ### Milestone E - S3 Retention And Key Management
 
@@ -915,6 +894,28 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-20 - Completed Milestone D2 S3 data-path provider evidence against
+  the private Backblaze B2 development bucket `dunamismax-b2` in region
+  `us-east-005`, using unique prefixes under `fileferry/dev`. Hardened the
+  gated CLI live test so S3 command failures are reported with redacted
+  stdout/stderr instead of formatting the command environment, then ran the
+  live drill with `FILEFERRY_S3_DATA_INTEGRATION=1`. The drill created an
+  initialized S3-compatible repository, ran `init`, `backup`, `snapshots`,
+  `ls`, `restore`, and `check`, verified restored bytes, verified successful
+  check readback of referenced encrypted chunks, deleted a referenced
+  manifest object, confirmed `ferry check --json` failed closed with exit code
+  `6`, `repository_check_missing_object`, and machine-readable `object_key`
+  and `finding.object_key` context, and cleaned up only the unique test
+  prefix. The storage live round trip also passed against the same Backblaze
+  environment with conditional create disabled for B2. S3-compatible
+  retention, prune, and key management remain unimplemented. Verified with
+  `FILEFERRY_S3_DATA_INTEGRATION=1 cargo test -p fileferry-cli
+  s3_data_path_live_integration_when_env_is_enabled --no-fail-fast` and
+  `FILEFERRY_S3_INTEGRATION=1 cargo test -p fileferry-storage
+  s3_store_round_trip_when_integration_env_is_enabled --no-fail-fast`.
+  Additional non-live verification passed with `cargo test -p fileferry-core
+  -p fileferry-cli --no-fail-fast`, `just fmt`, `just check`, `just test`,
+  `just build`, and `git diff --check`.
 - 2026-05-20 - Implemented the Milestone D S3 backup/read command slice
   without claiming live provider verification. `ferry backup`, `ferry
   snapshots`, `ferry ls`, `ferry restore`, and `ferry check` now accept

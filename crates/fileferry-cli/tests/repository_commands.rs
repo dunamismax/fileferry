@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::Path,
+    process::Output,
     time::{Duration, SystemTime},
 };
 
@@ -3067,16 +3068,26 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
     fs::write(source.join("sample.txt"), b"s3 sample").expect("write sample");
     fs::write(source.join("nested").join("keep.txt"), b"s3 nested").expect("write nested");
 
-    s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
-        .env("FILEFERRY_PASSWORD", passphrase)
-        .args(["--repo", &repo_url, "--json", "init"])
-        .assert()
-        .success()
-        .stderr("");
+    let sensitive_values = [
+        bucket.as_str(),
+        repo_prefix.as_str(),
+        access_key_id.as_str(),
+        secret_access_key.as_str(),
+    ];
+    let s3_context = S3LiveCommandContext {
+        endpoint: &endpoint,
+        region: &region,
+        access_key_id: &access_key_id,
+        secret_access_key: &secret_access_key,
+        passphrase,
+        sensitive_values: &sensitive_values,
+    };
 
-    let backup_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
-        .env("FILEFERRY_PASSWORD", passphrase)
-        .args([
+    run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "init"], 0);
+
+    let backup_output = run_s3_json_command(
+        &s3_context,
+        [
             "--repo",
             &repo_url,
             "--json",
@@ -3084,13 +3095,9 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
             "--tag",
             "s3-data",
             source.to_str().expect("source path"),
-        ])
-        .assert()
-        .success()
-        .stderr("")
-        .get_output()
-        .stdout
-        .clone();
+        ],
+        0,
+    );
     let backup_text = String::from_utf8(backup_output.clone()).expect("backup utf8");
     let backup: Value = serde_json::from_slice(&backup_output).expect("backup json");
     let snapshot_id = backup["data"]["snapshot_id"].as_str().expect("snapshot id");
@@ -3103,37 +3110,26 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
     assert!(!backup_text.contains(&access_key_id));
     assert!(!backup_text.contains(&secret_access_key));
 
-    let snapshots_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
-        .env("FILEFERRY_PASSWORD", passphrase)
-        .args(["--repo", &repo_url, "--json", "snapshots"])
-        .assert()
-        .success()
-        .stderr("")
-        .get_output()
-        .stdout
-        .clone();
+    let snapshots_output =
+        run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "snapshots"], 0);
     let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
     assert_eq!(
         snapshots["data"]["snapshots"][0]["snapshot_id"],
         snapshot_id
     );
 
-    let ls_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
-        .env("FILEFERRY_PASSWORD", passphrase)
-        .args([
+    let ls_output = run_s3_json_command(
+        &s3_context,
+        [
             "--repo",
             &repo_url,
             "--json",
             "ls",
             "--snapshot",
             snapshot_id,
-        ])
-        .assert()
-        .success()
-        .stderr("")
-        .get_output()
-        .stdout
-        .clone();
+        ],
+        0,
+    );
     let listing: Value = serde_json::from_slice(&ls_output).expect("ls json");
     let listed_paths = listing["data"]["entries"]
         .as_array()
@@ -3144,9 +3140,9 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
     assert!(listed_paths.contains(&"nested"));
     assert!(listed_paths.contains(&"sample.txt"));
 
-    let restore_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
-        .env("FILEFERRY_PASSWORD", passphrase)
-        .args([
+    let restore_output = run_s3_json_command(
+        &s3_context,
+        [
             "--repo",
             &repo_url,
             "--json",
@@ -3154,13 +3150,9 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
             "--snapshot",
             snapshot_id,
             destination.to_str().expect("destination path"),
-        ])
-        .assert()
-        .success()
-        .stderr("")
-        .get_output()
-        .stdout
-        .clone();
+        ],
+        0,
+    );
     let restore: Value = serde_json::from_slice(&restore_output).expect("restore json");
     assert_eq!(restore["data"]["snapshot_id"], snapshot_id);
     assert_eq!(
@@ -3172,15 +3164,8 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
         b"s3 nested"
     );
 
-    let check_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
-        .env("FILEFERRY_PASSWORD", passphrase)
-        .args(["--repo", &repo_url, "--json", "check"])
-        .assert()
-        .success()
-        .stderr("")
-        .get_output()
-        .stdout
-        .clone();
+    let check_output =
+        run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "check"], 0);
     let check: Value = serde_json::from_slice(&check_output).expect("check json");
     assert_eq!(check["status"], "success");
     assert!(check["data"]["chunk_objects_checked"].as_u64().unwrap_or(0) > 0);
@@ -3200,22 +3185,23 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
         .expect("delete manifest for missing-object check");
 
     let missing_manifest_output =
-        s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
-            .env("FILEFERRY_PASSWORD", passphrase)
-            .args(["--repo", &repo_url, "--json", "check"])
-            .assert()
-            .code(6)
-            .stderr("")
-            .get_output()
-            .stdout
-            .clone();
+        run_s3_json_command(&s3_context, ["--repo", &repo_url, "--json", "check"], 6);
     let missing_manifest: Value =
         serde_json::from_slice(&missing_manifest_output).expect("missing manifest json");
     assert_eq!(
         missing_manifest["data"]["code"],
-        "repository_referenced_object_missing"
+        "repository_check_missing_object"
     );
+    assert_eq!(missing_manifest["data"]["exit_code"], 6);
     assert_eq!(missing_manifest["data"]["object_key"], manifest_key);
+    assert_eq!(
+        missing_manifest["data"]["finding"]["code"],
+        "repository_check_missing_object"
+    );
+    assert_eq!(
+        missing_manifest["data"]["finding"]["object_key"],
+        manifest_key
+    );
 
     let keys = runtime
         .block_on(cleanup_store.list_prefix(&ObjectKeyPrefix::root()))
@@ -3253,6 +3239,66 @@ fn s3_fileferry(
         .env("FILEFERRY_S3_SECRET_ACCESS_KEY", secret_access_key)
         .env("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE", "1");
     command
+}
+
+struct S3LiveCommandContext<'a> {
+    endpoint: &'a str,
+    region: &'a str,
+    access_key_id: &'a str,
+    secret_access_key: &'a str,
+    passphrase: &'a str,
+    sensitive_values: &'a [&'a str],
+}
+
+fn run_s3_json_command<const N: usize>(
+    context: &S3LiveCommandContext<'_>,
+    args: [&str; N],
+    expected_code: i32,
+) -> Vec<u8> {
+    let output = s3_fileferry(
+        context.endpoint,
+        context.region,
+        context.access_key_id,
+        context.secret_access_key,
+    )
+    .env("FILEFERRY_PASSWORD", context.passphrase)
+    .args(args)
+    .output()
+    .expect("run ferry");
+    assert_redacted_s3_output(output, expected_code, context.sensitive_values)
+}
+
+fn assert_redacted_s3_output(
+    output: Output,
+    expected_code: i32,
+    sensitive_values: &[&str],
+) -> Vec<u8> {
+    let actual_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let redacted_stdout = redact_for_s3_test_failure(&stdout, sensitive_values);
+    let redacted_stderr = redact_for_s3_test_failure(&stderr, sensitive_values);
+
+    assert_eq!(
+        actual_code, expected_code,
+        "unexpected ferry exit code\nstdout={redacted_stdout}\nstderr={redacted_stderr}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "expected empty stderr\nstdout={redacted_stdout}\nstderr={redacted_stderr}"
+    );
+
+    output.stdout
+}
+
+fn redact_for_s3_test_failure(text: &str, sensitive_values: &[&str]) -> String {
+    let mut redacted = text.to_owned();
+    for value in sensitive_values {
+        if !value.is_empty() {
+            redacted = redacted.replace(value, "<redacted>");
+        }
+    }
+    redacted
 }
 
 fn s3_cleanup_store(
