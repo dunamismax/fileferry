@@ -570,7 +570,10 @@ begin. Restored symlink destination paths and symlinked ancestors are rejected
 if they already exist; symlinks are created after directory and regular-file
 writes so restore writes do not traverse newly restored symlinks. A
 path-scoped symlink restore creates missing parent directories under the
-destination root after destination safety preflight. `--dry-run`
+destination root after destination safety preflight. Non-dry-run restores also
+reject selected manifest entries that would collide on a destination filesystem
+observed to be case-insensitive. Windows destinations reject selected paths
+with Windows reserved-name segments before destination writes. `--dry-run`
 reports selected entries and planned writes without creating destination
 entries. It also reports
 `metadata_planned`, the count of regular-file and directory modified timestamp

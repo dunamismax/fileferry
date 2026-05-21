@@ -113,7 +113,8 @@ Evidence added or retained:
   prune dry-runs, successful prune sweeps, interrupted prune resume, missing
   prune candidates, retained stale/unknown listed objects, prune delete
   permission failures, malformed prune state, and commit/forget state-change
-  guardrails.
+  guardrails, plus restore destination guardrails for symlinked ancestors,
+  observed case-insensitive path collisions, and Windows reserved names.
 - `fileferry-storage` policy tests: retryable put and delete failures,
   permanent immutable-write conflicts, timeouts, and concurrency limiting.
 - `fileferry-cli` tests: missing referenced manifests/chunks, tampered
@@ -125,7 +126,8 @@ Evidence added or retained:
   gated live S3 retention/key-management drill for forget, key add, key
   remove, key rotate, and key export-recovery, plus a gated live S3 prune
   drill for dry-run, sweep, durable prune state, snapshots, and unique-prefix
-  cleanup.
+  cleanup. CLI unit coverage maps restore destination reserved-name and
+  case-collision guardrails to stable JSON failure codes.
 
 The non-gated evidence uses local and in-memory object stores. The
 S3-compatible data path, retention/key-management path, and prune path have

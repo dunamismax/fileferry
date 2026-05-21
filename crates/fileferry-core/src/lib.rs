@@ -10,8 +10,8 @@ use fileferry_crypto::{
     unlock_master_key,
 };
 use fileferry_platform::{
-    EntryKind, EntryMetadata, MetadataValue, PlatformError, PlatformKind, Timestamp,
-    capture_metadata, current_platform,
+    CaseBehavior, EntryKind, EntryMetadata, MetadataValue, PlatformError, PlatformKind, Timestamp,
+    capture_metadata, current_platform, path_facts, probe_case_behavior,
 };
 use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, StorageError};
 use secrecy::SecretString;
@@ -305,6 +305,12 @@ pub enum CoreError {
 
     #[error("restore destination {path} contains a symlink at {symlink}")]
     RestoreDestinationSymlink { path: PathBuf, symlink: PathBuf },
+
+    #[error("restore destination {path} is reserved on the destination platform")]
+    RestoreDestinationReservedName { path: PathBuf },
+
+    #[error("restore destination {path} collides with {other_path} on this filesystem")]
+    RestoreDestinationPathCollision { path: PathBuf, other_path: PathBuf },
 
     #[error("restore destination {path} already exists")]
     RestoreDestinationExists { path: PathBuf },
@@ -3255,8 +3261,10 @@ impl BackupPipeline {
         let mut prepared_directories = Vec::with_capacity(contents.directories.len());
         let mut prepared_files = Vec::with_capacity(contents.files.len());
         let mut prepared_symlinks = Vec::with_capacity(contents.symlinks.len());
-        let mut metadata_warnings = contents.metadata_warnings;
         let mut metadata_applied = 0_usize;
+
+        validate_restore_destination_entry_set(&request.destination, &contents, request.dry_run)?;
+        let mut metadata_warnings = contents.metadata_warnings;
 
         for directory in contents.directories {
             let destination_path =
@@ -4266,6 +4274,139 @@ fn validate_restore_destination_root(destination: &Path) -> CoreResult<()> {
     }
 
     Ok(())
+}
+
+fn validate_restore_destination_entry_set(
+    destination: &Path,
+    contents: &RestoreContentResult,
+    dry_run: bool,
+) -> CoreResult<()> {
+    let destination_platform = current_platform();
+
+    for relative_path in contents
+        .directories
+        .iter()
+        .map(|entry| &entry.relative_path)
+        .chain(contents.files.iter().map(|entry| &entry.relative_path))
+        .chain(contents.symlinks.iter().map(|entry| &entry.relative_path))
+    {
+        validate_restore_destination_relative_path(
+            destination,
+            relative_path,
+            destination_platform,
+        )?;
+    }
+
+    if !dry_run {
+        validate_restore_destination_case_collisions(
+            destination,
+            contents,
+            destination_case_behavior(destination)?,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_restore_destination_relative_path(
+    destination: &Path,
+    relative_path: &Path,
+    destination_platform: PlatformKind,
+) -> CoreResult<()> {
+    if destination_platform == PlatformKind::Windows
+        && path_facts(relative_path).has_windows_reserved_name
+    {
+        return Err(CoreError::RestoreDestinationReservedName {
+            path: destination.join(relative_path),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_restore_destination_case_collisions(
+    destination: &Path,
+    contents: &RestoreContentResult,
+    case_behavior: CaseBehavior,
+) -> CoreResult<()> {
+    if case_behavior == CaseBehavior::CaseSensitive {
+        return Ok(());
+    }
+
+    let mut case_paths = BTreeMap::new();
+    for relative_path in contents
+        .directories
+        .iter()
+        .map(|entry| &entry.relative_path)
+        .chain(contents.files.iter().map(|entry| &entry.relative_path))
+        .chain(contents.symlinks.iter().map(|entry| &entry.relative_path))
+    {
+        if relative_path.as_os_str().is_empty() {
+            continue;
+        }
+
+        let key = case_collision_key(relative_path);
+        if let Some(other_path) = case_paths.insert(key, relative_path.clone()) {
+            return Err(CoreError::RestoreDestinationPathCollision {
+                path: destination.join(relative_path),
+                other_path: destination.join(other_path),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn destination_case_behavior(destination: &Path) -> CoreResult<CaseBehavior> {
+    let mut cursor = Some(destination);
+
+    while let Some(path) = cursor {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CoreError::RestoreDestinationSymlink {
+                    path: destination.to_path_buf(),
+                    symlink: path.to_path_buf(),
+                });
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                return probe_case_behavior(path).map_err(|source| {
+                    CoreError::RestoreDestinationWrite {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                });
+            }
+            Ok(_) => {
+                return Err(CoreError::RestoreDestinationKind {
+                    path: path.to_path_buf(),
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                cursor = path.parent();
+            }
+            Err(source) => {
+                return Err(CoreError::RestoreDestinationWrite {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
+
+    Ok(CaseBehavior::CaseSensitive)
+}
+
+fn case_collision_key(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_string_lossy().to_lowercase()),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn safe_destination_path(destination: &Path, relative_path: &Path) -> CoreResult<PathBuf> {
@@ -8391,6 +8532,148 @@ mod tests {
 
         assert!(matches!(error, CoreError::RestoreDestinationSymlink { .. }));
         assert!(!outside.path().join("sample.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_rejects_case_collisions_where_filesystem_exposes_them()
+    {
+        use fileferry_testkit::FakeObjectStore;
+
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        if probe_case_behavior(destination.path()).expect("probe destination case behavior")
+            == CaseBehavior::CaseSensitive
+        {
+            return;
+        }
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        fs::write(source.path().join("sample.txt"), b"sample").expect("write sample");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let (snapshot_id, _) = replace_committed_manifest_for_tests(
+            &pipeline,
+            &store,
+            &master_key,
+            &result,
+            |manifest| {
+                let mut duplicate = manifest
+                    .body
+                    .entries
+                    .iter()
+                    .find(|entry| entry.relative_path == Path::new("sample.txt"))
+                    .expect("sample entry")
+                    .clone();
+                duplicate.relative_path = PathBuf::from("SAMPLE.TXT");
+                manifest.body.entries.push(duplicate);
+            },
+        )
+        .await;
+
+        let error = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id,
+                    paths: Vec::new(),
+                    destination: destination.path().join("restore"),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect_err("case collision should block restore");
+
+        assert!(matches!(
+            error,
+            CoreError::RestoreDestinationPathCollision { .. }
+        ));
+        assert!(!destination.path().join("restore").exists());
+    }
+
+    #[test]
+    fn restore_destination_guardrails_reject_case_collisions_when_destination_is_case_insensitive()
+    {
+        let contents = RestoreContentResult {
+            snapshot_id: "snapshot".to_owned(),
+            selected_entries: 2,
+            directories: Vec::new(),
+            files: vec![
+                RestoredFile {
+                    relative_path: PathBuf::from("Docs/Readme.txt"),
+                    contents: Vec::new(),
+                    source_platform: PlatformKind::Linux,
+                    modified: MetadataValue::Unsupported,
+                    unix_mode: None,
+                },
+                RestoredFile {
+                    relative_path: PathBuf::from("docs/readme.TXT"),
+                    contents: Vec::new(),
+                    source_platform: PlatformKind::Linux,
+                    modified: MetadataValue::Unsupported,
+                    unix_mode: None,
+                },
+            ],
+            symlinks: Vec::new(),
+            metadata_warnings: Vec::new(),
+        };
+
+        let error = validate_restore_destination_case_collisions(
+            Path::new("/restore"),
+            &contents,
+            CaseBehavior::CaseInsensitive,
+        )
+        .expect_err("case-insensitive destination should reject collision");
+
+        assert!(matches!(
+            error,
+            CoreError::RestoreDestinationPathCollision { path, other_path }
+                if path == Path::new("/restore/docs/readme.TXT")
+                    && other_path == Path::new("/restore/Docs/Readme.txt")
+        ));
+        validate_restore_destination_case_collisions(
+            Path::new("/restore"),
+            &contents,
+            CaseBehavior::CaseSensitive,
+        )
+        .expect("case-sensitive destination allows distinct paths");
+    }
+
+    #[test]
+    fn restore_destination_guardrails_reject_windows_reserved_names_only_for_windows_destinations()
+    {
+        let destination = Path::new("/restore");
+        let relative_path = Path::new("docs/CON.txt");
+
+        let error = validate_restore_destination_relative_path(
+            destination,
+            relative_path,
+            PlatformKind::Windows,
+        )
+        .expect_err("Windows destination should reject reserved device name");
+        assert!(matches!(
+            error,
+            CoreError::RestoreDestinationReservedName { path }
+                if path == Path::new("/restore/docs/CON.txt")
+        ));
+
+        validate_restore_destination_relative_path(destination, relative_path, PlatformKind::Linux)
+            .expect("non-Windows destination does not reject Windows device spelling");
     }
 
     #[tokio::test]

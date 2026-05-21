@@ -474,6 +474,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::RestoreDestinationNotAbsolute { .. }
         | CoreError::RestoreDestinationEscapesRoot { .. }
         | CoreError::RestoreDestinationSymlink { .. }
+        | CoreError::RestoreDestinationReservedName { .. }
+        | CoreError::RestoreDestinationPathCollision { .. }
         | CoreError::RestoreDestinationExists { .. }
         | CoreError::RestoreDestinationKind { .. } => 2,
         CoreError::SourceRootRead { .. }
@@ -1263,6 +1265,8 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::RestoreDestinationNotAbsolute { .. } => "restore_destination_not_absolute",
         CoreError::RestoreDestinationEscapesRoot { .. } => "restore_destination_escapes_root",
         CoreError::RestoreDestinationSymlink { .. } => "restore_destination_symlink",
+        CoreError::RestoreDestinationReservedName { .. } => "restore_destination_reserved_name",
+        CoreError::RestoreDestinationPathCollision { .. } => "restore_destination_path_collision",
         CoreError::RestoreDestinationExists { .. } => "restore_destination_exists",
         CoreError::RestoreDestinationKind { .. } => "restore_destination_kind_mismatch",
         CoreError::RestoreDestinationWrite { .. } => "restore_destination_write_failed",
@@ -1356,6 +1360,8 @@ fn core_failure_path(error: &CoreError) -> Option<String> {
         | CoreError::ChunkIndexMismatch { path, .. }
         | CoreError::RestoreDestinationNotAbsolute { path }
         | CoreError::RestoreDestinationEscapesRoot { path }
+        | CoreError::RestoreDestinationReservedName { path }
+        | CoreError::RestoreDestinationPathCollision { path, .. }
         | CoreError::RestoreDestinationExists { path }
         | CoreError::RestoreDestinationKind { path }
         | CoreError::RestoreDestinationWrite { path, .. }
@@ -3548,6 +3554,46 @@ mod tests {
             lines.last().expect("completed event")["event"],
             "command_completed"
         );
+    }
+
+    #[test]
+    fn restore_destination_guardrail_failures_have_stable_machine_codes() {
+        let reserved = CliError::from(CoreError::RestoreDestinationReservedName {
+            path: PathBuf::from("/restore/CON.txt"),
+        });
+        let reserved_output =
+            render_error_output(OutputMode::Json, "restore", &reserved, reserved.exit_code())
+                .expect("reserved-name failure");
+        let reserved_json: serde_json::Value =
+            serde_json::from_str(&reserved_output.stdout).expect("reserved failure json");
+
+        assert_eq!(reserved_output.exit_code, 2);
+        assert_eq!(
+            reserved_json["data"]["code"],
+            "restore_destination_reserved_name"
+        );
+        assert_eq!(reserved_json["data"]["path"], "/restore/CON.txt");
+
+        let collision = CliError::from(CoreError::RestoreDestinationPathCollision {
+            path: PathBuf::from("/restore/readme.txt"),
+            other_path: PathBuf::from("/restore/README.TXT"),
+        });
+        let collision_output = render_error_output(
+            OutputMode::Json,
+            "restore",
+            &collision,
+            collision.exit_code(),
+        )
+        .expect("case-collision failure");
+        let collision_json: serde_json::Value =
+            serde_json::from_str(&collision_output.stdout).expect("collision failure json");
+
+        assert_eq!(collision_output.exit_code, 2);
+        assert_eq!(
+            collision_json["data"]["code"],
+            "restore_destination_path_collision"
+        );
+        assert_eq!(collision_json["data"]["path"], "/restore/readme.txt");
     }
 
     #[test]

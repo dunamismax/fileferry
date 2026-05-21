@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
-    fs, io,
+    fs::{self, OpenOptions},
+    io::{self, Write},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -222,10 +223,22 @@ fn reserved_numbered_device(upper: &str, prefix: &str) -> bool {
 
 pub fn probe_case_behavior(directory: impl AsRef<Path>) -> io::Result<CaseBehavior> {
     let directory = directory.as_ref();
-    let lower = directory.join("fileferry-case-probe");
-    let upper = directory.join("FILEFERRY-CASE-PROBE");
+    let now = Timestamp::from(SystemTime::now());
+    let probe_name = format!(
+        "fileferry-case-probe-{}-{}-{}",
+        std::process::id(),
+        now.seconds,
+        now.nanoseconds
+    );
+    let lower = directory.join(&probe_name);
+    let upper = directory.join(probe_name.to_ascii_uppercase());
 
-    fs::write(&lower, b"case")?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lower)?;
+    file.write_all(b"case")?;
+    drop(file);
     let behavior = if upper.exists() {
         CaseBehavior::CaseInsensitive
     } else {

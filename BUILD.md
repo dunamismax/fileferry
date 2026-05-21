@@ -860,6 +860,27 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Completed a Milestone G restore destination guardrail slice
+  without claiming broader platform support. Non-dry-run restore now preflights
+  selected manifest paths for collisions when the destination filesystem is
+  observed as case-insensitive, rejects symlinked destination ancestors while
+  probing the nearest existing destination directory, and rejects Windows
+  reserved-name path segments on Windows destinations before destination
+  writes. The platform case-behavior probe now uses a unique temporary probe
+  filename instead of a fixed spelling. CLI JSON/JSONL failure envelopes map
+  the new guardrails to stable `restore_destination_path_collision` and
+  `restore_destination_reserved_name` codes with path context. Updated
+  `README.md`, `docs/cli-contract.md`, `docs/platform-metadata.md`,
+  `docs/operations.md`, and this file. No live S3 gates were enabled in this
+  session. Verified with `cargo test -p fileferry-core
+  restore_destination_guardrails --no-fail-fast`, `cargo test -p
+  fileferry-core case_collisions --no-fail-fast`, `cargo test -p
+  fileferry-cli restore_destination_guardrail_failures_have_stable_machine_codes
+  --no-fail-fast`, `cargo test -p fileferry-platform
+  probes_observed_case_behavior_for_temp_directory --no-fail-fast`, `cargo
+  test -p fileferry-platform -p fileferry-core -p fileferry-cli
+  --no-fail-fast`, `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check`.
 - 2026-05-20 - Completed a Milestone G Unix permission restore slice without
   claiming broader platform support. Restore now carries captured Unix mode
   metadata for regular files and directories through core restore planning,

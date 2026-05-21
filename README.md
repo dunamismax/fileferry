@@ -369,6 +369,10 @@ restored regular files and directories from initialized local and
 S3-compatible repositories. On Unix destinations it also restores captured
 regular-file and directory permission bits where representable; ownership,
 special mode bits, and other metadata application are not implemented yet.
+Non-dry-run restore preflights selected destination paths for observed
+case-insensitive path collisions and rejects Windows reserved-name segments on
+Windows destinations before writes; this is not a broader platform-support
+claim.
 Check failures
 in JSON and JSONL modes now
 emit machine-readable failure envelopes with stable codes and object-key

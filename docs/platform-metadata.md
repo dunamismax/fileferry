@@ -63,6 +63,11 @@ restores apply captured modified timestamps for restored regular files and
 directories after content writes and verification. On Unix destinations,
 restores also apply captured regular-file and directory permission bits
 (`0o777`) where representable, after destination entries have been written.
+Non-dry-run restores preflight selected manifest entries for destination path
+case collisions when the destination filesystem can be observed as
+case-insensitive. Windows destinations reject selected paths with Windows
+reserved-name segments before destination writes; this is a guardrail, not a
+claim that Windows restore support has met the release bar.
 Dry-run restore reports the count of regular-file and directory modified
 timestamp fields selected for restore plus captured Unix permission fields
 selected for restore, and can surface denied, unsupported, invalid, or
