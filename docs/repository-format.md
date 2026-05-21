@@ -2,10 +2,10 @@
 
 FileFerry's repository format is original to FileFerry. Format v0 is not frozen.
 Initial compatibility fixtures exist for narrow bootstrap/key-slot and
-recovery-export, committed snapshot-data, and forget/prune-state slices. This
-document defines the initial shape needed for implementation work; byte-level
-fixtures become the compatibility contract only after the first intentional
-freeze.
+recovery-export, committed snapshot-data, forget/prune-state, and policy/config
+slices. This document defines the initial shape needed for implementation work;
+byte-level fixtures become the compatibility contract only after the first
+intentional freeze.
 
 ## Format Principles
 
@@ -223,6 +223,38 @@ Current implementation status:
   section. This does not freeze future pack membership or policy/config object
   formats.
 
+## Policy And Config Objects
+
+Policy/config objects are encrypted metadata objects. They are intended for
+repository-local policy state that would reveal backup shape or operator intent
+if stored in plaintext.
+
+Current implementation status:
+
+- `fileferry-core` can write and read one encrypted policy/config object under
+  `objects/policy/<prefix>/<policy-id>`.
+- The current decrypted object contains `schema_version`, `magic`,
+  `format_version`, `repository_id`, `policy_id`, and a `body` with
+  `created_at_unix_seconds` and retention keep rules.
+- Retention shape currently supports `keep_last`, `keep_hourly`, `keep_daily`,
+  `keep_weekly`, `keep_monthly`, `keep_yearly`, and `keep_tags`. At least one
+  keep rule is required, count rules must be greater than zero, and keep tags
+  must not be empty or contain control characters.
+- The policy id is a keyed content id over the encrypted body using the
+  repository policy-config key purpose. Readers validate that the policy id,
+  body identity, repository id, and object name agree before returning the
+  object.
+- Policy/config objects are encrypted and authenticated as object kind
+  `policy-config` with the exact object name. Moving ciphertext to another
+  object name or reading it as another object kind fails authentication.
+- A repeated write of the same policy body is recognized as an idempotent
+  already-present result. The current API is core-only; no CLI policy command
+  is claimed by this fixture slice.
+- One policy/config fixture now covers the current encrypted policy object
+  framing and decrypted fields listed in the fixture-status section. This does
+  not freeze future config fields, policy selection semantics, upload state, or
+  migration behavior.
+
 ## Commit Markers And Upload State
 
 Backups publish a snapshot only after all referenced chunks, indexes, and the
@@ -385,10 +417,12 @@ Initial golden fixtures now exist under:
   sweep deleted. The fixture covers one plaintext forget marker, one encrypted
   prune plan, one encrypted prune completion object, and the retained snapshot
   data needed to check the post-prune repository.
+- `tests/fixtures/repository-format/v0/policy-config/` for one initialized
+  repository containing one encrypted policy/config object.
 
 These are narrow compatibility-fixture slices for format v0. They do not freeze
-all of format v0. Migration fixtures, policy/config objects, upload state, and
-full cross-version compatibility remain open Milestone H work.
+all of format v0. Migration fixtures, upload state, and full cross-version
+compatibility remain open Milestone H work.
 
 For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 
@@ -436,6 +470,13 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
   object kind `prune-mark` and the exact object name; decrypted
   `schema_version`, `magic`, `format_version`, `repository_id`, `plan_id`,
   `plan_object`, `completed_at_unix_seconds`, object counts, and byte counts.
+- `policy-config/objects/policy/<prefix>/<policy-id>`: encrypted-object
+  `algorithm`, `nonce`, and `ciphertext`, authenticated as object kind
+  `policy-config` and the exact object name; decrypted `schema_version`,
+  `magic`, `format_version`, `repository_id`, `policy_id`,
+  `body.created_at_unix_seconds`, and retention fields `keep_last`,
+  `keep_hourly`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly`,
+  and `keep_tags`.
 
 The fixture passphrases are test-only unlock inputs. They are not production
 secrets and do not imply recovery import. Tests prove current code can read the
@@ -465,3 +506,11 @@ mismatches, reject unsupported prune schemas and format versions, reject a
 tampered completion object during prune recovery scanning, and reject stale
 pending prune-plan replay when current commit/forget marker state no longer
 matches the marked plan.
+The policy/config fixture tests prove current code can unlock the fixture,
+authenticate and validate the encrypted policy/config object, idempotently
+recognize an already-present matching policy body, reject malformed encrypted
+framing and decrypted metadata, reject policy ciphertext tampering, reject wrong
+object names and authenticated kinds through AEAD context binding, reject policy
+metadata identity mismatches, reject unsupported policy/config schema and format
+versions, reject repository identity mismatches, and reject invalid retention
+shape.

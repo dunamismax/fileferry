@@ -789,6 +789,11 @@ families through command or core/storage boundaries:
   failure exit code `6`.
 - Malformed committed objects and authenticated-object failures map to
   integrity failure exit code `6`.
+- Malformed encrypted policy/config objects, invalid policy/config metadata,
+  and policy/config identity mismatches map to integrity failure exit code `6`
+  with `repository_policy_config_decode_failed`,
+  `repository_policy_config_invalid`, or
+  `repository_metadata_identity_mismatch` when surfaced through a CLI path.
 - Immutable write conflicts map to storage/filesystem failure exit code `5`.
 - Permission-denied source reads during backup map to filesystem I/O failure
   exit code `5` when the platform exposes the denial to the test process.

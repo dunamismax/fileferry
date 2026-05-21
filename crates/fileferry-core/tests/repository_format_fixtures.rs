@@ -1,7 +1,7 @@
 use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, CheckRepositoryOptions, CoreError, PruneObjectKind,
-    PruneRepositoryOptions, RepositoryAeadAlgorithm, RestoreContentRequest, SnapshotManifest,
-    open_repository, verify_repository_recovery_export,
+    PruneRepositoryOptions, RepositoryAeadAlgorithm, RepositoryPolicyConfigRequest,
+    RestoreContentRequest, SnapshotManifest, open_repository, verify_repository_recovery_export,
 };
 use fileferry_crypto::{
     AeadAlgorithm, EncryptedObject, KeyPurpose, ObjectContext, ObjectKind, decrypt_object,
@@ -55,6 +55,12 @@ const RETAINED_INDEX_OBJECT: &str =
     "objects/index/17/173970a92ca87e28601637550571fdd7dc42d7d673c2a3b00709bc99ec0c8e10";
 const RETAINED_CHUNK_OBJECT: &str =
     "objects/chunk/33/3357bb277f6fa50b3762efb6284930137bdd5fb5e01cea053ce44f412d313c79";
+const POLICY_CONFIG_REPOSITORY_ID: &str =
+    "8a45630e2ea7ccfa88914e9489c83954741de9e31d0bdd41de3a6a6b92c476f6";
+const POLICY_CONFIG_PASSPHRASE: &str = "policy-config-fixture-passphrase-v0";
+const POLICY_ID: &str = "382b7e84bd6ac92b93aba74dd9c2733fd97f68f479055a20383b19744622e6f8";
+const POLICY_OBJECT: &str =
+    "objects/policy/38/382b7e84bd6ac92b93aba74dd9c2733fd97f68f479055a20383b19744622e6f8";
 
 const BOOTSTRAP: &[u8] =
     include_bytes!("../../../tests/fixtures/repository-format/v0/bootstrap-keyslot/bootstrap");
@@ -106,6 +112,11 @@ const FORGET_PRUNE_PLAN: &[u8] = include_bytes!(
 );
 const FORGET_PRUNE_COMPLETION: &[u8] = include_bytes!(
     "../../../tests/fixtures/repository-format/v0/forget-prune-state/objects/prune-completion/e0/e0ab98bab38ae3654bf1a54813126d192fa5235797cf16942c692683cc01cec1"
+);
+const POLICY_CONFIG_BOOTSTRAP: &[u8] =
+    include_bytes!("../../../tests/fixtures/repository-format/v0/policy-config/bootstrap");
+const POLICY_CONFIG: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/policy-config/objects/policy/38/382b7e84bd6ac92b93aba74dd9c2733fd97f68f479055a20383b19744622e6f8"
 );
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -200,6 +211,19 @@ async fn load_pending_prune_plan_fixture() -> FakeObjectStore {
     store
 }
 
+async fn load_policy_config_fixture() -> FakeObjectStore {
+    let store = FakeObjectStore::new();
+    for (key, bytes) in [
+        ("bootstrap", POLICY_CONFIG_BOOTSTRAP),
+        (POLICY_OBJECT, POLICY_CONFIG),
+    ] {
+        store
+            .overwrite_for_tests(object_key(key), bytes.to_vec())
+            .await;
+    }
+    store
+}
+
 fn snapshot_data_pipeline() -> BackupPipeline {
     BackupPipeline::new(BackupPipelineConfig::new(SNAPSHOT_DATA_REPOSITORY_ID))
         .expect("snapshot-data pipeline")
@@ -208,6 +232,11 @@ fn snapshot_data_pipeline() -> BackupPipeline {
 fn forget_prune_pipeline() -> BackupPipeline {
     BackupPipeline::new(BackupPipelineConfig::new(FORGET_PRUNE_REPOSITORY_ID))
         .expect("forget-prune pipeline")
+}
+
+fn policy_config_pipeline() -> BackupPipeline {
+    BackupPipeline::new(BackupPipelineConfig::new(POLICY_CONFIG_REPOSITORY_ID))
+        .expect("policy-config pipeline")
 }
 
 fn decode_fixture_encrypted_object(bytes: &[u8]) -> EncryptedObject {
@@ -339,6 +368,49 @@ fn reencrypt_prune_mark_plaintext(
         .expect("prune subkey");
     let context = ObjectContext::new(ObjectKind::PruneMark, object_name).expect("prune context");
     let encrypted = encrypt_object(&key, &context, plaintext).expect("prune mark encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_policy_config_value(
+    opened: &fileferry_core::OpenedRepository,
+    object_name: &str,
+    bytes: &[u8],
+    mutate: impl FnOnce(&mut Value),
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(
+            KeyPurpose::PolicyConfig,
+            POLICY_CONFIG_REPOSITORY_ID.as_bytes(),
+        )
+        .expect("policy config subkey");
+    let context =
+        ObjectContext::new(ObjectKind::PolicyConfig, object_name).expect("policy config context");
+    let plaintext = decrypt_object(&key, &context, &decode_fixture_encrypted_object(bytes))
+        .expect("fixture policy config decrypts");
+    let mut value: Value = serde_json::from_slice(&plaintext).expect("fixture policy config json");
+    mutate(&mut value);
+    let mutated = serde_json::to_vec(&value).expect("mutated policy config json");
+    let encrypted =
+        encrypt_object(&key, &context, &mutated).expect("mutated policy config encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_policy_config_plaintext(
+    opened: &fileferry_core::OpenedRepository,
+    object_name: &str,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(
+            KeyPurpose::PolicyConfig,
+            POLICY_CONFIG_REPOSITORY_ID.as_bytes(),
+        )
+        .expect("policy config subkey");
+    let context =
+        ObjectContext::new(ObjectKind::PolicyConfig, object_name).expect("policy config context");
+    let encrypted = encrypt_object(&key, &context, plaintext).expect("policy config encrypts");
     encode_fixture_encrypted_object(encrypted)
 }
 
@@ -1238,5 +1310,291 @@ async fn forget_prune_state_fixture_rejects_stale_pending_prune_plan_replay() {
     assert!(matches!(
         error,
         CoreError::PruneRepositoryStateChanged { .. }
+    ));
+}
+
+#[tokio::test]
+async fn policy_config_fixture_reads_validates_and_rewrites_idempotently() {
+    let store = load_policy_config_fixture().await;
+    let opened = open_repository(&store, &secret(POLICY_CONFIG_PASSPHRASE))
+        .await
+        .expect("policy-config fixture opens");
+    assert_eq!(opened.repository_id, POLICY_CONFIG_REPOSITORY_ID);
+
+    let pipeline = policy_config_pipeline();
+    let policy = pipeline
+        .read_repository_policy_config(&store, &opened.master_key, POLICY_ID)
+        .await
+        .expect("policy config reads");
+    assert_eq!(policy.repository_id, POLICY_CONFIG_REPOSITORY_ID);
+    assert_eq!(policy.policy_id, POLICY_ID);
+    assert_eq!(policy.body.created_at_unix_seconds, 1_779_380_000);
+    assert_eq!(policy.body.retention.keep_last, Some(7));
+    assert_eq!(policy.body.retention.keep_daily, Some(14));
+    assert_eq!(policy.body.retention.keep_weekly, Some(8));
+    assert_eq!(
+        policy.body.retention.keep_tags,
+        vec!["gold".to_owned(), "legal-hold".to_owned()]
+    );
+
+    let rewritten = pipeline
+        .write_repository_policy_config(
+            &store,
+            &opened.master_key,
+            RepositoryPolicyConfigRequest {
+                created_at_unix_seconds: policy.body.created_at_unix_seconds,
+                retention: policy.body.retention,
+            },
+        )
+        .await
+        .expect("same policy config write is idempotent");
+    assert_eq!(rewritten.policy_id, POLICY_ID);
+    assert_eq!(rewritten.policy_object.as_str(), POLICY_OBJECT);
+    assert!(!rewritten.created);
+    assert_eq!(rewritten.bytes_written, 0);
+}
+
+#[tokio::test]
+async fn policy_config_fixture_rejects_malformed_framing_and_metadata() {
+    let store = load_policy_config_fixture().await;
+    let opened = open_repository(&store, &secret(POLICY_CONFIG_PASSPHRASE))
+        .await
+        .expect("policy-config fixture opens");
+    let pipeline = policy_config_pipeline();
+
+    store
+        .overwrite_for_tests(object_key(POLICY_OBJECT), b"not-json".to_vec())
+        .await;
+    let framing_error = pipeline
+        .read_repository_policy_config(&store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("malformed policy config frame is rejected");
+    assert!(matches!(
+        framing_error,
+        CoreError::PolicyConfigDecode { .. }
+    ));
+
+    store
+        .overwrite_for_tests(
+            object_key(POLICY_OBJECT),
+            reencrypt_policy_config_plaintext(
+                &opened,
+                POLICY_OBJECT,
+                br#"{"schema_version":"bad"}"#,
+            ),
+        )
+        .await;
+    let metadata_error = pipeline
+        .read_repository_policy_config(&store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("malformed decrypted policy config metadata is rejected");
+    assert!(matches!(
+        metadata_error,
+        CoreError::PolicyConfigDecode { .. }
+    ));
+}
+
+#[tokio::test]
+async fn policy_config_fixture_rejects_tampered_ciphertext() {
+    let opened_store = load_policy_config_fixture().await;
+    let opened = open_repository(&opened_store, &secret(POLICY_CONFIG_PASSPHRASE))
+        .await
+        .expect("policy-config fixture opens");
+    let store = load_policy_config_fixture().await;
+    store
+        .overwrite_for_tests(
+            object_key(POLICY_OBJECT),
+            tamper_fixture_ciphertext(POLICY_CONFIG),
+        )
+        .await;
+
+    let error = policy_config_pipeline()
+        .read_repository_policy_config(&store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("tampered policy config authentication fails");
+
+    assert!(matches!(
+        error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == POLICY_OBJECT
+    ));
+}
+
+#[tokio::test]
+async fn policy_config_fixture_rejects_wrong_authenticated_name_or_kind() {
+    let store = load_policy_config_fixture().await;
+    let opened = open_repository(&store, &secret(POLICY_CONFIG_PASSPHRASE))
+        .await
+        .expect("policy-config fixture opens");
+    let pipeline = policy_config_pipeline();
+
+    let wrong_policy_id = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let wrong_policy_object =
+        "objects/policy/ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    store
+        .overwrite_for_tests(object_key(wrong_policy_object), POLICY_CONFIG.to_vec())
+        .await;
+    let wrong_name_error = pipeline
+        .read_repository_policy_config(&store, &opened.master_key, wrong_policy_id)
+        .await
+        .expect_err("policy bytes under the wrong object name fail authentication");
+    assert!(matches!(
+        wrong_name_error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == wrong_policy_object
+    ));
+
+    let policy_key = opened
+        .master_key
+        .derive_subkey(
+            KeyPurpose::PolicyConfig,
+            POLICY_CONFIG_REPOSITORY_ID.as_bytes(),
+        )
+        .expect("policy config subkey");
+    let wrong_kind_context =
+        ObjectContext::new(ObjectKind::Index, POLICY_OBJECT).expect("wrong-kind context");
+    let wrong_kind = decrypt_object(
+        &policy_key,
+        &wrong_kind_context,
+        &decode_fixture_encrypted_object(POLICY_CONFIG),
+    );
+    assert!(wrong_kind.is_err());
+}
+
+#[tokio::test]
+async fn policy_config_fixture_rejects_metadata_identity_mismatch() {
+    let store = load_policy_config_fixture().await;
+    let opened = open_repository(&store, &secret(POLICY_CONFIG_PASSPHRASE))
+        .await
+        .expect("policy-config fixture opens");
+    store
+        .overwrite_for_tests(
+            object_key(POLICY_OBJECT),
+            reencrypt_policy_config_value(&opened, POLICY_OBJECT, POLICY_CONFIG, |policy| {
+                policy["body"]["retention"]["keep_last"] = json!(99);
+            }),
+        )
+        .await;
+
+    let error = policy_config_pipeline()
+        .read_repository_policy_config(&store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("policy config body identity mismatch is rejected");
+
+    assert!(matches!(
+        error,
+        CoreError::MetadataIdentityMismatch {
+            kind: "policy config",
+            object_key,
+            ..
+        } if object_key.as_str() == POLICY_OBJECT
+    ));
+}
+
+#[tokio::test]
+async fn policy_config_fixture_rejects_unsupported_versions_and_repository_mismatch() {
+    let opened_store = load_policy_config_fixture().await;
+    let opened = open_repository(&opened_store, &secret(POLICY_CONFIG_PASSPHRASE))
+        .await
+        .expect("policy-config fixture opens");
+    let pipeline = policy_config_pipeline();
+
+    let schema_store = load_policy_config_fixture().await;
+    schema_store
+        .overwrite_for_tests(
+            object_key(POLICY_OBJECT),
+            reencrypt_policy_config_value(&opened, POLICY_OBJECT, POLICY_CONFIG, |policy| {
+                policy["schema_version"] = json!(999);
+            }),
+        )
+        .await;
+    let schema_error = pipeline
+        .read_repository_policy_config(&schema_store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("unsupported policy config schema is rejected");
+    assert!(matches!(
+        schema_error,
+        CoreError::InvalidPolicyConfig {
+            reason: "unsupported policy config schema version",
+            ..
+        }
+    ));
+
+    let format_store = load_policy_config_fixture().await;
+    format_store
+        .overwrite_for_tests(
+            object_key(POLICY_OBJECT),
+            reencrypt_policy_config_value(&opened, POLICY_OBJECT, POLICY_CONFIG, |policy| {
+                policy["format_version"] = json!(999);
+            }),
+        )
+        .await;
+    let format_error = pipeline
+        .read_repository_policy_config(&format_store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("unsupported policy config format is rejected");
+    assert!(matches!(
+        format_error,
+        CoreError::InvalidPolicyConfig {
+            reason: "unsupported policy config format version",
+            ..
+        }
+    ));
+
+    let repository_store = load_policy_config_fixture().await;
+    repository_store
+        .overwrite_for_tests(
+            object_key(POLICY_OBJECT),
+            reencrypt_policy_config_value(&opened, POLICY_OBJECT, POLICY_CONFIG, |policy| {
+                policy["repository_id"] =
+                    json!("0000000000000000000000000000000000000000000000000000000000000000");
+            }),
+        )
+        .await;
+    let repository_error = pipeline
+        .read_repository_policy_config(&repository_store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("policy config repository mismatch is rejected");
+    assert!(matches!(
+        repository_error,
+        CoreError::InvalidPolicyConfig {
+            reason: "policy config repository id does not match this repository",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn policy_config_fixture_rejects_invalid_retention_shape() {
+    let store = load_policy_config_fixture().await;
+    let opened = open_repository(&store, &secret(POLICY_CONFIG_PASSPHRASE))
+        .await
+        .expect("policy-config fixture opens");
+    store
+        .overwrite_for_tests(
+            object_key(POLICY_OBJECT),
+            reencrypt_policy_config_value(&opened, POLICY_OBJECT, POLICY_CONFIG, |policy| {
+                policy["body"]["retention"] = json!({
+                    "keep_last": null,
+                    "keep_hourly": null,
+                    "keep_daily": null,
+                    "keep_weekly": null,
+                    "keep_monthly": null,
+                    "keep_yearly": null,
+                    "keep_tags": []
+                });
+            }),
+        )
+        .await;
+
+    let error = policy_config_pipeline()
+        .read_repository_policy_config(&store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("empty retention policy is rejected");
+
+    assert!(matches!(
+        error,
+        CoreError::InvalidPolicyConfig {
+            reason: "retention policy must include at least one keep rule",
+            ..
+        }
     ));
 }

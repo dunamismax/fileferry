@@ -303,6 +303,19 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("policy config {key} could not be decoded")]
+    PolicyConfigDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("policy config {key} is invalid: {reason}")]
+    InvalidPolicyConfig {
+        key: ObjectKey,
+        reason: &'static str,
+    },
+
     #[error("repository commit or forget state changed after prune plan {plan_id} was marked")]
     PruneRepositoryStateChanged { plan_id: String },
 
@@ -608,8 +621,10 @@ const REPOSITORY_ID_BYTES: usize = 32;
 const KEY_SLOT_ID_BYTES: usize = 32;
 const RECOVERY_EXPORT_ID_BYTES: usize = 32;
 const PRUNE_PLAN_ID_BYTES: usize = 32;
+const POLICY_CONFIG_ID_BYTES: usize = 32;
 const KEY_SLOT_PREFIX: &str = "key-slots";
 const KEY_SLOT_REMOVAL_PREFIX: &str = "key-slot-removals";
+const POLICY_CONFIG_PREFIX: &str = "objects/policy";
 const PRUNE_PLAN_PREFIX: &str = "objects/prune-plan";
 const PRUNE_COMPLETION_PREFIX: &str = "objects/prune-completion";
 pub const RECOVERY_EXPORT_WARNING: &str = "Recovery exports are encrypted with the current repository passphrase. Store the export separately from the repository and protect it like a backup key. Recovery import is not implemented yet.";
@@ -751,6 +766,48 @@ pub struct PruneCompletionState {
     pub candidate_bytes: u64,
     pub deleted_bytes: u64,
     pub missing_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryPolicyConfigRequest {
+    pub created_at_unix_seconds: u64,
+    pub retention: RepositoryRetentionPolicyConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryPolicyConfigWriteResult {
+    pub repository_id: String,
+    pub policy_id: String,
+    pub policy_object: ObjectKey,
+    pub created: bool,
+    pub bytes_written: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RepositoryPolicyConfigState {
+    pub schema_version: u16,
+    pub magic: String,
+    pub format_version: u16,
+    pub repository_id: String,
+    pub policy_id: String,
+    pub body: RepositoryPolicyConfigBody,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RepositoryPolicyConfigBody {
+    pub created_at_unix_seconds: u64,
+    pub retention: RepositoryRetentionPolicyConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RepositoryRetentionPolicyConfig {
+    pub keep_last: Option<u32>,
+    pub keep_hourly: Option<u32>,
+    pub keep_daily: Option<u32>,
+    pub keep_weekly: Option<u32>,
+    pub keep_monthly: Option<u32>,
+    pub keep_yearly: Option<u32>,
+    pub keep_tags: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1288,6 +1345,11 @@ fn key_slot_id_is_valid(key_slot_id: &str) -> bool {
 
 fn prune_plan_id_is_valid(plan_id: &str) -> bool {
     plan_id.len() == PRUNE_PLAN_ID_BYTES * 2 && plan_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn policy_config_id_is_valid(policy_id: &str) -> bool {
+    policy_id.len() == POLICY_CONFIG_ID_BYTES * 2
+        && policy_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn repository_id_is_valid(repository_id: &str) -> bool {
@@ -1947,6 +2009,131 @@ impl BackupPipeline {
 
     pub fn config(&self) -> &BackupPipelineConfig {
         &self.config
+    }
+
+    pub async fn write_repository_policy_config(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        request: RepositoryPolicyConfigRequest,
+    ) -> CoreResult<RepositoryPolicyConfigWriteResult> {
+        validate_retention_policy_config(&request.retention).map_err(|reason| {
+            CoreError::InvalidPolicyConfig {
+                key: ObjectKey::new(POLICY_CONFIG_PREFIX)
+                    .expect("policy config prefix is a valid object key"),
+                reason,
+            }
+        })?;
+        let repository_context = self.config.repository_id.as_bytes();
+        let body = RepositoryPolicyConfigBody {
+            created_at_unix_seconds: request.created_at_unix_seconds,
+            retention: request.retention,
+        };
+        let policy_id = content_id_for_metadata(
+            master_key,
+            KeyPurpose::PolicyConfig,
+            repository_context,
+            &body,
+        )?;
+        let policy_object = object_key_for_policy_config(&policy_id)?;
+        let policy = RepositoryPolicyConfigState {
+            schema_version: 0,
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: self.config.repository_id.clone(),
+            policy_id: policy_id.clone(),
+            body,
+        };
+        validate_policy_config(
+            &policy,
+            &policy_object,
+            &self.config.repository_id,
+            master_key,
+        )?;
+        if store
+            .exists(&policy_object)
+            .await
+            .map_err(|source| CoreError::Storage { source })?
+        {
+            let existing = self
+                .read_repository_policy_config(store, master_key, &policy_id)
+                .await?;
+            if existing.body != policy.body {
+                return Err(CoreError::InvalidPolicyConfig {
+                    key: policy_object,
+                    reason: "existing policy config body does not match policy id",
+                });
+            }
+            return Ok(RepositoryPolicyConfigWriteResult {
+                repository_id: self.config.repository_id.clone(),
+                policy_id,
+                policy_object,
+                created: false,
+                bytes_written: 0,
+            });
+        }
+        let policy_key = self.derive_policy_config_key(master_key)?;
+        let plaintext =
+            serde_json::to_vec(&policy).map_err(|source| CoreError::Serialization { source })?;
+        let encrypted = encrypt_repository_object(
+            &policy_key,
+            ObjectKind::PolicyConfig,
+            &policy_object,
+            &plaintext,
+        )?;
+        let bytes_written = encrypted.len() as u64;
+        let status = store
+            .put_if_absent(&policy_object, &encrypted)
+            .await
+            .map_err(|source| match source {
+                StorageError::ObjectAlreadyExists { .. } => CoreError::InvalidPolicyConfig {
+                    key: policy_object.clone(),
+                    reason: "policy config object already exists with different bytes",
+                },
+                source => CoreError::Storage { source },
+            })?;
+
+        Ok(RepositoryPolicyConfigWriteResult {
+            repository_id: self.config.repository_id.clone(),
+            policy_id,
+            policy_object,
+            created: status == PutStatus::Created,
+            bytes_written: if status == PutStatus::Created {
+                bytes_written
+            } else {
+                0
+            },
+        })
+    }
+
+    pub async fn read_repository_policy_config(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        policy_id: &str,
+    ) -> CoreResult<RepositoryPolicyConfigState> {
+        let policy_object = object_key_for_policy_config(policy_id)?;
+        let policy_key = self.derive_policy_config_key(master_key)?;
+        let policy: RepositoryPolicyConfigState = read_encrypted_json_object(
+            store,
+            &policy_key,
+            ObjectKind::PolicyConfig,
+            &policy_object,
+        )
+        .await
+        .map_err(|error| match error {
+            CoreError::ObjectDecode { key, source } | CoreError::MetadataDecode { key, source } => {
+                CoreError::PolicyConfigDecode { key, source }
+            }
+            other => other,
+        })?;
+        validate_policy_config(
+            &policy,
+            &policy_object,
+            &self.config.repository_id,
+            master_key,
+        )?;
+        Ok(policy)
     }
 
     pub async fn write_snapshot(
@@ -2764,6 +2951,18 @@ impl BackupPipeline {
     fn derive_prune_key(&self, master_key: &MasterKey) -> CoreResult<fileferry_crypto::Subkey> {
         master_key
             .derive_subkey(KeyPurpose::PruneMark, self.config.repository_id.as_bytes())
+            .map_err(|source| CoreError::Encryption { source })
+    }
+
+    fn derive_policy_config_key(
+        &self,
+        master_key: &MasterKey,
+    ) -> CoreResult<fileferry_crypto::Subkey> {
+        master_key
+            .derive_subkey(
+                KeyPurpose::PolicyConfig,
+                self.config.repository_id.as_bytes(),
+            )
             .map_err(|source| CoreError::Encryption { source })
     }
 
@@ -5881,6 +6080,108 @@ fn validate_chunk_index(index: &ChunkIndex, object_key: &ObjectKey) -> CoreResul
     Ok(())
 }
 
+fn validate_policy_config(
+    policy: &RepositoryPolicyConfigState,
+    object_key: &ObjectKey,
+    repository_id: &str,
+    master_key: &MasterKey,
+) -> CoreResult<()> {
+    if policy.schema_version != 0 {
+        return Err(CoreError::InvalidPolicyConfig {
+            key: object_key.clone(),
+            reason: "unsupported policy config schema version",
+        });
+    }
+    if policy.magic != REPOSITORY_MAGIC {
+        return Err(CoreError::InvalidPolicyConfig {
+            key: object_key.clone(),
+            reason: "policy config magic is not recognized",
+        });
+    }
+    if policy.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+        return Err(CoreError::InvalidPolicyConfig {
+            key: object_key.clone(),
+            reason: "unsupported policy config format version",
+        });
+    }
+    if policy.repository_id != repository_id {
+        return Err(CoreError::InvalidPolicyConfig {
+            key: object_key.clone(),
+            reason: "policy config repository id does not match this repository",
+        });
+    }
+    if !repository_id_is_valid(&policy.repository_id)
+        || !policy_config_id_is_valid(&policy.policy_id)
+    {
+        return Err(CoreError::InvalidPolicyConfig {
+            key: object_key.clone(),
+            reason: "policy config id is invalid",
+        });
+    }
+    if object_key_for_policy_config(&policy.policy_id)? != *object_key {
+        return Err(CoreError::InvalidPolicyConfig {
+            key: object_key.clone(),
+            reason: "policy config object key does not match policy id",
+        });
+    }
+    validate_retention_policy_config(&policy.body.retention).map_err(|reason| {
+        CoreError::InvalidPolicyConfig {
+            key: object_key.clone(),
+            reason,
+        }
+    })?;
+    let actual = content_id_for_metadata(
+        master_key,
+        KeyPurpose::PolicyConfig,
+        repository_id.as_bytes(),
+        &policy.body,
+    )?;
+    if actual != policy.policy_id {
+        return Err(CoreError::MetadataIdentityMismatch {
+            kind: "policy config",
+            object_key: object_key.clone(),
+            expected: policy.policy_id.clone(),
+            actual,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_retention_policy_config(
+    retention: &RepositoryRetentionPolicyConfig,
+) -> Result<(), &'static str> {
+    let has_count_rule = [
+        retention.keep_last,
+        retention.keep_hourly,
+        retention.keep_daily,
+        retention.keep_weekly,
+        retention.keep_monthly,
+        retention.keep_yearly,
+    ]
+    .into_iter()
+    .flatten()
+    .try_fold(false, |_, count| {
+        if count == 0 {
+            Err("retention count must be greater than zero")
+        } else {
+            Ok(true)
+        }
+    })?;
+
+    if !has_count_rule && retention.keep_tags.is_empty() {
+        return Err("retention policy must include at least one keep rule");
+    }
+
+    for tag in &retention.keep_tags {
+        if tag.is_empty() || tag.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err("retention keep tag is invalid");
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_manifest_entry_path(
     manifest: &SnapshotManifest,
     object_key: &ObjectKey,
@@ -6229,6 +6530,10 @@ fn object_key_for_commit(snapshot_id: &str) -> CoreResult<ObjectKey> {
 fn object_key_for_forget_marker(snapshot_id: &str) -> CoreResult<ObjectKey> {
     ObjectKey::new(format!("forgets/{snapshot_id}"))
         .map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn object_key_for_policy_config(policy_id: &str) -> CoreResult<ObjectKey> {
+    object_key_for_id(POLICY_CONFIG_PREFIX, policy_id)
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

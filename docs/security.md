@@ -256,6 +256,16 @@ completion state during prune recovery scanning, and rejects stale pending
 prune-plan replay when current commit/forget marker state no longer matches the
 marked plan.
 
+Current policy/config fixture coverage includes one initialized repository with
+one encrypted policy/config object. Focused tests prove that current code
+authenticates and validates the fixture, rejects malformed encrypted framing and
+decrypted metadata, rejects policy ciphertext tampering, rejects wrong object
+names and authenticated kinds through AEAD context binding, rejects policy
+metadata identity mismatches, rejects unsupported policy/config schema and
+format versions, rejects repository identity mismatches, rejects invalid
+retention shape, and treats an already-present matching policy body as an
+idempotent write result.
+
 ## Key Rotation
 
 Key rotation has two different meanings:

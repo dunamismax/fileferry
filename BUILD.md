@@ -394,6 +394,13 @@ Current status:
   identity mismatches, unsupported prune schema/format versions, tampered
   completion state during recovery scanning, and stale pending prune-plan
   replay.
+- Continued with a policy/config fixture slice. Golden fixture bytes now exist
+  for one initialized repository with one encrypted policy/config object.
+  Focused tests prove current code can read, authenticate, validate, and
+  idempotently recognize those bytes and reject malformed encrypted framing,
+  malformed decrypted metadata, ciphertext tamper, wrong object name/kind
+  context, metadata identity mismatches, unsupported policy/config schema and
+  format versions, repository identity mismatches, and invalid retention shape.
 
 These slices do not freeze the rest of format v0.
 
@@ -967,6 +974,25 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with the policy/config fixture slice.
+  Added a narrow `fileferry-core` repository policy-config object API that
+  writes encrypted/authenticated policy objects under `objects/policy/<prefix>/`
+  with policy ids derived from the encrypted body, validates schema, magic,
+  format version, repository id, object-key identity, retention shape, and
+  metadata identity on read, and treats an already-present matching policy as an
+  idempotent write result. Added golden fixture bytes under
+  `tests/fixtures/repository-format/v0/policy-config/` for one initialized
+  repository with one encrypted policy/config object. Added focused fixture
+  tests that unlock and read the fixture, idempotently recognize the same
+  policy write, reject malformed encrypted framing and decrypted metadata,
+  reject ciphertext tamper, reject wrong object names and authenticated kinds
+  through AEAD context binding, reject metadata identity mismatches, reject
+  unsupported policy/config schema and format versions, reject repository
+  identity mismatches, and reject invalid retention shape. Updated
+  `docs/repository-format.md` and `docs/security.md` to describe only this
+  proven slice. This does not freeze migration behavior, upload state, or all
+  of format v0. Verified the focused test with
+  `cargo test -p fileferry-core --test repository_format_fixtures -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with the forget/prune-state fixture
   slice. Added golden fixture bytes under
   `tests/fixtures/repository-format/v0/forget-prune-state/` for one initialized
