@@ -338,9 +338,11 @@ renaming a temporary object into place.
 
 ## Lock Or Lease Model
 
-Concurrent backups should be safe when they write disjoint immutable objects and
-publish separate commits. Commands that mutate shared repository state, such as
-prune and key-slot changes, need a lease.
+Concurrent backups are not claimed safe yet. Current backup writes are treated
+as repository mutations and use the command lease path before publishing a
+snapshot. Commands that mutate shared repository state, such as backup, forget,
+prune, and key-slot changes, need a lease until narrower concurrency rules are
+implemented and tested.
 
 Format v0 lease rules:
 
@@ -368,29 +370,34 @@ Current implementation status:
 - Readers validate schema, magic, format version, repository id, lease id,
   writer id, object-key identity, expiration window, and keyed state identity
   before returning the object. Active-use reads reject an expired lease.
-- Non-dry-run `ferry forget`, non-dry-run `ferry prune`, and key-management
-  mutation paths now use this lease-state format for command-level
-  coordination. Before writing forget markers, marking/sweeping a prune plan,
-  writing key-slot objects, or writing key-slot removal markers, the command
-  lists `locks/`, authenticates and validates readable lease state, rejects
-  another active lease, ignores expired readable leases, writes its own
-  encrypted lease, and rechecks active leases after the write. When the
-  mutation path returns, the command best-effort deletes its own lease; if
-  release is interrupted, timestamp expiry is the fallback.
-- Lease enforcement is currently proven only for non-dry-run forget, non-dry-run
-  prune, `ferry key add`, `ferry key remove`, and `ferry key rotate`. Dry-run
-  forget and dry-run prune write no lease state. Command-level leases for
-  backup, repository maintenance, stale-lease breaking, and lease repair are
+- `ferry backup`, non-dry-run `ferry forget`, non-dry-run `ferry prune`, and
+  key-management mutation paths now use this lease-state format for
+  command-level coordination. Before writing snapshot objects, forget markers,
+  marking/sweeping a prune plan, writing key-slot objects, or writing key-slot
+  removal markers, the command lists `locks/`, authenticates and validates
+  readable lease state, rejects another active lease, ignores expired readable
+  leases, writes its own encrypted lease, and rechecks active leases after the
+  write. When the mutation path returns, the command best-effort deletes its own
+  lease; if release is interrupted, timestamp expiry is the fallback.
+- Lease enforcement is currently proven for `ferry backup`, non-dry-run forget,
+  non-dry-run prune, `ferry key add`, `ferry key remove`, and `ferry key
+  rotate`. Dry-run forget and dry-run prune write no lease state. Command-level
+  leases for repository maintenance, stale-lease breaking, and lease repair are
   not implemented yet.
 
 ## Concurrent Backup Behavior
 
-Concurrent backups may be allowed when:
+Future concurrent backups may be allowed when:
 
 - They do not share mutable upload ids.
 - They write immutable chunks, indexes, manifests, and commit markers.
 - Deduplication races are handled by idempotent object writes.
 - Commit discovery tolerates out-of-order listing.
+
+Current `ferry backup` takes the repository mutation lease before scanning and
+publishing a snapshot. It rejects another active readable lease and malformed
+lease state before writing chunk, index, manifest, or commit objects. This is a
+narrow pre-v1 safety rule, not a final concurrent-backup design.
 
 Concurrent backup must be rejected when the backend cannot provide the minimum
 idempotent write and visibility behavior needed for safe publication.
@@ -418,11 +425,12 @@ Current implementation status:
 - `ferry prune` is implemented for initialized local filesystem and
   S3-compatible repositories through the shared encrypted object-store
   pipeline.
-- Non-dry-run forget and prune write and verify an encrypted
+- Backup, non-dry-run forget, and non-dry-run prune write an encrypted
   `locks/<lease-id>` command lease before shared repository mutation. Another
   active readable lease rejects the command as a locked repository, expired
   readable leases are ignored, and malformed lease state fails closed before
-  forget writes markers or prune deletes candidates.
+  backup writes snapshot objects, forget writes markers, or prune deletes
+  candidates.
 - Candidate objects are limited to commit markers, forget markers, encrypted
   manifests, encrypted indexes, and encrypted chunks reachable from forgotten
   committed snapshots and not reachable from non-forgotten committed
@@ -655,4 +663,8 @@ lease-free. Focused key-management tests now prove `key add`, `key remove`,
 and `key rotate` reject active or malformed lease state before key-slot object
 or key-slot removal-marker writes, that the shared key-management lease path
 ignores expired readable leases, and that successful key-management mutations
-release their own leases.
+release their own leases. Focused backup tests now prove `ferry backup` uses
+the shared lease path, rejects an active readable lease before writing snapshot
+objects, ignores an expired readable lease, best-effort releases its own lease
+after a successful snapshot write, and rejects malformed lease state before
+writing snapshot objects.

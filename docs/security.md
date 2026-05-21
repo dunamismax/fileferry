@@ -139,6 +139,20 @@ Unlock flow:
 4. Fail closed if derivation fails, authentication fails, or the plaintext is
    not exactly 32 bytes.
 
+## Backup Lease Coordination
+
+`ferry backup` for initialized local and S3-compatible repositories now
+acquires encrypted `locks/<lease-id>` command lease state before snapshot
+publication. Before writing chunk, index, manifest, or commit objects, current
+code lists `locks/`, authenticates and validates readable lease state, rejects
+another active readable lease as a locked repository, ignores expired readable
+leases, writes its own encrypted backup lease, and rechecks active leases after
+the write. After the snapshot write path returns, it best-effort deletes its
+own lease.
+
+This is narrow command-level coordination. It does not implement stale-lease
+repair, upload-state recovery, or a final concurrent-backup safety claim.
+
 ## Key Add
 
 `ferry key add` adds one new passphrase unlock path for an initialized local

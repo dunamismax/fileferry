@@ -1969,7 +1969,7 @@ fn backup(
     let runtime = tokio_runtime()?;
     let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
-    let result = runtime.block_on(pipeline.write_snapshot(
+    let result = runtime.block_on(pipeline.write_snapshot_with_lease(
         repository.store.as_ref(),
         &opened.master_key,
         BackupRequest {

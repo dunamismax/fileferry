@@ -3035,6 +3035,25 @@ impl BackupPipeline {
         })
     }
 
+    pub async fn write_snapshot_with_lease(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        request: BackupRequest,
+    ) -> CoreResult<SnapshotWriteResult> {
+        let lease = self
+            .acquire_repository_mutation_lease(
+                store,
+                master_key,
+                RepositoryLeaseCommandKind::Backup,
+            )
+            .await?;
+        let result = self.write_snapshot(store, master_key, request).await;
+        self.release_repository_mutation_lease(store, &lease.lease_object)
+            .await;
+        result
+    }
+
     pub async fn read_snapshot_manifest(
         &self,
         store: &dyn ObjectStore,
@@ -9536,6 +9555,182 @@ mod tests {
         expected.sort();
 
         assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn backup_with_lease_rejects_active_repository_lease_before_snapshot_writes() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        fs::write(source.path().join("file.txt"), b"blocked").expect("write source");
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+        let active_lease_id = "8a".repeat(LEASE_STATE_ID_BYTES);
+        let now = current_unix_seconds().expect("current time");
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &created.repository.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: active_lease_id.clone(),
+                    writer_id: "8b".repeat(LEASE_STATE_ID_BYTES),
+                    command_kind: RepositoryLeaseCommandKind::Prune,
+                    acquired_at_unix_seconds: now,
+                    expires_at_unix_seconds: now + DEFAULT_REPOSITORY_LEASE_SECONDS,
+                },
+            )
+            .await
+            .expect("write active lease");
+
+        let error = pipeline
+            .write_snapshot_with_lease(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("active lease blocks backup");
+
+        assert!(matches!(
+            error,
+            CoreError::RepositoryLeaseConflict {
+                lease_id,
+                command_kind: RepositoryLeaseCommandKind::Prune,
+                ..
+            } if lease_id == active_lease_id
+        ));
+        for prefix in [
+            "commits",
+            "objects/chunk",
+            "objects/index",
+            "objects/manifest",
+        ] {
+            let prefix = ObjectKeyPrefix::new(prefix).expect("object prefix");
+            assert!(
+                store
+                    .list_prefix(&prefix)
+                    .await
+                    .expect("list snapshot objects")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_with_lease_ignores_expired_repository_lease_and_releases_own_lease() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        fs::write(source.path().join("file.txt"), b"allowed").expect("write source");
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+        let expired_lease_id = "8c".repeat(LEASE_STATE_ID_BYTES);
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &created.repository.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: expired_lease_id.clone(),
+                    writer_id: "8d".repeat(LEASE_STATE_ID_BYTES),
+                    command_kind: RepositoryLeaseCommandKind::Backup,
+                    acquired_at_unix_seconds: 1,
+                    expires_at_unix_seconds: 2,
+                },
+            )
+            .await
+            .expect("write expired lease");
+
+        let result = pipeline
+            .write_snapshot_with_lease(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("expired lease does not block backup");
+
+        assert!(result.commit_object.as_str().starts_with("commits/"));
+        let lock_prefix = ObjectKeyPrefix::new(LEASE_STATE_PREFIX).expect("lock prefix");
+        assert_eq!(
+            store.list_prefix(&lock_prefix).await.expect("list locks"),
+            vec![lease_state_object_key(&expired_lease_id).expect("expired lease object")]
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_with_lease_rejects_malformed_repository_lease_before_snapshot_writes() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        fs::write(source.path().join("file.txt"), b"blocked").expect("write source");
+        let store = FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(
+            created.repository.repository_id.clone(),
+        ))
+        .expect("pipeline");
+        let malformed_lease_id = "8e".repeat(LEASE_STATE_ID_BYTES);
+        store
+            .overwrite_for_tests(
+                lease_state_object_key(&malformed_lease_id).expect("lease key"),
+                b"not encrypted json".to_vec(),
+            )
+            .await;
+
+        let error = pipeline
+            .write_snapshot_with_lease(
+                &store,
+                &created.repository.master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("malformed lease blocks backup");
+
+        assert!(matches!(error, CoreError::LeaseStateDecode { .. }));
+        for prefix in [
+            "commits",
+            "objects/chunk",
+            "objects/index",
+            "objects/manifest",
+        ] {
+            let prefix = ObjectKeyPrefix::new(prefix).expect("object prefix");
+            assert!(
+                store
+                    .list_prefix(&prefix)
+                    .await
+                    .expect("list snapshot objects")
+                    .is_empty()
+            );
+        }
     }
 
     #[tokio::test]

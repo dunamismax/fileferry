@@ -43,9 +43,13 @@ Last reviewed: 2026-05-21.
   context.
 - `ferry backup` opens initialized local and S3-compatible repositories,
   unlocks them with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
-  creates encrypted, compressed, deduplicated snapshots through the core
-  backup pipeline, and exposes tested human, JSON, and JSONL-safe output
-  paths.
+  writes an encrypted best-effort command lease before snapshot object
+  publication, rejects another active readable lease as a locked repository,
+  ignores expired readable leases, fails closed on malformed lease state before
+  snapshot writes, creates encrypted, compressed, deduplicated snapshots
+  through the core backup pipeline, best-effort releases its own lease after
+  the snapshot write path returns, and exposes tested human, JSON, and
+  JSONL-safe output paths.
 - `ferry snapshots` and `ferry ls` open initialized local and S3-compatible
   repositories, authenticate committed encrypted manifests, and expose tested
   human, JSON, and JSONL-safe output paths.
@@ -452,9 +456,16 @@ Current status:
   removal markers, reject another active readable lease as a locked
   repository, ignore expired readable leases, best-effort release their own
   lease after the mutation path returns, and fail closed on malformed lease
-  state before key-slot mutation writes. Command-level lease enforcement is
-  currently proven only for forget, prune, and key-management mutation paths;
-  backup, repository maintenance, stale-lease breaking, and lease repair are
+  state before key-slot mutation writes.
+- Continued with a backup command lease-coordination slice. `ferry backup` now
+  uses encrypted `locks/<lease-id>` lease state before publishing snapshot
+  objects, rejects another active readable lease as a locked repository,
+  ignores expired readable leases, best-effort releases its own lease after the
+  snapshot write path returns, and fails closed on malformed lease state before
+  writing chunk, index, manifest, or commit objects. Command-level lease
+  enforcement is currently proven only for backup, forget, prune, and
+  key-management mutation paths; repository maintenance, stale-lease breaking,
+  lease repair, upload-state recovery, and broad concurrent-backup safety are
   not implemented yet.
 
 These slices do not freeze the rest of format v0.
@@ -1032,6 +1043,21 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with a backup command
+  lease-coordination slice. `ferry backup` now calls the shared encrypted
+  `locks/<lease-id>` mutation-lease path before snapshot publication. Active
+  readable leases return the stable `repository_locked` failure code and
+  repository-locked exit family before chunk, index, manifest, or commit
+  writes; malformed or unauthenticatable lease state fails closed before
+  snapshot writes; expired readable leases are ignored; and successful backup
+  writes best-effort release their own lease. Added focused core tests for
+  active-lease rejection, expired-lease tolerance plus own-lease release, and
+  malformed-lease rejection before snapshot writes, plus a CLI JSON failure
+  test that verifies the stable locked exit code and no snapshot-object
+  publication. Updated `docs/repository-format.md`, `docs/security.md`, and
+  this build plan to keep the claim narrow: this is command-level backup
+  mutation coordination, not broad concurrent-backup safety, stale-lease
+  repair, or upload-state recovery.
 - 2026-05-21 - Continued Milestone H with a key-management
   lease-coordination slice. `ferry key add`, `ferry key remove`, and
   `ferry key rotate` now acquire encrypted `locks/<lease-id>` lease state
