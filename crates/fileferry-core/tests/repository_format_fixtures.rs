@@ -376,6 +376,32 @@ fn reencrypt_snapshot_manifest_variant(
     encode_fixture_encrypted_object(encrypted)
 }
 
+fn reencrypt_snapshot_manifest_value(
+    opened: &fileferry_core::OpenedRepository,
+    mutate: impl FnOnce(&mut Value),
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(
+            KeyPurpose::SnapshotMetadata,
+            SNAPSHOT_DATA_REPOSITORY_ID.as_bytes(),
+        )
+        .expect("manifest subkey");
+    let context = ObjectContext::new(ObjectKind::SnapshotManifest, MANIFEST_OBJECT)
+        .expect("manifest context");
+    let plaintext = decrypt_object(
+        &key,
+        &context,
+        &decode_fixture_encrypted_object(SNAPSHOT_DATA_MANIFEST),
+    )
+    .expect("fixture manifest decrypts");
+    let mut value: Value = serde_json::from_slice(&plaintext).expect("fixture manifest json");
+    mutate(&mut value);
+    let mutated = serde_json::to_vec(&value).expect("mutated manifest json");
+    let encrypted = encrypt_object(&key, &context, &mutated).expect("mutated manifest encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
 fn reencrypt_snapshot_manifest_plaintext(
     opened: &fileferry_core::OpenedRepository,
     plaintext: &[u8],
@@ -390,6 +416,28 @@ fn reencrypt_snapshot_manifest_plaintext(
     let context = ObjectContext::new(ObjectKind::SnapshotManifest, MANIFEST_OBJECT)
         .expect("manifest context");
     let encrypted = encrypt_object(&key, &context, plaintext).expect("manifest plaintext encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_chunk_index_value(
+    opened: &fileferry_core::OpenedRepository,
+    mutate: impl FnOnce(&mut Value),
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(KeyPurpose::Index, SNAPSHOT_DATA_REPOSITORY_ID.as_bytes())
+        .expect("index subkey");
+    let context = ObjectContext::new(ObjectKind::Index, INDEX_OBJECT).expect("index context");
+    let plaintext = decrypt_object(
+        &key,
+        &context,
+        &decode_fixture_encrypted_object(SNAPSHOT_DATA_INDEX),
+    )
+    .expect("fixture index decrypts");
+    let mut value: Value = serde_json::from_slice(&plaintext).expect("fixture index json");
+    mutate(&mut value);
+    let mutated = serde_json::to_vec(&value).expect("mutated index json");
+    let encrypted = encrypt_object(&key, &context, &mutated).expect("mutated index encrypts");
     encode_fixture_encrypted_object(encrypted)
 }
 
@@ -809,6 +857,75 @@ async fn tampered_key_slot_removal_fixture_variant_is_rejected() {
     ));
 }
 
+#[tokio::test]
+async fn plaintext_fixture_objects_reject_unknown_contract_fields() {
+    let bootstrap_store = load_bootstrap_and_key_slot().await;
+    let mut bootstrap: Value = serde_json::from_slice(BOOTSTRAP).expect("fixture bootstrap json");
+    bootstrap["unexpected_contract_field"] = json!(true);
+    bootstrap_store
+        .overwrite_for_tests(
+            object_key("bootstrap"),
+            serde_json::to_vec_pretty(&bootstrap).expect("bootstrap with unknown field"),
+        )
+        .await;
+    let bootstrap_error = open_repository(&bootstrap_store, &secret(PRIMARY_PASSPHRASE))
+        .await
+        .expect_err("unknown bootstrap fields are rejected for current v0");
+    assert!(matches!(
+        bootstrap_error,
+        CoreError::RepositoryBootstrapDecode { .. }
+    ));
+
+    let key_slot_store = load_bootstrap_and_key_slot().await;
+    let mut key_slot: Value = serde_json::from_slice(KEY_SLOT).expect("fixture key-slot json");
+    key_slot["unexpected_contract_field"] = json!(true);
+    key_slot_store
+        .overwrite_for_tests(
+            key_slot_object_key(),
+            serde_json::to_vec_pretty(&key_slot).expect("key slot with unknown field"),
+        )
+        .await;
+    let key_slot_error = open_repository(&key_slot_store, &secret(ADDED_PASSPHRASE))
+        .await
+        .expect_err("unknown external key-slot fields are rejected");
+    assert!(matches!(key_slot_error, CoreError::KeySlotDecode { .. }));
+
+    let key_slot_kdf_store = load_bootstrap_and_key_slot().await;
+    let mut key_slot: Value = serde_json::from_slice(KEY_SLOT).expect("fixture key-slot json");
+    key_slot["key_slot"]["kdf"]["unexpected_contract_field"] = json!(true);
+    key_slot_kdf_store
+        .overwrite_for_tests(
+            key_slot_object_key(),
+            serde_json::to_vec_pretty(&key_slot).expect("key slot KDF with unknown field"),
+        )
+        .await;
+    let key_slot_kdf_error = open_repository(&key_slot_kdf_store, &secret(ADDED_PASSPHRASE))
+        .await
+        .expect_err("unknown nested key-slot KDF fields are rejected");
+    assert!(matches!(
+        key_slot_kdf_error,
+        CoreError::KeySlotDecode { .. }
+    ));
+
+    let removal_store = load_complete_fixture().await;
+    let mut removal: Value =
+        serde_json::from_slice(KEY_SLOT_REMOVAL).expect("fixture removal marker json");
+    removal["unexpected_contract_field"] = json!(true);
+    removal_store
+        .overwrite_for_tests(
+            key_slot_removal_object_key(),
+            serde_json::to_vec_pretty(&removal).expect("removal marker with unknown field"),
+        )
+        .await;
+    let removal_error = open_repository(&removal_store, &secret(PRIMARY_PASSPHRASE))
+        .await
+        .expect_err("unknown key-slot removal fields are rejected");
+    assert!(matches!(
+        removal_error,
+        CoreError::KeySlotRemovalDecode { .. }
+    ));
+}
+
 #[test]
 fn recovery_export_fixture_verifies_with_primary_passphrase() {
     let verified = verify_repository_recovery_export(RECOVERY_EXPORT, &secret(PRIMARY_PASSPHRASE))
@@ -824,6 +941,21 @@ fn recovery_export_fixture_verifies_with_primary_passphrase() {
     assert_eq!(verified.kdf.time_cost, 3);
     assert_eq!(verified.kdf.parallelism, 4);
     assert_eq!(verified.aead, RepositoryAeadAlgorithm::XChaCha20Poly1305);
+}
+
+#[test]
+fn recovery_export_fixture_rejects_unknown_contract_fields() {
+    let mut export: Value =
+        serde_json::from_slice(RECOVERY_EXPORT).expect("fixture recovery export json");
+    export["unexpected_contract_field"] = json!(true);
+
+    let error = verify_repository_recovery_export(
+        &serde_json::to_vec_pretty(&export).expect("recovery export with unknown field"),
+        &secret(PRIMARY_PASSPHRASE),
+    )
+    .expect_err("unknown recovery export fields are rejected");
+
+    assert!(matches!(error, CoreError::RecoveryExportDecode { .. }));
 }
 
 #[test]
@@ -987,6 +1119,75 @@ async fn snapshot_data_fixture_rejects_malformed_encrypted_framing_and_metadata(
         .await
         .expect_err("malformed decrypted manifest metadata is rejected");
     assert!(matches!(metadata_error, CoreError::MetadataDecode { .. }));
+}
+
+#[tokio::test]
+async fn snapshot_data_fixture_rejects_unknown_contract_fields() {
+    let frame_store = load_snapshot_data_fixture().await;
+    let opened = open_repository(&frame_store, &secret(SNAPSHOT_DATA_PASSPHRASE))
+        .await
+        .expect("snapshot-data fixture opens");
+    let pipeline = snapshot_data_pipeline();
+
+    let mut frame: Value =
+        serde_json::from_slice(SNAPSHOT_DATA_MANIFEST).expect("manifest frame json");
+    frame["unexpected_contract_field"] = json!(true);
+    frame_store
+        .overwrite_for_tests(
+            object_key(MANIFEST_OBJECT),
+            serde_json::to_vec(&frame).expect("manifest frame with unknown field"),
+        )
+        .await;
+    let frame_error = pipeline
+        .read_snapshot_manifest(&frame_store, &opened.master_key, SNAPSHOT_ID)
+        .await
+        .expect_err("unknown encrypted-object frame fields are rejected");
+    assert!(matches!(frame_error, CoreError::ObjectDecode { .. }));
+
+    let manifest_store = load_snapshot_data_fixture().await;
+    manifest_store
+        .overwrite_for_tests(
+            object_key(MANIFEST_OBJECT),
+            reencrypt_snapshot_manifest_value(&opened, |manifest| {
+                manifest["unexpected_contract_field"] = json!(true);
+            }),
+        )
+        .await;
+    let manifest_error = pipeline
+        .read_snapshot_manifest(&manifest_store, &opened.master_key, SNAPSHOT_ID)
+        .await
+        .expect_err("unknown decrypted manifest fields are rejected");
+    assert!(matches!(manifest_error, CoreError::MetadataDecode { .. }));
+
+    let index_store = load_snapshot_data_fixture().await;
+    index_store
+        .overwrite_for_tests(
+            object_key(INDEX_OBJECT),
+            reencrypt_chunk_index_value(&opened, |index| {
+                index["chunks"][0]["unexpected_contract_field"] = json!(true);
+            }),
+        )
+        .await;
+    let index_error = pipeline
+        .read_chunk_index(&index_store, &opened.master_key, INDEX_ID)
+        .await
+        .expect_err("unknown decrypted index entry fields are rejected");
+    assert!(matches!(index_error, CoreError::MetadataDecode { .. }));
+
+    let commit_store = load_snapshot_data_fixture().await;
+    let mut commit: Value = serde_json::from_slice(SNAPSHOT_DATA_COMMIT).expect("commit json");
+    commit["unexpected_contract_field"] = json!(true);
+    commit_store
+        .overwrite_for_tests(
+            object_key(COMMIT_OBJECT),
+            serde_json::to_vec(&commit).expect("commit with unknown field"),
+        )
+        .await;
+    let commit_error = pipeline
+        .read_committed_snapshot_manifests(&commit_store, &opened.master_key)
+        .await
+        .expect_err("unknown commit marker fields are rejected");
+    assert!(matches!(commit_error, CoreError::CommitDecode { .. }));
 }
 
 #[tokio::test]
@@ -1316,6 +1517,69 @@ async fn forget_prune_state_fixture_rejects_forget_marker_identity_and_schema_mi
             reason: "forget marker manifest object does not match snapshot id",
             ..
         }
+    ));
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_unknown_contract_fields() {
+    let marker_store = load_forget_prune_state_fixture().await;
+    let mut marker: Value =
+        serde_json::from_slice(FORGET_PRUNE_FORGET_MARKER).expect("fixture forget marker json");
+    marker["unexpected_contract_field"] = json!(true);
+    marker_store
+        .overwrite_for_tests(
+            object_key(FORGET_MARKER_OBJECT),
+            serde_json::to_vec(&marker).expect("forget marker with unknown field"),
+        )
+        .await;
+    let marker_error = forget_prune_pipeline()
+        .read_forgotten_snapshot_ids(&marker_store)
+        .await
+        .expect_err("unknown forget marker fields are rejected");
+    assert!(matches!(marker_error, CoreError::ForgetMarkerDecode { .. }));
+
+    let opened_store = load_forget_prune_state_fixture().await;
+    let opened = open_repository(&opened_store, &secret(FORGET_PRUNE_PASSPHRASE))
+        .await
+        .expect("forget-prune fixture opens");
+    let pipeline = forget_prune_pipeline();
+
+    let plan_store = load_forget_prune_state_fixture().await;
+    plan_store
+        .overwrite_for_tests(
+            object_key(PRUNE_PLAN_OBJECT),
+            reencrypt_prune_mark_value(&opened, PRUNE_PLAN_OBJECT, FORGET_PRUNE_PLAN, |plan| {
+                plan["candidate_objects"][0]["unexpected_contract_field"] = json!(true);
+            }),
+        )
+        .await;
+    let plan_error = pipeline
+        .read_prune_plan_state(&plan_store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("unknown prune plan object fields are rejected");
+    assert!(matches!(plan_error, CoreError::PrunePlanDecode { .. }));
+
+    let completion_store = load_forget_prune_state_fixture().await;
+    completion_store
+        .overwrite_for_tests(
+            object_key(PRUNE_COMPLETION_OBJECT),
+            reencrypt_prune_mark_value(
+                &opened,
+                PRUNE_COMPLETION_OBJECT,
+                FORGET_PRUNE_COMPLETION,
+                |completion| {
+                    completion["unexpected_contract_field"] = json!(true);
+                },
+            ),
+        )
+        .await;
+    let completion_error = pipeline
+        .read_prune_completion_state(&completion_store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("unknown prune completion fields are rejected");
+    assert!(matches!(
+        completion_error,
+        CoreError::PruneCompletionDecode { .. }
     ));
 }
 
@@ -1657,6 +1921,29 @@ async fn policy_config_fixture_rejects_malformed_framing_and_metadata() {
 }
 
 #[tokio::test]
+async fn policy_config_fixture_rejects_unknown_contract_fields() {
+    let store = load_policy_config_fixture().await;
+    let opened = open_repository(&store, &secret(POLICY_CONFIG_PASSPHRASE))
+        .await
+        .expect("policy-config fixture opens");
+    store
+        .overwrite_for_tests(
+            object_key(POLICY_OBJECT),
+            reencrypt_policy_config_value(&opened, POLICY_OBJECT, POLICY_CONFIG, |policy| {
+                policy["body"]["retention"]["unexpected_contract_field"] = json!(true);
+            }),
+        )
+        .await;
+
+    let error = policy_config_pipeline()
+        .read_repository_policy_config(&store, &opened.master_key, POLICY_ID)
+        .await
+        .expect_err("unknown policy retention fields are rejected");
+
+    assert!(matches!(error, CoreError::PolicyConfigDecode { .. }));
+}
+
+#[tokio::test]
 async fn policy_config_fixture_rejects_tampered_ciphertext() {
     let opened_store = load_policy_config_fixture().await;
     let opened = open_repository(&opened_store, &secret(POLICY_CONFIG_PASSPHRASE))
@@ -1955,6 +2242,29 @@ async fn upload_state_fixture_rejects_malformed_framing_and_metadata() {
 }
 
 #[tokio::test]
+async fn upload_state_fixture_rejects_unknown_contract_fields() {
+    let store = load_upload_state_fixture().await;
+    let opened = open_repository(&store, &secret(UPLOAD_STATE_PASSPHRASE))
+        .await
+        .expect("upload-state fixture opens");
+    store
+        .overwrite_for_tests(
+            object_key(UPLOAD_STATE_OBJECT),
+            reencrypt_upload_state_value(&opened, UPLOAD_STATE_OBJECT, UPLOAD_STATE, |state| {
+                state["pending_objects"][0]["unexpected_contract_field"] = json!(true);
+            }),
+        )
+        .await;
+
+    let error = upload_state_pipeline()
+        .read_repository_upload_state(&store, &opened.master_key, UPLOAD_WRITER_ID, UPLOAD_ID)
+        .await
+        .expect_err("unknown upload pending-object fields are rejected");
+
+    assert!(matches!(error, CoreError::UploadStateDecode { .. }));
+}
+
+#[tokio::test]
 async fn upload_state_fixture_rejects_tampered_ciphertext() {
     let opened_store = load_upload_state_fixture().await;
     let opened = open_repository(&opened_store, &secret(UPLOAD_STATE_PASSPHRASE))
@@ -2246,6 +2556,29 @@ async fn lease_state_fixture_rejects_malformed_framing_and_metadata() {
         .await
         .expect_err("malformed decrypted lease metadata is rejected");
     assert!(matches!(metadata_error, CoreError::LeaseStateDecode { .. }));
+}
+
+#[tokio::test]
+async fn lease_state_fixture_rejects_unknown_contract_fields() {
+    let store = load_lease_state_fixture().await;
+    let opened = open_repository(&store, &secret(LEASE_STATE_PASSPHRASE))
+        .await
+        .expect("lease-state fixture opens");
+    store
+        .overwrite_for_tests(
+            object_key(LEASE_STATE_OBJECT),
+            reencrypt_lease_state_value(&opened, LEASE_STATE_OBJECT, LEASE_STATE, |state| {
+                state["unexpected_contract_field"] = json!(true);
+            }),
+        )
+        .await;
+
+    let error = lease_state_pipeline()
+        .read_repository_lease_state(&store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("unknown lease-state fields are rejected");
+
+    assert!(matches!(error, CoreError::LeaseStateDecode { .. }));
 }
 
 #[tokio::test]

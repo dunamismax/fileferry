@@ -467,6 +467,16 @@ Current status:
   key-management mutation paths; repository maintenance, stale-lease breaking,
   lease repair, upload-state recovery, and broad concurrent-backup safety are
   not implemented yet.
+- Continued with a compatibility-contract strictness slice. Current
+  fixture-covered v0 repository JSON shapes now reject unknown fields in
+  plaintext objects, encrypted-object frames, and decrypted repository metadata
+  before validation or use. Focused fixture tests cover bootstrap, external
+  key slots, nested key-slot KDF parameters, key-slot removal markers, recovery
+  exports, encrypted-object frames, decrypted manifests, chunk-index entries,
+  commit markers, forget markers, prune plans, prune completions,
+  policy/config retention bodies, upload pending-object records, and lease
+  state. The bootstrap inspection gate remains intentionally narrow so future
+  formats and feature flags can still be classified before unlock.
 
 These slices do not freeze the rest of format v0.
 
@@ -1043,6 +1053,22 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with a compatibility-contract
+  strictness slice. Added strict serde decoding for fixture-covered current v0
+  repository JSON shapes so unknown fields in plaintext objects,
+  encrypted-object frames, and decrypted metadata are rejected before
+  validation or use. Added focused fixture tests for unknown-field rejection
+  across bootstrap, external key slots, nested key-slot KDF parameters,
+  key-slot removal markers, recovery exports, encrypted-object frames,
+  decrypted manifests, chunk-index entries, commit markers, forget markers,
+  prune plans, prune completions, policy/config retention bodies, upload
+  pending-object records, and lease-state objects. Updated
+  `docs/repository-format.md` to separate fixture-covered compatibility fields
+  from internal/pre-freeze fields, and updated `docs/security.md` to record the
+  stricter malformed-metadata behavior. This does not implement migrations,
+  add new fixtures, or freeze all of format v0. Verified the focused fixture
+  test with
+  `cargo test -p fileferry-core --test repository_format_fixtures -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with a backup command
   lease-coordination slice. `ferry backup` now calls the shared encrypted
   `locks/<lease-id>` mutation-lease path before snapshot publication. Active

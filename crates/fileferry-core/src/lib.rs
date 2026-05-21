@@ -849,6 +849,7 @@ pub struct RepositoryPolicyConfigWriteResult {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryPolicyConfigState {
     pub schema_version: u16,
     pub magic: String,
@@ -859,12 +860,14 @@ pub struct RepositoryPolicyConfigState {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryPolicyConfigBody {
     pub created_at_unix_seconds: u64,
     pub retention: RepositoryRetentionPolicyConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryRetentionPolicyConfig {
     pub keep_last: Option<u32>,
     pub keep_hourly: Option<u32>,
@@ -895,6 +898,7 @@ pub struct RepositoryUploadStateWriteResult {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryUploadState {
     pub schema_version: u16,
     pub magic: String,
@@ -917,6 +921,7 @@ pub enum RepositoryUploadOperation {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryUploadPendingObject {
     pub object_key: String,
     pub kind: RepositoryUploadPendingObjectKind,
@@ -950,6 +955,7 @@ pub struct RepositoryLeaseStateWriteResult {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryLeaseState {
     pub schema_version: u16,
     pub magic: String,
@@ -988,6 +994,7 @@ pub enum PruneRecoveryState {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PruneObject {
     pub object_key: String,
     pub kind: PruneObjectKind,
@@ -1559,6 +1566,7 @@ fn repository_id_is_valid(repository_id: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RepositoryBootstrap {
     magic: String,
     format_version: u16,
@@ -1866,6 +1874,7 @@ fn decode_key_slot_removal_marker(
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredExternalKeySlot {
     magic: String,
     format_version: u16,
@@ -1876,6 +1885,7 @@ struct StoredExternalKeySlot {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredRecoveryExport {
     schema_version: u16,
     magic: String,
@@ -1891,6 +1901,7 @@ struct StoredRecoveryExport {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredRecoveryKeyExport {
     kdf: StoredKdfParams,
     salt: Vec<u8>,
@@ -1899,6 +1910,7 @@ struct StoredRecoveryKeyExport {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredKeySlotRemoval {
     schema_version: u16,
     magic: String,
@@ -2153,6 +2165,7 @@ impl StoredExternalKeySlot {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredKeySlot {
     kdf: StoredKdfParams,
     salt: Vec<u8>,
@@ -2190,6 +2203,7 @@ impl StoredKeySlot {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredKdfParams {
     algorithm: StoredKdfAlgorithm,
     memory_cost_kib: u32,
@@ -4789,6 +4803,7 @@ pub struct SnapshotWriteResult {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotCommit {
     pub schema_version: u16,
     pub snapshot_id: String,
@@ -4796,6 +4811,7 @@ pub struct SnapshotCommit {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotForgetMarker {
     pub schema_version: u16,
     pub snapshot_id: String,
@@ -4817,6 +4833,7 @@ pub struct SnapshotForgetWriteResult {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredPrunePlan {
     schema_version: u16,
     magic: String,
@@ -4898,6 +4915,7 @@ impl From<StoredPrunePlan> for PrunePlanState {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredPruneCompletion {
     schema_version: u16,
     magic: String,
@@ -5504,6 +5522,7 @@ pub struct RestoreMetadataWarning {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotManifest {
     pub schema_version: u16,
     pub snapshot_id: String,
@@ -5511,6 +5530,7 @@ pub struct SnapshotManifest {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotManifestBody {
     pub created_at_unix_seconds: u64,
     pub tags: Vec<String>,
@@ -5519,6 +5539,7 @@ pub struct SnapshotManifestBody {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestEntry {
     pub root: PathBuf,
     pub path: PathBuf,
@@ -5540,6 +5561,7 @@ impl ManifestEntry {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestChunkRef {
     pub chunk_id: String,
     pub object_key: String,
@@ -5548,6 +5570,7 @@ pub struct ManifestChunkRef {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChunkIndex {
     pub schema_version: u16,
     pub index_id: String,
@@ -5555,6 +5578,7 @@ pub struct ChunkIndex {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChunkIndexEntry {
     pub chunk_id: String,
     pub object_key: String,
@@ -5578,6 +5602,7 @@ pub enum RepositoryAeadAlgorithm {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredEncryptedObject {
     algorithm: RepositoryAeadAlgorithm,
     nonce: [u8; fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN],

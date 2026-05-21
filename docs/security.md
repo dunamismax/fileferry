@@ -329,6 +329,13 @@ candidates, or key-management writes key-slot mutation objects, and each
 command best-effort releases its own lease after the mutation path returns.
 Other command-level lease enforcement is not implemented yet.
 
+Current fixture-covered repository JSON schemas are strict for the current v0
+objects they cover. Focused tests prove that unknown fields in plaintext
+objects, encrypted-object frames, and decrypted repository metadata are rejected
+as decode failures before validation or use. The bootstrap inspection gate is
+the exception: it intentionally reads only the small compatibility envelope
+needed to classify future formats or feature flags before unlock.
+
 ## Key Rotation
 
 Key rotation has two different meanings:
@@ -370,7 +377,8 @@ exit-code mapping:
 - `context_mismatch`: authenticated object context does not match the object
   being opened.
 - `unsupported_format`: bootstrap version or algorithm is unknown.
-- `malformed_metadata`: decrypted metadata is not valid for its schema.
+- `malformed_metadata`: plaintext or decrypted metadata is not valid for its
+  schema, including unknown fields in a fixture-covered current-v0 object.
 - `replayed_metadata`: authenticated metadata is valid but older than the
   required repository state.
 

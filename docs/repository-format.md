@@ -516,6 +516,23 @@ These are narrow compatibility-fixture slices for format v0. They do not freeze
 all of format v0. Migration implementation and full cross-version
 compatibility remain open Milestone H work.
 
+For fixture-covered current v0 objects, the listed compatibility-facing fields
+below are closed schemas: current readers reject unknown JSON fields in the
+plaintext object, encrypted-object frame, or decrypted repository metadata
+before the object can influence repository behavior. The bootstrap inspection
+gate intentionally remains narrower and looser: it reads only `magic`,
+`format_version`, and `features` so future or feature-gated formats can be
+classified before unlock. If inspection classifies bytes as the current
+supported format, the full bootstrap decode uses the strict current-v0 schema.
+
+Fields not listed below remain internal or pre-freeze. This includes future
+manifest body additions, future index packing fields, policy selection
+semantics, upload recovery semantics, lease breaking/repair semantics, prune
+abandonment/expiration semantics, and migration behavior beyond the bootstrap
+compatibility gate. Platform metadata extension fields remain governed by
+`docs/platform-metadata.md`; the fixture-covered manifest only freezes the
+metadata fields present in that fixture.
+
 For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 
 - `bootstrap`: `magic`, `format_version`, `repository_id`, `key_slots`, each
@@ -668,3 +685,13 @@ the shared lease path, rejects an active readable lease before writing snapshot
 objects, ignores an expired readable lease, best-effort releases its own lease
 after a successful snapshot write, and rejects malformed lease state before
 writing snapshot objects.
+
+Current compatibility-contract strictness tests prove that fixture-covered
+current v0 objects reject unknown fields in bootstrap bytes, external key-slot
+objects, nested key-slot KDF parameters, key-slot removal markers, recovery
+exports, encrypted-object frames, decrypted manifests, chunk-index entries,
+commit markers, forget markers, prune plans, prune completions, policy/config
+retention bodies, upload pending-object records, and lease-state objects. These
+tests do not freeze unimplemented future fields; adding a field now requires an
+intentional schema change, fixture update, and migration or compatibility
+decision.
