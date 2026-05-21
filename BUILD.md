@@ -64,11 +64,12 @@ Last reviewed: 2026-05-20.
   creates missing parent directories for path-scoped symlink restores after
   destination safety preflight, supports dry-run reporting including planned
   modified timestamp metadata, captured Unix permission metadata, captured Unix
-  ownership metadata, and metadata planning warnings, returns partial-success
-  exit code `10` when metadata warnings are produced, and exposes tested human,
-  JSON, and JSONL-safe output paths. Authenticated manifests with invalid entry
-  topology are rejected as integrity failures before restore destination
-  writes.
+  ownership metadata, selected symlink timestamp metadata, captured Unix
+  symlink metadata, and metadata planning warnings, returns partial-success
+  exit code `10` when metadata warnings are produced, and exposes tested
+  human, JSON, and JSONL-safe output paths. Authenticated manifests with
+  invalid entry topology are rejected as integrity failures before restore
+  destination writes.
 - `ferry check` opens initialized local and S3-compatible repositories,
   unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
   authenticates committed manifests and chunk indexes, reads/decompresses
@@ -213,8 +214,9 @@ Last reviewed: 2026-05-20.
   symlinks, regular-file/directory modified timestamps, and regular-file and
   directory Unix permission bits where representable to a destination
   directory with destination safety checks, explicit overwrite policy, dry-run
-  reporting, captured Unix ownership verification, metadata planning, and
-  optional byte-for-byte verification.
+  reporting, captured Unix ownership verification, selected symlink metadata
+  not-restored warnings, metadata planning, and optional byte-for-byte
+  verification.
 - `fileferry-core` writes commit markers after encrypted snapshot manifests,
   can discover committed manifests from those markers, and has tested snapshot
   summary and immediate-entry listing primitives for future `snapshots` and
@@ -235,7 +237,9 @@ symlinks, modified timestamps for restored regular files and directories, and
 captured regular-file and directory Unix permission bits where representable.
 Restore verifies captured regular-file and directory Unix ownership after
 writes and warns on mismatches, but it does not change destination owners and
-broader metadata application is not complete.
+broader metadata application is not complete. Symlink targets are restored on
+Unix, but selected symlink timestamps and captured Unix symlink mode/ownership
+are reported as metadata warnings because they are not restored yet.
 S3-compatible repository URLs are parsed through the shared repository
 resolver, and S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`,
 `check`, `forget`, `prune`, and key-management commands use the existing
@@ -865,6 +869,22 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Completed a Milestone G symlink metadata warning slice without
+  claiming broader platform support. Restore now carries selected symlink
+  modified timestamp, creation timestamp, Unix mode, and Unix UID/GID metadata
+  through core destination planning, counts those selected symlink fields in
+  `metadata_planned`, restores the symlink target as before, and emits
+  structured `portable`/`modified`, `portable`/`created`, `unix`/`mode`,
+  `unix`/`uid`, and `unix`/`gid` metadata warnings because this version does
+  not restore symlink metadata. JSON restore of selected symlink entries now
+  returns partial-success exit code `10` when those metadata warnings are the
+  only issue. Updated `README.md`, `docs/cli-contract.md`,
+  `docs/platform-metadata.md`, and this file. No live S3 gates were enabled in
+  this session. Verified with `cargo test -p fileferry-core symlink
+  --no-fail-fast`, `cargo test -p fileferry-cli symlink --test
+  repository_commands --no-fail-fast`, `cargo test -p fileferry-platform -p
+  fileferry-core -p fileferry-cli --no-fail-fast`, `just fmt`, `just check`,
+  `just test`, and `just build`.
 - 2026-05-21 - Completed a Milestone G Unix ownership restore-warning slice
   without claiming broader platform support. Restore now carries captured Unix
   UID/GID metadata for regular files and directories through core restore

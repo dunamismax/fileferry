@@ -72,19 +72,22 @@ case-insensitive. Windows destinations reject selected paths with Windows
 reserved-name segments before destination writes; this is a guardrail, not a
 claim that Windows restore support has met the release bar.
 Dry-run restore reports the count of regular-file and directory modified
-timestamp fields selected for restore plus captured Unix permission fields
-selected for restore plus captured Unix ownership fields selected for restore,
-and can surface denied, unsupported, invalid, or unrepresentable metadata
-warnings without writing destination entries.
+timestamp fields selected for restore, captured Unix permission fields
+selected for restore, captured Unix ownership fields selected for restore, and
+selected symlink timestamp plus captured Unix symlink metadata fields. It can
+surface denied, unsupported, invalid, unrepresentable, or not-yet-restored
+metadata warnings without writing destination entries.
 Captured entry metadata records the source platform for new manifests; older
 v0 manifests that lack this field are read as `unknown`. Current restores do
-not restore symlink timestamps, creation/birth time, Unix ownership by changing
-destination owners, Unix special mode bits, ACLs, xattrs, resource forks,
-Windows attributes, BSD flags, sparse extents, or other platform-specific
-metadata yet. A selected timestamp, Unix mode, or Unix ownership field that
-could not be represented is reported as a metadata warning with entry id,
-metadata namespace, field, source platform, destination platform, and reason;
-a restore with only metadata warnings returns partial-success exit code `10`.
+not restore symlink timestamps, symlink Unix mode/ownership, creation/birth
+time for regular files or directories, Unix ownership by changing destination
+owners, Unix special mode bits, ACLs, xattrs, resource forks, Windows
+attributes, BSD flags, sparse extents, or other platform-specific metadata
+yet. A selected timestamp, Unix mode, Unix ownership, or symlink metadata field
+that could not be applied, represented, or restored by this version is reported
+as a metadata warning with entry id, metadata namespace, field, source
+platform, destination platform, and reason; a restore with only metadata
+warnings returns partial-success exit code `10`.
 
 When metadata cannot be represented on the destination platform, FileFerry must:
 

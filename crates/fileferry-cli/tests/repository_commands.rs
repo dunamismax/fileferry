@@ -99,6 +99,11 @@ fn expected_restore_metadata_fields(entries_with_file_or_directory_metadata: usi
     }
 }
 
+#[cfg(unix)]
+fn expected_restore_symlink_metadata_fields(symlink_entries: usize) -> usize {
+    symlink_entries * 5
+}
+
 fn set_modified_time(path: &Path, modified: SystemTime) {
     let file = fs::OpenOptions::new()
         .write(true)
@@ -1726,7 +1731,7 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
             destination.to_str().expect("destination path"),
         ])
         .assert()
-        .success()
+        .code(10)
         .stderr("")
         .get_output()
         .stdout
@@ -1742,13 +1747,39 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
     assert_eq!(restore["data"]["symlinks_written"], 1);
     assert_eq!(
         restore["data"]["metadata_planned"],
-        expected_restore_metadata_fields(4)
+        expected_restore_metadata_fields(4) + expected_restore_symlink_metadata_fields(1)
     );
     assert_eq!(
         restore["data"]["metadata_applied"],
         expected_restore_metadata_fields(4)
     );
-    assert_eq!(restore["data"]["metadata_warnings"], serde_json::json!([]));
+    assert_eq!(
+        restore["data"]["metadata_warnings"]
+            .as_array()
+            .expect("metadata warnings")
+            .len(),
+        expected_restore_symlink_metadata_fields(1)
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][0]["entry_id"],
+        serde_json::json!("target.link")
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][0]["namespace"],
+        serde_json::json!("portable")
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][0]["field"],
+        serde_json::json!("modified")
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][2]["namespace"],
+        serde_json::json!("unix")
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][2]["field"],
+        serde_json::json!("mode")
+    );
     assert!(destination.join("empty/nested").is_dir());
     assert_eq!(
         fs::read(destination.join("target.txt")).expect("restored target"),
@@ -1820,7 +1851,7 @@ fn restore_path_scoped_symlink_creates_missing_parent_directory() {
             destination.to_str().expect("destination path"),
         ])
         .assert()
-        .success()
+        .code(10)
         .stderr("")
         .get_output()
         .stdout
@@ -1835,6 +1866,18 @@ fn restore_path_scoped_symlink_creates_missing_parent_directory() {
     assert_eq!(restore["data"]["directories_written"], 0);
     assert_eq!(restore["data"]["files_written"], 0);
     assert_eq!(restore["data"]["symlinks_written"], 1);
+    assert_eq!(
+        restore["data"]["metadata_planned"],
+        expected_restore_symlink_metadata_fields(1)
+    );
+    assert_eq!(restore["data"]["metadata_applied"], 0);
+    assert_eq!(
+        restore["data"]["metadata_warnings"]
+            .as_array()
+            .expect("metadata warnings")
+            .len(),
+        expected_restore_symlink_metadata_fields(1)
+    );
     assert!(destination.join("links").is_dir());
     assert_eq!(
         fs::read_link(destination.join("links/target.link")).expect("restored symlink"),

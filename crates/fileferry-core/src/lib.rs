@@ -3117,6 +3117,20 @@ impl BackupPipeline {
                             symlinks.push(RestoredSymlink {
                                 relative_path: entry.relative_path.clone(),
                                 target: target.clone(),
+                                source_platform: entry.metadata.source_platform,
+                                modified: entry.metadata.modified.clone(),
+                                created: entry.metadata.created.clone(),
+                                unix_mode: entry
+                                    .metadata
+                                    .unix
+                                    .as_ref()
+                                    .map(|metadata| metadata.mode),
+                                unix_owner: entry.metadata.unix.as_ref().map(|metadata| {
+                                    RestoredUnixOwner {
+                                        uid: metadata.uid,
+                                        gid: metadata.gid,
+                                    }
+                                }),
                             });
                         }
                         MetadataValue::Unsupported => {
@@ -3369,6 +3383,11 @@ impl BackupPipeline {
                 relative_path: symlink.relative_path,
                 destination_path,
                 target: symlink.target,
+                source_platform: symlink.source_platform,
+                modified: symlink.modified,
+                created: symlink.created,
+                unix_mode: symlink.unix_mode,
+                unix_owner: symlink.unix_owner,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -3395,6 +3414,16 @@ impl BackupPipeline {
             + planned_directories
                 .iter()
                 .filter(|directory| directory.unix_owner.is_some())
+                .count()
+                * 2
+            + planned_symlinks.len() * 2
+            + planned_symlinks
+                .iter()
+                .filter(|symlink| symlink.unix_mode.is_some())
+                .count()
+            + planned_symlinks
+                .iter()
+                .filter(|symlink| symlink.unix_owner.is_some())
                 .count()
                 * 2;
         if request.dry_run {
@@ -3438,6 +3467,10 @@ impl BackupPipeline {
                     directory.unix_owner,
                     &mut metadata_warnings,
                 );
+            }
+
+            for symlink in &planned_symlinks {
+                plan_unrestored_symlink_metadata(symlink, &mut metadata_warnings);
             }
         } else {
             for file in &planned_files {
@@ -3488,6 +3521,10 @@ impl BackupPipeline {
                     directory.unix_owner,
                     &mut metadata_warnings,
                 );
+            }
+
+            for symlink in &planned_symlinks {
+                plan_unrestored_symlink_metadata(symlink, &mut metadata_warnings);
             }
         }
 
@@ -4028,6 +4065,11 @@ pub struct RestoredUnixOwner {
 pub struct RestoredSymlink {
     pub relative_path: PathBuf,
     pub target: PathBuf,
+    pub source_platform: PlatformKind,
+    pub modified: MetadataValue<Timestamp>,
+    pub created: MetadataValue<Timestamp>,
+    pub unix_mode: Option<u32>,
+    pub unix_owner: Option<RestoredUnixOwner>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4091,6 +4133,11 @@ pub struct RestoreDestinationSymlink {
     pub relative_path: PathBuf,
     pub destination_path: PathBuf,
     pub target: PathBuf,
+    pub source_platform: PlatformKind,
+    pub modified: MetadataValue<Timestamp>,
+    pub created: MetadataValue<Timestamp>,
+    pub unix_mode: Option<u32>,
+    pub unix_owner: Option<RestoredUnixOwner>,
     pub action: RestoreDestinationAction,
 }
 
@@ -4863,6 +4910,83 @@ fn plan_restored_unix_owner(
     }
 
     warn_unix_owner_unrepresentable(relative_path, source_platform, warnings);
+}
+
+fn plan_unrestored_symlink_metadata(
+    symlink: &RestoreDestinationSymlink,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    warn_unrestored_symlink_timestamp(
+        &symlink.relative_path,
+        symlink.source_platform,
+        "modified",
+        &symlink.modified,
+        warnings,
+    );
+    warn_unrestored_symlink_timestamp(
+        &symlink.relative_path,
+        symlink.source_platform,
+        "created",
+        &symlink.created,
+        warnings,
+    );
+
+    if symlink.unix_mode.is_some() {
+        warnings.push(RestoreMetadataWarning {
+            relative_path: symlink.relative_path.clone(),
+            namespace: "unix",
+            field: "mode",
+            source_platform: symlink.source_platform,
+            destination_platform: current_platform(),
+            reason: "symlink unix mode is not restored by this version".to_owned(),
+        });
+    }
+
+    if symlink.unix_owner.is_some() {
+        warnings.push(RestoreMetadataWarning {
+            relative_path: symlink.relative_path.clone(),
+            namespace: "unix",
+            field: "uid",
+            source_platform: symlink.source_platform,
+            destination_platform: current_platform(),
+            reason: "symlink unix uid is not restored by this version".to_owned(),
+        });
+        warnings.push(RestoreMetadataWarning {
+            relative_path: symlink.relative_path.clone(),
+            namespace: "unix",
+            field: "gid",
+            source_platform: symlink.source_platform,
+            destination_platform: current_platform(),
+            reason: "symlink unix gid is not restored by this version".to_owned(),
+        });
+    }
+}
+
+fn warn_unrestored_symlink_timestamp(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    field: &'static str,
+    timestamp: &MetadataValue<Timestamp>,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    let reason = match timestamp {
+        MetadataValue::Captured(_) => {
+            format!("symlink {field} timestamp is not restored by this version")
+        }
+        MetadataValue::Unsupported => format!("symlink {field} timestamp was not captured"),
+        MetadataValue::Denied(reason) => {
+            format!("symlink {field} timestamp was denied during backup: {reason}")
+        }
+    };
+
+    warnings.push(RestoreMetadataWarning {
+        relative_path: relative_path.to_path_buf(),
+        namespace: "portable",
+        field,
+        source_platform,
+        destination_platform: current_platform(),
+        reason,
+    });
 }
 
 fn warn_unix_owner_unrepresentable(
@@ -5686,6 +5810,11 @@ mod tests {
 
     fn metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
         if cfg!(unix) { entries * 4 } else { entries }
+    }
+
+    #[cfg(unix)]
+    fn metadata_field_count_for_symlink_entries(entries: usize) -> usize {
+        entries * 5
     }
 
     struct ReverseListingStore<'a> {
@@ -8409,6 +8538,33 @@ mod tests {
         assert_eq!(restored.directories.len(), 3);
         assert_eq!(restored.files.len(), 1);
         assert_eq!(restored.symlinks.len(), 1);
+        assert_eq!(
+            restored.metadata_planned,
+            metadata_field_count_for_file_and_directory_entries(4)
+                + metadata_field_count_for_symlink_entries(1)
+        );
+        assert_eq!(
+            restored.metadata_applied,
+            metadata_field_count_for_file_and_directory_entries(4)
+        );
+        assert_eq!(
+            restored.metadata_warnings.len(),
+            metadata_field_count_for_symlink_entries(1)
+        );
+        assert_eq!(
+            restored
+                .metadata_warnings
+                .iter()
+                .map(|warning| (warning.namespace, warning.field))
+                .collect::<Vec<_>>(),
+            vec![
+                ("portable", "modified"),
+                ("portable", "created"),
+                ("unix", "mode"),
+                ("unix", "uid"),
+                ("unix", "gid"),
+            ]
+        );
         assert!(restore_root.join("empty/nested").is_dir());
         assert_eq!(
             fs::read(restore_root.join("target.txt")).expect("restored target"),
@@ -8471,6 +8627,15 @@ mod tests {
         assert_eq!(restored.directories.len(), 0);
         assert_eq!(restored.files.len(), 0);
         assert_eq!(restored.symlinks.len(), 1);
+        assert_eq!(
+            restored.metadata_planned,
+            metadata_field_count_for_symlink_entries(1)
+        );
+        assert_eq!(restored.metadata_applied, 0);
+        assert_eq!(
+            restored.metadata_warnings.len(),
+            metadata_field_count_for_symlink_entries(1)
+        );
         assert!(restore_root.join("links").is_dir());
         assert_eq!(
             fs::read_link(restore_root.join("links/target.link")).expect("restored symlink"),
