@@ -1,9 +1,10 @@
 # Repository Format
 
-FileFerry's repository format is original to FileFerry. Format v0 is not frozen
-and has no compatibility fixtures yet. This document defines the initial shape
-needed for implementation work; byte-level fixtures become the compatibility
-contract only after the first intentional freeze.
+FileFerry's repository format is original to FileFerry. Format v0 is not frozen.
+Initial compatibility fixtures exist for narrow bootstrap/key-slot and
+recovery-export slices only. This document defines the initial shape needed for
+implementation work; byte-level fixtures become the compatibility contract only
+after the first intentional freeze.
 
 ## Format Principles
 
@@ -362,14 +363,17 @@ Every repository has a detectable format version. Future migrations must:
 
 ## Fixture Status
 
-Initial golden fixtures now exist under
-`tests/fixtures/repository-format/v0/bootstrap-keyslot/` for the bootstrap
-object, one external key-slot object, and one key-slot removal marker.
+Initial golden fixtures now exist under:
 
-This is the first compatibility-fixture slice for format v0. It does not freeze
+- `tests/fixtures/repository-format/v0/bootstrap-keyslot/` for the bootstrap
+  object, one external key-slot object, and one key-slot removal marker.
+- `tests/fixtures/repository-format/v0/recovery-export/` for one standalone
+  encrypted recovery export package.
+
+These are narrow compatibility-fixture slices for format v0. They do not freeze
 all of format v0. Chunks, indexes, manifests, commit markers, forget markers,
-prune state, recovery exports, migration fixtures, and full cross-version
-compatibility remain open Milestone H work.
+prune state, migration fixtures, and full cross-version compatibility remain
+open Milestone H work.
 
 For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 
@@ -382,10 +386,17 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 - `key-slot-removals/<key-slot-id>`: `schema_version`, `magic`,
   `format_version`, `repository_id`, `key_slot_id`, `key_slot_object`,
   `removed_at_unix_seconds`, and `master_key_removal_check`.
+- `recovery-export/recovery.fileferry-key`: `schema_version`, `magic`,
+  `format_version`, `export_type`, `repository_id`, `export_id`,
+  `created_at_unix_seconds`, `warning`, `aead`, each nested recovery-key KDF
+  field, salt, nonce, wrapped master-key bytes, and `master_key_check`.
 
 The fixture passphrases are test-only unlock inputs. They are not production
-secrets and do not imply a recovery mechanism. Tests prove current code can
-read the fixture, reject malformed bootstrap JSON, reject unsupported bootstrap
-versions, reject a tampered external key-slot master-key check, reject a
-tampered key-slot removal marker check, and fail closed when a removed key-slot
-passphrase is used.
+secrets and do not imply recovery import. Tests prove current code can read the
+bootstrap/key-slot fixture, reject malformed bootstrap JSON, reject unsupported
+bootstrap versions, reject a tampered external key-slot master-key check, reject
+a tampered key-slot removal marker check, and fail closed when a removed
+key-slot passphrase is used. Tests also prove current code can verify the
+recovery export fixture, reject malformed recovery-export JSON, reject
+unsupported recovery-export format versions, reject tampered recovery-export
+ciphertext, and reject a tampered recovery-export master-key check.

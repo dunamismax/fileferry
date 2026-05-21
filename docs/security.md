@@ -224,8 +224,14 @@ destination, KDF summary, AEAD algorithm, warning text,
 `recovery_import_implemented: false`, `raw_master_key_exported: false`, and
 `reencrypted_repository_objects: false`.
 
-Recovery import is not implemented. S3-compatible recovery export is not
-implemented.
+Recovery import is not implemented.
+
+Current format-fixture coverage includes one standalone encrypted recovery
+export package. Focused tests verify that current code can parse and authenticate
+the package with the fixture passphrase, rejects malformed recovery-export JSON,
+rejects unsupported recovery-export format versions, rejects wrapped-master-key
+ciphertext tampering as an unlock failure, and rejects a tampered
+`master_key_check` as an invalid recovery export.
 
 ## Key Rotation
 

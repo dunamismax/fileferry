@@ -371,7 +371,13 @@ Current status:
   and one `key-slot-removals/<key-slot-id>` marker. Focused tests prove the
   current reader can open those bytes and rejects malformed, tampered, removed,
   and unsupported-version variants with the current documented error classes.
-  This does not freeze the rest of format v0.
+- Continued with a narrow recovery-export fixture slice. Golden fixture bytes
+  now exist for one standalone encrypted recovery export package. Focused tests
+  prove the current verifier can read those bytes and rejects malformed,
+  unsupported-version, wrapped-master-key tamper, and master-key-check tamper
+  variants with the current documented error classes.
+
+These slices do not freeze the rest of format v0.
 
 Definition of done:
 
@@ -943,6 +949,19 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with the recovery-export fixture slice.
+  Added golden fixture bytes under
+  `tests/fixtures/repository-format/v0/recovery-export/` for one standalone
+  encrypted recovery export package. Added a small `fileferry-core` recovery
+  export verifier and focused fixture tests that verify the fixture with the
+  primary passphrase, reject malformed recovery-export JSON, reject unsupported
+  recovery-export format versions, reject tampered wrapped-master-key
+  ciphertext, and reject a tampered recovery-export `master_key_check`. Updated
+  `docs/repository-format.md` and `docs/security.md` to identify exactly what
+  this slice proves. This does not implement recovery import and does not
+  freeze chunks, indexes, manifests, commit markers, forget markers, prune
+  state, migrations, or all of format v0. Verified the focused test with
+  `cargo test -p fileferry-core --test repository_format_fixtures -- --nocapture`.
 - 2026-05-21 - Started Milestone H with the first repository-format fixture
   slice. Added golden fixture bytes under
   `tests/fixtures/repository-format/v0/bootstrap-keyslot/` for the plaintext

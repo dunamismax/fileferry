@@ -200,6 +200,15 @@ pub enum CoreError {
     #[error("repository bootstrap is invalid: {reason}")]
     InvalidRepositoryBootstrap { reason: &'static str },
 
+    #[error("repository recovery export could not be decoded")]
+    RecoveryExportDecode {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("repository recovery export is invalid: {reason}")]
+    InvalidRecoveryExport { reason: &'static str },
+
     #[error("repository key-slot object {key} could not be decoded")]
     KeySlotDecode {
         key: ObjectKey,
@@ -640,6 +649,15 @@ pub struct RecoveryExportResult {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecoveryExportVerification {
+    pub repository_id: String,
+    pub export_id: String,
+    pub created_at_unix_seconds: u64,
+    pub kdf: KdfParams,
+    pub aead: RepositoryAeadAlgorithm,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PruneRepositoryOptions {
     pub dry_run: bool,
@@ -1030,6 +1048,23 @@ pub async fn export_repository_recovery(
         kdf,
         aead: RepositoryAeadAlgorithm::XChaCha20Poly1305,
         bytes,
+    })
+}
+
+pub fn verify_repository_recovery_export(
+    bytes: &[u8],
+    passphrase: &SecretString,
+) -> CoreResult<RecoveryExportVerification> {
+    let stored: StoredRecoveryExport = serde_json::from_slice(bytes)
+        .map_err(|source| CoreError::RecoveryExportDecode { source })?;
+    stored.verify(passphrase)?;
+
+    Ok(RecoveryExportVerification {
+        repository_id: stored.repository_id,
+        export_id: stored.export_id,
+        created_at_unix_seconds: stored.created_at_unix_seconds,
+        kdf: stored.recovery_key.kdf.to_kdf_params()?,
+        aead: RepositoryAeadAlgorithm::XChaCha20Poly1305,
     })
 }
 
@@ -1484,15 +1519,14 @@ struct StoredKeySlotRemoval {
 }
 
 impl StoredRecoveryExport {
-    #[cfg(test)]
     fn validate(&self) -> CoreResult<()> {
         if self.schema_version != 0 {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "unsupported recovery export schema version",
             });
         }
         if self.magic != REPOSITORY_MAGIC {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "repository magic is not recognized",
             });
         }
@@ -1502,7 +1536,7 @@ impl StoredRecoveryExport {
             });
         }
         if self.export_type != "fileferry_recovery_export" {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "recovery export type is invalid",
             });
         }
@@ -1512,24 +1546,24 @@ impl StoredRecoveryExport {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
         {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "repository id is invalid",
             });
         }
         if self.export_id.len() != RECOVERY_EXPORT_ID_BYTES * 2
             || !self.export_id.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "recovery export id is invalid",
             });
         }
         if self.warning != RECOVERY_EXPORT_WARNING {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "recovery export warning is invalid",
             });
         }
         if self.aead != "xchacha20_poly1305" {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "recovery export AEAD algorithm is invalid",
             });
         }
@@ -1539,14 +1573,13 @@ impl StoredRecoveryExport {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
         {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "recovery export master key check is invalid",
             });
         }
         Ok(())
     }
 
-    #[cfg(test)]
     fn verify(&self, passphrase: &SecretString) -> CoreResult<()> {
         self.validate()?;
         let export = self.recovery_key.to_recovery_key_export()?;
@@ -1555,7 +1588,7 @@ impl StoredRecoveryExport {
                 .map_err(|source| CoreError::RepositoryUnlock { source })?;
         let actual = master_key_recovery_check(&master_key, &self.repository_id, &self.export_id)?;
         if actual != self.master_key_check {
-            return Err(CoreError::InvalidRepositoryBootstrap {
+            return Err(CoreError::InvalidRecoveryExport {
                 reason: "recovery export does not unlock this repository master key",
             });
         }
@@ -1573,16 +1606,21 @@ impl StoredRecoveryKeyExport {
         }
     }
 
-    #[cfg(test)]
     fn to_recovery_key_export(&self) -> CoreResult<RecoveryKeyExport> {
-        let salt = fixed_bytes::<{ fileferry_crypto::KDF_SALT_LEN }>(
-            &self.salt,
-            "recovery export salt has an invalid length",
-        )?;
-        let nonce = fixed_bytes::<{ fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN }>(
-            &self.nonce,
-            "recovery export nonce has an invalid length",
-        )?;
+        let salt =
+            self.salt
+                .as_slice()
+                .try_into()
+                .map_err(|_| CoreError::InvalidRecoveryExport {
+                    reason: "recovery export salt has an invalid length",
+                })?;
+        let nonce =
+            self.nonce
+                .as_slice()
+                .try_into()
+                .map_err(|_| CoreError::InvalidRecoveryExport {
+                    reason: "recovery export nonce has an invalid length",
+                })?;
 
         Ok(RecoveryKeyExport {
             kdf: self.kdf.to_kdf_params()?,

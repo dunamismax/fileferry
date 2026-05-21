@@ -439,6 +439,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::SnapshotPathNotFound { .. } => 7,
         CoreError::RepositoryBootstrapDecode { .. }
         | CoreError::InvalidRepositoryBootstrap { .. }
+        | CoreError::RecoveryExportDecode { .. }
+        | CoreError::InvalidRecoveryExport { .. }
         | CoreError::KeySlotDecode { .. }
         | CoreError::InvalidKeySlot { .. }
         | CoreError::KeySlotRemovalDecode { .. }
@@ -1246,6 +1248,8 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
         CoreError::RepositoryNotInitialized => "repository_not_initialized",
         CoreError::InvalidRepositoryBootstrap { .. } => "repository_bootstrap_invalid",
+        CoreError::RecoveryExportDecode { .. } => "repository_recovery_export_decode_failed",
+        CoreError::InvalidRecoveryExport { .. } => "repository_recovery_export_invalid",
         CoreError::KeySlotDecode { .. } => "repository_key_slot_decode_failed",
         CoreError::InvalidKeySlot { .. } => "repository_key_slot_invalid",
         CoreError::KeySlotRemovalDecode { .. } => "repository_key_slot_removal_decode_failed",

@@ -1,4 +1,6 @@
-use fileferry_core::{CoreError, open_repository};
+use fileferry_core::{
+    CoreError, RepositoryAeadAlgorithm, open_repository, verify_repository_recovery_export,
+};
 use fileferry_storage::ObjectKey;
 use fileferry_testkit::FakeObjectStore;
 use secrecy::SecretString;
@@ -16,6 +18,9 @@ const KEY_SLOT: &[u8] = include_bytes!(
 );
 const KEY_SLOT_REMOVAL: &[u8] = include_bytes!(
     "../../../tests/fixtures/repository-format/v0/bootstrap-keyslot/key-slot-removals/370e4852331603403cbd038dfa1f4cc4577d2f326f94a19a218be7dc88921f50"
+);
+const RECOVERY_EXPORT: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/recovery-export/recovery.fileferry-key"
 );
 
 fn object_key(value: &str) -> ObjectKey {
@@ -182,6 +187,87 @@ async fn tampered_key_slot_removal_fixture_variant_is_rejected() {
         CoreError::InvalidKeySlotRemoval {
             reason: "key-slot removal marker failed authentication",
             ..
+        }
+    ));
+}
+
+#[test]
+fn recovery_export_fixture_verifies_with_primary_passphrase() {
+    let verified = verify_repository_recovery_export(RECOVERY_EXPORT, &secret(PRIMARY_PASSPHRASE))
+        .expect("recovery export verifies");
+
+    assert_eq!(verified.repository_id, REPOSITORY_ID);
+    assert_eq!(
+        verified.export_id,
+        "446e8fae656c955bbee4bf035ab73cb094ee74a08e5b13debe69a11a09d6a8bc"
+    );
+    assert_eq!(verified.created_at_unix_seconds, 1_779_376_246);
+    assert_eq!(verified.kdf.memory_cost_kib, 65_536);
+    assert_eq!(verified.kdf.time_cost, 3);
+    assert_eq!(verified.kdf.parallelism, 4);
+    assert_eq!(verified.aead, RepositoryAeadAlgorithm::XChaCha20Poly1305);
+}
+
+#[test]
+fn malformed_recovery_export_fixture_variant_is_rejected() {
+    let error = verify_repository_recovery_export(b"not-json", &secret(PRIMARY_PASSPHRASE))
+        .expect_err("malformed recovery export is rejected");
+
+    assert!(matches!(error, CoreError::RecoveryExportDecode { .. }));
+}
+
+#[test]
+fn unsupported_recovery_export_fixture_version_is_rejected() {
+    let mut export: Value =
+        serde_json::from_slice(RECOVERY_EXPORT).expect("fixture recovery export json");
+    export["format_version"] = json!(999);
+
+    let error = verify_repository_recovery_export(
+        &serde_json::to_vec_pretty(&export).expect("unsupported version recovery export json"),
+        &secret(PRIMARY_PASSPHRASE),
+    )
+    .expect_err("unsupported recovery export version is rejected");
+
+    assert!(matches!(
+        error,
+        CoreError::UnsupportedRepositoryFormat {
+            format_version: 999
+        }
+    ));
+}
+
+#[test]
+fn tampered_recovery_export_ciphertext_variant_is_rejected() {
+    let mut export: Value =
+        serde_json::from_slice(RECOVERY_EXPORT).expect("fixture recovery export json");
+    export["recovery_key"]["wrapped_master_key"][0] = json!(0);
+
+    let error = verify_repository_recovery_export(
+        &serde_json::to_vec_pretty(&export).expect("tampered recovery export json"),
+        &secret(PRIMARY_PASSPHRASE),
+    )
+    .expect_err("tampered recovery export ciphertext is rejected");
+
+    assert!(matches!(error, CoreError::RepositoryUnlock { .. }));
+}
+
+#[test]
+fn tampered_recovery_export_master_key_check_variant_is_rejected() {
+    let mut export: Value =
+        serde_json::from_slice(RECOVERY_EXPORT).expect("fixture recovery export json");
+    export["master_key_check"] =
+        json!("0000000000000000000000000000000000000000000000000000000000000000");
+
+    let error = verify_repository_recovery_export(
+        &serde_json::to_vec_pretty(&export).expect("tampered recovery export check json"),
+        &secret(PRIMARY_PASSPHRASE),
+    )
+    .expect_err("tampered recovery export master-key check is rejected");
+
+    assert!(matches!(
+        error,
+        CoreError::InvalidRecoveryExport {
+            reason: "recovery export does not unlock this repository master key"
         }
     ));
 }
