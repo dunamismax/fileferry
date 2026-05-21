@@ -41,5 +41,6 @@ tokio = "1.49.0"
 toml = "1.1.2"
 tower = "0.5.2"
 tracing = "0.1.44"
+xattr = "1.6.1"
 zeroize = { version = "1.8.2", features = ["derive"] }
 zstd = "0.13.3"

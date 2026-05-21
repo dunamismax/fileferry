@@ -76,21 +76,27 @@ timestamp fields selected for restore, regular-file and directory
 creation/birth timestamp fields selected for warning, captured Unix permission
 fields selected for restore, captured Unix ownership fields selected for
 restore, and selected symlink timestamp plus captured Unix symlink metadata
-fields. It can surface denied, unsupported, invalid, unrepresentable, or
-not-yet-restored metadata warnings without writing destination entries.
+fields. It also reports selected reportable xattr status fields when xattrs
+were observed or xattr capture was denied. It can surface denied, unsupported,
+invalid, unrepresentable, or not-yet-restored metadata warnings without
+writing destination entries.
 Captured entry metadata records the source platform for new manifests; older
 v0 manifests that lack this field are read as `unknown`. Current restores do
 not restore symlink timestamps, symlink Unix mode/ownership, creation/birth
 time for regular files or directories, Unix ownership by changing destination
-owners, Unix special mode bits, ACLs, xattrs, resource forks, Windows
+owners, Unix special mode bits, ACLs, xattr values, resource forks, Windows
 attributes, BSD flags, sparse extents, or other platform-specific metadata
 yet. Selected regular-file and directory creation/birth timestamps are
 reported as structured `portable`/`created` metadata warnings because this
-version does not restore them. A selected timestamp, Unix mode, Unix ownership,
-creation/birth timestamp, or symlink metadata field that could not be applied,
-represented, or restored by this version is reported as a metadata warning
-with entry id, metadata namespace, field, source platform, destination
-platform, and reason; a restore with only metadata warnings returns
+version does not restore them. New manifests also record reportable xattr
+presence/count status where the destination build and filesystem expose xattr
+listing; xattr names and values are not restored by this version. The observed
+macOS `com.apple.provenance` implementation detail is not counted as a
+reportable xattr. A selected timestamp, Unix mode, Unix ownership,
+creation/birth timestamp, symlink metadata field, or xattr status field that
+could not be applied, represented, or restored by this version is reported as a
+metadata warning with entry id, metadata namespace, field, source platform,
+destination platform, and reason; a restore with only metadata warnings returns
 partial-success exit code `10`.
 
 When metadata cannot be represented on the destination platform, FileFerry must:

@@ -257,7 +257,8 @@ SnapshotSummary
 RestoreMetadataWarning
   entry_id: snapshot entry identifier; currently the snapshot-relative path
   path: snapshot-relative string
-  namespace: metadata namespace, for example "portable"
+  namespace: metadata namespace, for example "portable", "unix", or the
+             source platform namespace for xattr status warnings
   field: string
   source_platform: "windows" | "macos" | "linux" | "freebsd" | "netbsd" |
                    "openbsd" | "unix" | "unknown"
@@ -280,7 +281,8 @@ TimestampValue
 RestoreMetadataWarning
   entry_id: snapshot entry identifier; currently the snapshot-relative path
   path: snapshot-relative string
-  namespace: metadata namespace, for example "portable"
+  namespace: metadata namespace, for example "portable", "unix", or the
+             source platform namespace for xattr status warnings
   field: string
   source_platform: "windows" | "macos" | "linux" | "freebsd" | "netbsd" |
                    "openbsd" | "unix" | "unknown"
@@ -578,8 +580,9 @@ reports selected entries and planned writes without creating destination
 entries. It also reports
 `metadata_planned`, the count of regular-file and directory modified timestamp
 and creation/birth timestamp fields, captured Unix permission and ownership
-fields, and selected symlink timestamp plus captured Unix symlink metadata
-fields selected for restore. JSON
+fields, selected symlink timestamp plus captured Unix symlink metadata fields,
+and selected reportable xattr status fields where xattrs were observed or
+xattr capture was denied. JSON
 output follows the Restore data schema above; JSONL output emits the
 implemented progress phases listed above. Current metadata application is
 limited to captured modified timestamps for restored regular files and
@@ -590,14 +593,18 @@ ownership does not match, but it does not call `chown`. Symlink targets are
 restored, but symlink timestamps and captured Unix symlink mode/ownership are
 reported as not restored. Creation/birth time for regular files and
 directories is reported as a structured `portable`/`created` warning because
-this version does not restore it. Unix ownership changes, Unix special mode
-bits, ACLs, xattrs, resource forks, Windows attributes, BSD flags, and other
-platform-specific metadata are not restored yet. If a selected timestamp, Unix
-mode, Unix ownership, creation/birth timestamp, or symlink metadata field
-cannot be applied, represented, or restored by this version, or if dry-run
-planning determines that the selected metadata is denied, unsupported,
-unrepresentable, or outside the destination system time range, restore reports
-a `metadata_warnings` item and exits with partial-success code `10`; JSON and
+this version does not restore it. Reportable xattr presence/count status is
+captured where xattr listing is exposed, but xattr names and values are not
+restored; the observed macOS `com.apple.provenance` implementation detail is
+not counted as reportable restore metadata.
+Unix ownership changes, Unix special mode bits, ACLs, xattr values, resource
+forks, Windows attributes, BSD flags, and other platform-specific metadata are
+not restored yet. If a selected timestamp, Unix mode, Unix ownership,
+creation/birth timestamp, symlink metadata field, or xattr status field cannot
+be applied, represented, or restored by this version, or if dry-run planning
+determines that the selected metadata is denied, unsupported, unrepresentable,
+or outside the destination system time range, restore reports a
+`metadata_warnings` item and exits with partial-success code `10`; JSON and
 JSONL modes keep those warnings on stdout.
 
 `ferry check` opens an initialized local or S3-compatible repository with

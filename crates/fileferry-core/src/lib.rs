@@ -10,8 +10,9 @@ use fileferry_crypto::{
     unlock_master_key,
 };
 use fileferry_platform::{
-    CaseBehavior, EntryKind, EntryMetadata, MetadataValue, PlatformError, PlatformKind, Timestamp,
-    capture_metadata, current_platform, path_facts, probe_case_behavior,
+    CaseBehavior, EntryKind, EntryMetadata, MetadataExtensions, MetadataFieldSummary,
+    MetadataValue, PlatformError, PlatformKind, Timestamp, capture_metadata, current_platform,
+    path_facts, probe_case_behavior,
 };
 use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, StorageError};
 use secrecy::SecretString;
@@ -3109,6 +3110,7 @@ impl BackupPipeline {
                         created: entry.metadata.created.clone(),
                         unix_mode: entry.metadata.unix.as_ref().map(|metadata| metadata.mode),
                         unix_owner,
+                        extensions: entry.metadata.extensions.clone(),
                     });
                     continue;
                 }
@@ -3132,6 +3134,7 @@ impl BackupPipeline {
                                         gid: metadata.gid,
                                     }
                                 }),
+                                extensions: entry.metadata.extensions.clone(),
                             });
                         }
                         MetadataValue::Unsupported => {
@@ -3260,6 +3263,7 @@ impl BackupPipeline {
                         uid: metadata.uid,
                         gid: metadata.gid,
                     }),
+                extensions: entry.metadata.extensions.clone(),
             });
         }
 
@@ -3341,6 +3345,7 @@ impl BackupPipeline {
                 created: directory.created,
                 unix_mode: directory.unix_mode,
                 unix_owner: directory.unix_owner,
+                extensions: directory.extensions,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -3370,6 +3375,7 @@ impl BackupPipeline {
                 created: file.created,
                 unix_mode: file.unix_mode,
                 unix_owner: file.unix_owner,
+                extensions: file.extensions,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -3392,6 +3398,7 @@ impl BackupPipeline {
                 created: symlink.created,
                 unix_mode: symlink.unix_mode,
                 unix_owner: symlink.unix_owner,
+                extensions: symlink.extensions,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -3428,7 +3435,19 @@ impl BackupPipeline {
                 .iter()
                 .filter(|symlink| symlink.unix_owner.is_some())
                 .count()
-                * 2;
+                * 2
+            + planned_files
+                .iter()
+                .map(|file| planned_extension_field_count(&file.extensions))
+                .sum::<usize>()
+            + planned_directories
+                .iter()
+                .map(|directory| planned_extension_field_count(&directory.extensions))
+                .sum::<usize>()
+            + planned_symlinks
+                .iter()
+                .map(|symlink| planned_extension_field_count(&symlink.extensions))
+                .sum::<usize>();
         if request.dry_run {
             for file in &planned_files {
                 plan_restored_modified_timestamp(
@@ -3453,6 +3472,12 @@ impl BackupPipeline {
                     &file.relative_path,
                     file.source_platform,
                     file.unix_owner,
+                    &mut metadata_warnings,
+                );
+                plan_unrestored_platform_extensions(
+                    &file.relative_path,
+                    file.source_platform,
+                    &file.extensions,
                     &mut metadata_warnings,
                 );
             }
@@ -3482,10 +3507,22 @@ impl BackupPipeline {
                     directory.unix_owner,
                     &mut metadata_warnings,
                 );
+                plan_unrestored_platform_extensions(
+                    &directory.relative_path,
+                    directory.source_platform,
+                    &directory.extensions,
+                    &mut metadata_warnings,
+                );
             }
 
             for symlink in &planned_symlinks {
                 plan_unrestored_symlink_metadata(symlink, &mut metadata_warnings);
+                plan_unrestored_platform_extensions(
+                    &symlink.relative_path,
+                    symlink.source_platform,
+                    &symlink.extensions,
+                    &mut metadata_warnings,
+                );
             }
         } else {
             for file in &planned_files {
@@ -3515,6 +3552,12 @@ impl BackupPipeline {
                     &file.relative_path,
                     file.source_platform,
                     file.unix_owner,
+                    &mut metadata_warnings,
+                );
+                plan_unrestored_platform_extensions(
+                    &file.relative_path,
+                    file.source_platform,
+                    &file.extensions,
                     &mut metadata_warnings,
                 );
             }
@@ -3548,10 +3591,22 @@ impl BackupPipeline {
                     directory.unix_owner,
                     &mut metadata_warnings,
                 );
+                plan_unrestored_platform_extensions(
+                    &directory.relative_path,
+                    directory.source_platform,
+                    &directory.extensions,
+                    &mut metadata_warnings,
+                );
             }
 
             for symlink in &planned_symlinks {
                 plan_unrestored_symlink_metadata(symlink, &mut metadata_warnings);
+                plan_unrestored_platform_extensions(
+                    &symlink.relative_path,
+                    symlink.source_platform,
+                    &symlink.extensions,
+                    &mut metadata_warnings,
+                );
             }
         }
 
@@ -4071,6 +4126,7 @@ pub struct RestoredDirectory {
     pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
+    pub extensions: MetadataExtensions,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4082,6 +4138,7 @@ pub struct RestoredFile {
     pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
+    pub extensions: MetadataExtensions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4099,6 +4156,7 @@ pub struct RestoredSymlink {
     pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
+    pub extensions: MetadataExtensions,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4142,6 +4200,7 @@ pub struct RestoreDestinationDirectory {
     pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
+    pub extensions: MetadataExtensions,
     pub action: RestoreDestinationAction,
 }
 
@@ -4155,6 +4214,7 @@ pub struct RestoreDestinationFile {
     pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
+    pub extensions: MetadataExtensions,
     pub action: RestoreDestinationAction,
     pub verified: bool,
 }
@@ -4169,6 +4229,7 @@ pub struct RestoreDestinationSymlink {
     pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
+    pub extensions: MetadataExtensions,
     pub action: RestoreDestinationAction,
 }
 
@@ -5019,6 +5080,61 @@ fn plan_unrestored_symlink_metadata(
     }
 }
 
+fn planned_extension_field_count(extensions: &MetadataExtensions) -> usize {
+    usize::from(metadata_summary_selected(&extensions.xattrs))
+}
+
+fn metadata_summary_selected(value: &MetadataValue<MetadataFieldSummary>) -> bool {
+    match value {
+        MetadataValue::Captured(summary) => summary.count > 0,
+        MetadataValue::Denied(_) => true,
+        MetadataValue::Unsupported => false,
+    }
+}
+
+fn plan_unrestored_platform_extensions(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    extensions: &MetadataExtensions,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    let reason = match &extensions.xattrs {
+        MetadataValue::Captured(summary) if summary.count > 0 => {
+            format!(
+                "{} extended attribute{} not restored by this version",
+                summary.count,
+                if summary.count == 1 { " is" } else { "s are" }
+            )
+        }
+        MetadataValue::Denied(reason) => {
+            format!("extended attributes were denied during backup: {reason}")
+        }
+        MetadataValue::Captured(_) | MetadataValue::Unsupported => return,
+    };
+
+    warnings.push(RestoreMetadataWarning {
+        relative_path: relative_path.to_path_buf(),
+        namespace: platform_metadata_namespace(source_platform),
+        field: "xattrs",
+        source_platform,
+        destination_platform: current_platform(),
+        reason,
+    });
+}
+
+fn platform_metadata_namespace(platform: PlatformKind) -> &'static str {
+    match platform {
+        PlatformKind::Windows => "windows",
+        PlatformKind::Macos => "macos",
+        PlatformKind::Linux => "linux",
+        PlatformKind::Freebsd => "freebsd",
+        PlatformKind::Netbsd => "netbsd",
+        PlatformKind::Openbsd => "openbsd",
+        PlatformKind::Unix => "unix",
+        PlatformKind::Unknown => "platform",
+    }
+}
+
 fn warn_unrestored_symlink_timestamp(
     relative_path: &Path,
     source_platform: PlatformKind,
@@ -5486,6 +5602,12 @@ fn metadata_status(metadata: &EntryMetadata) -> MetadataStatus {
         }
     }
 
+    match &metadata.extensions.xattrs {
+        MetadataValue::Captured(summary) if summary.count > 0 => saw_captured = true,
+        MetadataValue::Denied(_) => return MetadataStatus::Partial,
+        MetadataValue::Captured(_) | MetadataValue::Unsupported => {}
+    }
+
     match (saw_captured, saw_unsupported) {
         (false, true) => MetadataStatus::Unsupported,
         (true, true) => MetadataStatus::Partial,
@@ -5876,6 +5998,14 @@ mod tests {
     #[cfg(unix)]
     fn metadata_field_count_for_symlink_entries(entries: usize) -> usize {
         entries * 5
+    }
+
+    fn test_xattr_name() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "com.fileferry.test"
+        } else {
+            "user.fileferry_test"
+        }
     }
 
     struct ReverseListingStore<'a> {
@@ -8380,6 +8510,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_warns_for_unrestored_xattrs_when_present() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let file = source.path().join("one.txt");
+        fs::write(&file, b"one").expect("write one");
+        if xattr::set(&file, test_xattr_name(), b"present").is_err() {
+            return;
+        }
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: Vec::new(),
+                    destination: destination.path().join("restore"),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert!(
+            restored.metadata_planned
+                > planned_metadata_field_count_for_file_and_directory_entries(
+                    restored.files.len() + restored.directories.len()
+                )
+        );
+        assert!(restored.metadata_warnings.iter().any(|warning| {
+            warning.relative_path == Path::new("one.txt")
+                && warning.namespace == platform_metadata_namespace(current_platform())
+                && warning.field == "xattrs"
+                && warning.reason.contains("not restored by this version")
+        }));
+    }
+
     #[test]
     fn apply_restored_modified_timestamp_records_warning_when_not_captured() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9215,6 +9403,7 @@ mod tests {
                     created: MetadataValue::Unsupported,
                     unix_mode: None,
                     unix_owner: None,
+                    extensions: MetadataExtensions::default(),
                 },
                 RestoredFile {
                     relative_path: PathBuf::from("docs/readme.TXT"),
@@ -9224,6 +9413,7 @@ mod tests {
                     created: MetadataValue::Unsupported,
                     unix_mode: None,
                     unix_owner: None,
+                    extensions: MetadataExtensions::default(),
                 },
             ],
             symlinks: Vec::new(),
@@ -9625,6 +9815,7 @@ mod tests {
                 }),
                 symlink_target: MetadataValue::Unsupported,
                 unix: None,
+                extensions: MetadataExtensions::default(),
             },
             chunks: Vec::new(),
         }

@@ -372,8 +372,10 @@ captured Unix UID/GID ownership for restored regular files and directories,
 warning when created destination ownership does not match. It does not call
 `chown`. Symlink targets are restored, but selected regular-file and directory
 creation/birth timestamps, selected symlink timestamps, and captured Unix
-symlink mode/ownership are reported as not restored; special mode bits and
-other metadata application are not implemented yet.
+symlink mode/ownership are reported as not restored. New manifests record
+reportable xattr presence/count status where the platform and filesystem
+expose xattr listing, but xattr names and values are not restored; special
+mode bits and other metadata application are not implemented yet.
 Non-dry-run restore preflights selected destination paths for observed
 case-insensitive path collisions and rejects Windows reserved-name segments on
 Windows destinations before writes; this is not a broader platform-support

@@ -9,7 +9,7 @@ and verification.
 Treat unchecked boxes as plan. Move stable material into `docs/`, `README.md`,
 or runbooks as the implementation matures.
 
-Last reviewed: 2026-05-20.
+Last reviewed: 2026-05-21.
 
 ---
 
@@ -66,9 +66,10 @@ Last reviewed: 2026-05-20.
   modified timestamp metadata, selected regular-file and directory
   creation/birth timestamp metadata warnings, captured Unix permission
   metadata, captured Unix ownership metadata, selected symlink timestamp
-  metadata, captured Unix symlink metadata, and metadata planning warnings,
-  returns partial-success exit code `10` when metadata warnings are produced,
-  and exposes tested
+  metadata, captured Unix symlink metadata, selected reportable xattr status
+  warnings when xattrs were observed or xattr capture was denied, and metadata
+  planning warnings, returns partial-success exit code `10` when metadata
+  warnings are produced, and exposes tested
   human, JSON, and JSONL-safe output paths. Authenticated manifests with
   invalid entry topology are rejected as integrity failures before restore
   destination writes.
@@ -193,11 +194,13 @@ Last reviewed: 2026-05-20.
   destination platform, and reason context in machine output.
 - `fileferry-platform` has initial tested portable metadata capture for entry
   kind, source platform, regular-file size, timestamps where exposed by `std`,
-  symlink targets, and Unix mode/ownership where available. It also has
-  focused tests for path normalization facts, Windows reserved-name detection,
-  observed case behavior, Unix symlink capture, long-path metadata capture
-  where the filesystem allows it, and permission-denied metadata reads where
-  the platform exposes them.
+  symlink targets, Unix mode/ownership where available, and reportable xattr
+  presence/count status where the platform and filesystem expose xattr
+  listing. It also has focused tests for path normalization facts, Windows
+  reserved-name detection, observed case behavior, Unix symlink capture, xattr
+  status capture where available, long-path metadata capture where the
+  filesystem allows it, and permission-denied metadata reads where the
+  platform exposes them.
 - `fileferry-testkit` has a tested in-memory fake object store for future
   repository and pipeline tests.
 - `fileferry-core` has a tested deterministic source walker with wildcard
@@ -218,8 +221,8 @@ Last reviewed: 2026-05-20.
   directory with destination safety checks, explicit overwrite policy, dry-run
   reporting, selected regular-file and directory creation/birth timestamp
   not-restored warnings, captured Unix ownership verification, selected
-  symlink metadata not-restored warnings, metadata planning, and optional
-  byte-for-byte verification.
+  symlink metadata not-restored warnings, selected xattr status not-restored
+  warnings, metadata planning, and optional byte-for-byte verification.
 - `fileferry-core` writes commit markers after encrypted snapshot manifests,
   can discover committed manifests from those markers, and has tested snapshot
   summary and immediate-entry listing primitives for future `snapshots` and
@@ -245,6 +248,9 @@ directory creation/birth timestamps are reported as metadata warnings because
 they are not restored yet. Symlink targets are restored on Unix, but selected
 symlink timestamps and captured Unix symlink mode/ownership are reported as
 metadata warnings because they are not restored yet.
+Reportable xattr presence/count status is captured where the platform and
+filesystem expose xattr listing, but xattr names and values are reported as
+metadata warnings when selected because they are not restored yet.
 S3-compatible repository URLs are parsed through the shared repository
 resolver, and S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`,
 `check`, `forget`, `prune`, and key-management commands use the existing
@@ -874,6 +880,25 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Completed a Milestone G reportable xattr status warning slice
+  without claiming broader platform support or full xattr restoration. New
+  manifests now record reportable xattr presence/count status where the
+  platform and filesystem expose xattr listing. Restore carries selected xattr
+  status through core destination planning, counts selected reportable xattr
+  fields in `metadata_planned`, and emits structured source-platform
+  namespace / `xattrs` metadata warnings when reportable xattrs were observed
+  or xattr capture was denied because this version does not restore xattr
+  names or values. The observed macOS `com.apple.provenance` implementation
+  detail is filtered out of reportable xattr counts so normal temp-file
+  restores do not become partial successes from provenance alone. Updated
+  `README.md`, `docs/cli-contract.md`, `docs/platform-metadata.md`, and this
+  file. No live S3 gates were enabled in this session. Verified with
+  `cargo test -p fileferry-platform xattr -- --nocapture`, `cargo test -p
+  fileferry-core restore_snapshot_to_destination_warns_for_unrestored_xattrs_when_present
+  -- --nocapture`, `cargo test -p fileferry-cli restore_ --test
+  repository_commands -- --nocapture`, `cargo test -p fileferry-platform -p
+  fileferry-core -p fileferry-cli --no-fail-fast`, `just fmt`, `just check`,
+  `just test`, `just build`, and `git diff --check`.
 - 2026-05-21 - Completed a Milestone G regular-file and directory
   creation/birth timestamp warning slice without claiming broader platform
   support. Restore now carries selected regular-file and directory

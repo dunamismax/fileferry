@@ -145,6 +145,14 @@ fn set_modified_time(path: &Path, modified: SystemTime) {
         .expect("set file modified time");
 }
 
+fn test_xattr_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "com.fileferry.test"
+    } else {
+        "user.fileferry_test"
+    }
+}
+
 fn patterned_bytes(seed: usize, len: usize) -> Vec<u8> {
     (0..len)
         .map(|index| ((index * 29 + seed * 11 + index / 3) % 251) as u8)
@@ -1765,6 +1773,63 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     assert_eq!(
         fs::read(latest_destination.join("sample.txt")).expect("latest restored file"),
         b"sample"
+    );
+}
+
+#[test]
+fn restore_json_reports_unrestored_xattr_warning_for_selected_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    let file = source.join("sample.txt");
+    fs::write(&file, b"sample").expect("write sample");
+    if xattr::set(&file, test_xattr_name(), b"present").is_err() {
+        return;
+    }
+    backup_source(&repo_url, passphrase, &source);
+
+    let destination = temp.path().join("restore");
+    let restore_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "restore",
+            "--path",
+            "sample.txt",
+            destination.to_str().expect("destination path"),
+        ])
+        .assert()
+        .code(10)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let restore: Value = serde_json::from_slice(&restore_output).expect("restore json");
+
+    assert_eq!(restore["data"]["entries_selected"], 1);
+    assert_eq!(
+        restore["data"]["metadata_planned"],
+        expected_restore_metadata_planned_fields(1) + 1
+    );
+    assert!(
+        restore["data"]["metadata_warnings"]
+            .as_array()
+            .expect("metadata warnings")
+            .iter()
+            .any(|warning| warning["entry_id"] == "sample.txt"
+                && warning["namespace"] == current_platform_json_name()
+                && warning["field"] == "xattrs"
+                && warning["reason"]
+                    .as_str()
+                    .expect("warning reason")
+                    .contains("not restored by this version"))
     );
 }
 

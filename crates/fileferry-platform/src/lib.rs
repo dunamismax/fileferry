@@ -88,6 +88,8 @@ pub struct EntryMetadata {
     pub created: MetadataValue<Timestamp>,
     pub symlink_target: MetadataValue<PathBuf>,
     pub unix: Option<UnixMetadata>,
+    #[serde(default)]
+    pub extensions: MetadataExtensions,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -95,6 +97,24 @@ pub struct UnixMetadata {
     pub mode: u32,
     pub uid: u32,
     pub gid: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct MetadataExtensions {
+    pub xattrs: MetadataValue<MetadataFieldSummary>,
+}
+
+impl Default for MetadataExtensions {
+    fn default() -> Self {
+        Self {
+            xattrs: MetadataValue::Unsupported,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct MetadataFieldSummary {
+    pub count: usize,
 }
 
 pub fn capture_metadata(path: impl AsRef<Path>) -> Result<EntryMetadata, PlatformError> {
@@ -144,6 +164,7 @@ pub fn capture_metadata(path: impl AsRef<Path>) -> Result<EntryMetadata, Platfor
         created: metadata_value_from_time(metadata.created()),
         symlink_target,
         unix: unix_metadata(&metadata),
+        extensions: metadata_extensions(path),
     })
 }
 
@@ -259,6 +280,36 @@ fn metadata_value_from_time(result: io::Result<SystemTime>) -> MetadataValue<Tim
     }
 }
 
+fn metadata_extensions(path: &Path) -> MetadataExtensions {
+    MetadataExtensions {
+        xattrs: xattr_summary(path),
+    }
+}
+
+fn xattr_summary(path: &Path) -> MetadataValue<MetadataFieldSummary> {
+    if !xattr::SUPPORTED_PLATFORM {
+        return MetadataValue::Unsupported;
+    }
+
+    match xattr::list(path) {
+        Ok(names) => MetadataValue::Captured(MetadataFieldSummary {
+            count: names.filter(|name| reportable_xattr_name(name)).count(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            MetadataValue::Denied(error.to_string())
+        }
+        Err(_) => MetadataValue::Unsupported,
+    }
+}
+
+fn reportable_xattr_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return true;
+    };
+
+    name != "com.apple.provenance"
+}
+
 impl From<SystemTime> for Timestamp {
     fn from(value: SystemTime) -> Self {
         match value.duration_since(UNIX_EPOCH) {
@@ -323,6 +374,10 @@ mod tests {
             metadata.symlink_target,
             MetadataValue::Unsupported
         ));
+        assert!(matches!(
+            metadata.extensions.xattrs,
+            MetadataValue::Captured(MetadataFieldSummary { .. }) | MetadataValue::Unsupported
+        ));
     }
 
     #[test]
@@ -350,6 +405,30 @@ mod tests {
         .expect("deserialize metadata");
 
         assert_eq!(metadata.source_platform, PlatformKind::Unknown);
+        assert_eq!(metadata.extensions, MetadataExtensions::default());
+    }
+
+    #[test]
+    fn captures_xattr_presence_when_filesystem_exposes_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"hello").expect("write file");
+        if xattr::set(&path, test_xattr_name(), b"present").is_err() {
+            return;
+        }
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert!(matches!(
+            metadata.extensions.xattrs,
+            MetadataValue::Captured(MetadataFieldSummary { count }) if count >= 1
+        ));
+    }
+
+    #[test]
+    fn filters_macos_provenance_xattr_from_reported_count() {
+        assert!(!reportable_xattr_name(OsStr::new("com.apple.provenance")));
+        assert!(reportable_xattr_name(OsStr::new(test_xattr_name())));
     }
 
     #[cfg(unix)]
@@ -461,6 +540,14 @@ mod tests {
 
         if let Err(PlatformError::MetadataRead { source, .. }) = result {
             assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
+    fn test_xattr_name() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "com.fileferry.test"
+        } else {
+            "user.fileferry_test"
         }
     }
 }
