@@ -2,9 +2,9 @@
 
 FileFerry's repository format is original to FileFerry. Format v0 is not frozen.
 Initial compatibility fixtures exist for narrow bootstrap/key-slot and
-recovery-export slices only. This document defines the initial shape needed for
-implementation work; byte-level fixtures become the compatibility contract only
-after the first intentional freeze.
+recovery-export slices plus one committed snapshot-data slice. This document
+defines the initial shape needed for implementation work; byte-level fixtures
+become the compatibility contract only after the first intentional freeze.
 
 ## Format Principles
 
@@ -215,8 +215,12 @@ Current implementation status:
   key context, not raw plaintext hashes.
 - Index object names are derived from keyed metadata identities and do not
   include source paths, tags, hostnames, or profile names.
-- The index schema is still v0 implementation scaffolding and is not a frozen
-  compatibility contract.
+- Current index readers reject unsupported decrypted index schema versions and
+  metadata identity mismatches before check or restore uses the index.
+- One committed snapshot-data fixture now covers the current encrypted index
+  object framing and decrypted index fields listed in the fixture-status
+  section. This does not freeze future pack membership or policy/config object
+  formats.
 
 ## Commit Markers And Upload State
 
@@ -369,11 +373,14 @@ Initial golden fixtures now exist under:
   object, one external key-slot object, and one key-slot removal marker.
 - `tests/fixtures/repository-format/v0/recovery-export/` for one standalone
   encrypted recovery export package.
+- `tests/fixtures/repository-format/v0/snapshot-data/` for one initialized
+  repository containing one plaintext commit marker, one encrypted snapshot
+  manifest, one encrypted chunk index, and two encrypted chunk objects.
 
 These are narrow compatibility-fixture slices for format v0. They do not freeze
-all of format v0. Chunks, indexes, manifests, commit markers, forget markers,
-prune state, migration fixtures, and full cross-version compatibility remain
-open Milestone H work.
+all of format v0. Forget markers, prune state, migration fixtures,
+policy/config objects, upload state, and full cross-version compatibility
+remain open Milestone H work.
 
 For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 
@@ -390,6 +397,24 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
   `format_version`, `export_type`, `repository_id`, `export_id`,
   `created_at_unix_seconds`, `warning`, `aead`, each nested recovery-key KDF
   field, salt, nonce, wrapped master-key bytes, and `master_key_check`.
+- `snapshot-data/commits/<snapshot-id>`: `schema_version`, `snapshot_id`, and
+  `manifest_object`.
+- `snapshot-data/objects/manifest/<prefix>/<snapshot-id>`: encrypted-object
+  `algorithm`, `nonce`, and `ciphertext`, authenticated as object kind
+  `snapshot-manifest` and the exact object name; decrypted `schema_version`,
+  `snapshot_id`, `body.created_at_unix_seconds`, `body.tags`, `body.entries`,
+  entry path fields, captured metadata fields present in the fixture,
+  `body.entries[].chunks`, and `body.index_ids`.
+- `snapshot-data/objects/index/<prefix>/<index-id>`: encrypted-object
+  `algorithm`, `nonce`, and `ciphertext`, authenticated as object kind `index`
+  and the exact object name; decrypted `schema_version`, `index_id`, and each
+  chunk entry's `chunk_id`, `object_key`, `plaintext_length`,
+  `compressed_length`, `stored_length`, `compression`, and `aead`.
+- `snapshot-data/objects/chunk/<prefix>/<chunk-id>`: encrypted-object
+  `algorithm`, `nonce`, and `ciphertext`, authenticated as object kind `chunk`
+  and the exact object name. The decrypted bytes are zstd-compressed chunk
+  payloads whose decompressed bytes must match the keyed chunk identity recorded
+  in the manifest and index.
 
 The fixture passphrases are test-only unlock inputs. They are not production
 secrets and do not imply recovery import. Tests prove current code can read the
@@ -399,4 +424,12 @@ a tampered key-slot removal marker check, and fail closed when a removed
 key-slot passphrase is used. Tests also prove current code can verify the
 recovery export fixture, reject malformed recovery-export JSON, reject
 unsupported recovery-export format versions, reject tampered recovery-export
-ciphertext, and reject a tampered recovery-export master-key check.
+ciphertext, and reject a tampered recovery-export master-key check. The
+snapshot-data fixture tests prove current code can unlock the fixture, read
+committed manifests, authenticate and validate the encrypted manifest and
+index, run full repository check across referenced chunks, restore selected
+file bytes, reject malformed commit JSON, reject malformed encrypted-object
+framing and decrypted manifest metadata, reject encrypted manifest/index/chunk
+tampering, reject wrong object names and kinds through AEAD context binding,
+reject manifest and index metadata identity mismatches, and reject unsupported
+commit, manifest, and index schema versions.

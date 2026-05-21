@@ -446,6 +446,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::KeySlotRemovalDecode { .. }
         | CoreError::InvalidKeySlotRemoval { .. }
         | CoreError::InvalidSnapshotManifest { .. }
+        | CoreError::InvalidChunkIndex { .. }
         | CoreError::CommitDecode { .. }
         | CoreError::InvalidCommitMarker { .. }
         | CoreError::ForgetMarkerDecode { .. }
@@ -1265,6 +1266,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::SnapshotNotFound { .. } => "snapshot_not_found",
         CoreError::SnapshotPathNotFound { .. } => "snapshot_path_not_found",
         CoreError::InvalidSnapshotManifest { .. } => "snapshot_manifest_invalid",
+        CoreError::InvalidChunkIndex { .. } => "chunk_index_invalid",
         CoreError::InvalidRestoreRequest { .. } => "restore_request_invalid",
         CoreError::RestoreDestinationNotAbsolute { .. } => "restore_destination_not_absolute",
         CoreError::RestoreDestinationEscapesRoot { .. } => "restore_destination_escapes_root",
@@ -1419,6 +1421,9 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         | CoreError::InvalidSnapshotManifest {
             object_key: key, ..
         }
+        | CoreError::InvalidChunkIndex {
+            object_key: key, ..
+        }
         | CoreError::CommitDecode { key, .. }
         | CoreError::InvalidCommitMarker { key, .. }
         | CoreError::ForgetMarkerDecode { key, .. }
@@ -1481,6 +1486,7 @@ fn check_finding_for_core_error(error: &CoreError) -> Option<fileferry_core::Che
         | CoreError::ObjectAuthentication { .. }
         | CoreError::MetadataDecode { .. }
         | CoreError::InvalidSnapshotManifest { .. }
+        | CoreError::InvalidChunkIndex { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::CommitDecode { .. }
         | CoreError::InvalidCommitMarker { .. }

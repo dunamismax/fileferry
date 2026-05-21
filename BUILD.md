@@ -376,6 +376,14 @@ Current status:
   prove the current verifier can read those bytes and rejects malformed,
   unsupported-version, wrapped-master-key tamper, and master-key-check tamper
   variants with the current documented error classes.
+- Continued with a committed snapshot-data fixture slice. Golden fixture bytes
+  now exist for one initialized fixture repository containing one commit marker,
+  one encrypted manifest, one encrypted index, and two encrypted chunks.
+  Focused tests prove the current read/check/restore paths can authenticate and
+  validate those bytes and reject malformed commit JSON, malformed encrypted
+  framing, malformed decrypted manifest metadata, encrypted manifest/index/chunk
+  tamper, wrong object name/kind context, manifest/index metadata identity
+  mismatches, and unsupported commit/manifest/index schema versions.
 
 These slices do not freeze the rest of format v0.
 
@@ -949,6 +957,25 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with the committed snapshot-data fixture
+  slice. Added golden fixture bytes under
+  `tests/fixtures/repository-format/v0/snapshot-data/` for one initialized
+  repository with one plaintext commit marker, one encrypted snapshot manifest,
+  one encrypted chunk index, and two encrypted chunks. Added focused
+  `fileferry-core` fixture tests that unlock the fixture, read committed
+  manifests, read the chunk index, run full repository check, restore selected
+  file bytes, reject malformed commit JSON, reject malformed encrypted-object
+  framing and decrypted manifest metadata, reject manifest/index/chunk
+  ciphertext tampering, reject wrong object names and object kinds through AEAD
+  context binding, reject manifest/index metadata identity mismatches, and
+  reject unsupported commit, manifest, and index schema versions. Tightened
+  current manifest/index readers so unsupported decrypted schema versions fail
+  closed, added the `chunk_index_invalid` CLI failure code mapping, and updated
+  `docs/repository-format.md`, `docs/security.md`, and `docs/cli-contract.md`
+  to describe only this proven slice. This does not freeze forget markers,
+  prune state, policy/config objects, upload state, migrations, or all of
+  format v0. Verified the focused test with
+  `cargo test -p fileferry-core --test repository_format_fixtures -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with the recovery-export fixture slice.
   Added golden fixture bytes under
   `tests/fixtures/repository-format/v0/recovery-export/` for one standalone

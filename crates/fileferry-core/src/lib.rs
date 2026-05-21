@@ -304,6 +304,13 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("chunk index {object_key} for index {index_id} is invalid: {reason}")]
+    InvalidChunkIndex {
+        index_id: String,
+        object_key: ObjectKey,
+        reason: &'static str,
+    },
+
     #[error("restore request is invalid: {reason}")]
     InvalidRestoreRequest { reason: &'static str },
 
@@ -2785,6 +2792,7 @@ impl BackupPipeline {
                 actual,
             });
         }
+        validate_chunk_index(&index, &object_key)?;
 
         Ok(index)
     }
@@ -3098,6 +3106,7 @@ impl BackupPipeline {
                 actual,
             });
         }
+        validate_chunk_index(&index, &object_key)?;
 
         Ok((index, bytes_read))
     }
@@ -5508,6 +5517,15 @@ fn validate_snapshot_manifest(
     manifest: &SnapshotManifest,
     object_key: &ObjectKey,
 ) -> CoreResult<()> {
+    if manifest.schema_version != 0 {
+        return Err(CoreError::InvalidSnapshotManifest {
+            snapshot_id: manifest.snapshot_id.clone(),
+            object_key: object_key.clone(),
+            path: None,
+            reason: "unsupported snapshot manifest schema version",
+        });
+    }
+
     let mut entry_kinds = BTreeMap::new();
 
     for entry in &manifest.body.entries {
@@ -5586,6 +5604,18 @@ fn validate_snapshot_manifest(
                 });
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_chunk_index(index: &ChunkIndex, object_key: &ObjectKey) -> CoreResult<()> {
+    if index.schema_version != 0 {
+        return Err(CoreError::InvalidChunkIndex {
+            index_id: index.index_id.clone(),
+            object_key: object_key.clone(),
+            reason: "unsupported chunk index schema version",
+        });
     }
 
     Ok(())

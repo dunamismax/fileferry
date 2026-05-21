@@ -233,6 +233,15 @@ rejects unsupported recovery-export format versions, rejects wrapped-master-key
 ciphertext tampering as an unlock failure, and rejects a tampered
 `master_key_check` as an invalid recovery export.
 
+Current committed snapshot-data fixture coverage includes one initialized
+repository with a plaintext commit marker, encrypted manifest, encrypted index,
+and encrypted chunks. Focused tests prove that current code authenticates and
+validates those bytes through read, check, and restore paths; rejects malformed
+commit JSON, encrypted-object framing, and decrypted manifest metadata; rejects
+manifest, index, and chunk ciphertext tampering; rejects wrong object names and
+kinds through AEAD context binding; rejects manifest and index metadata identity
+mismatches; and rejects unsupported commit, manifest, and index schema versions.
+
 ## Key Rotation
 
 Key rotation has two different meanings:
@@ -313,6 +322,7 @@ The `fileferry-crypto` crate currently includes focused tests for:
   chunk identities for object placement.
 - Wrong authenticated object context failure.
 - Authenticated snapshot-manifest and chunk-index reads.
+- Committed snapshot-data fixture read, check, and selected-file restore.
 - Wrong repository key failure for encrypted repository metadata.
 - Bit-flipped and truncated repository object read failures.
 - Swapped repository object failures across realistic object names.

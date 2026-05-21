@@ -655,6 +655,8 @@ provides that context. Decrypted manifests with invalid entry paths, duplicate
 entry paths, non-file chunk references, regular-file size/chunk-length
 mismatches, or non-directory ancestors fail as `snapshot_manifest_invalid`
 integrity errors with snapshot id, object key, and path context when available.
+Unsupported decrypted chunk-index schema versions fail as `chunk_index_invalid`
+integrity errors with object-key context.
 
 `ferry forget` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates currently
