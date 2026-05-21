@@ -112,6 +112,8 @@ pub struct MetadataExtensions {
     pub resource_forks: MetadataValue<MetadataFieldSummary>,
     #[serde(default)]
     pub windows_attributes: MetadataValue<MetadataFieldSummary>,
+    #[serde(default)]
+    pub sparse_extents: MetadataValue<MetadataFieldSummary>,
 }
 
 impl Default for MetadataExtensions {
@@ -122,6 +124,7 @@ impl Default for MetadataExtensions {
             file_flags: MetadataValue::Unsupported,
             resource_forks: MetadataValue::Unsupported,
             windows_attributes: MetadataValue::Unsupported,
+            sparse_extents: MetadataValue::Unsupported,
         }
     }
 }
@@ -301,6 +304,7 @@ fn metadata_extensions(path: &Path) -> MetadataExtensions {
         file_flags: MetadataValue::Unsupported,
         resource_forks: MetadataValue::Unsupported,
         windows_attributes: MetadataValue::Unsupported,
+        sparse_extents: MetadataValue::Unsupported,
     }
 }
 
@@ -406,6 +410,10 @@ mod tests {
             metadata.extensions.windows_attributes,
             MetadataValue::Unsupported
         );
+        assert_eq!(
+            metadata.extensions.sparse_extents,
+            MetadataValue::Unsupported
+        );
     }
 
     #[test]
@@ -468,6 +476,10 @@ mod tests {
             metadata.extensions.windows_attributes,
             MetadataValue::Unsupported
         );
+        assert_eq!(
+            metadata.extensions.sparse_extents,
+            MetadataValue::Unsupported
+        );
     }
 
     #[test]
@@ -528,6 +540,20 @@ mod tests {
 
         assert_eq!(
             metadata.extensions.resource_forks,
+            MetadataValue::Unsupported
+        );
+    }
+
+    #[test]
+    fn captures_sparse_extent_status_as_unsupported_until_platform_capture_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"hello").expect("write file");
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_eq!(
+            metadata.extensions.sparse_extents,
             MetadataValue::Unsupported
         );
     }

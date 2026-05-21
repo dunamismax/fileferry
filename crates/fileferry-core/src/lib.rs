@@ -5086,6 +5086,7 @@ fn planned_extension_field_count(extensions: &MetadataExtensions) -> usize {
         + usize::from(metadata_summary_selected(&extensions.file_flags))
         + usize::from(metadata_summary_selected(&extensions.resource_forks))
         + usize::from(metadata_summary_selected(&extensions.windows_attributes))
+        + usize::from(metadata_summary_selected(&extensions.sparse_extents))
 }
 
 fn metadata_summary_selected(value: &MetadataValue<MetadataFieldSummary>) -> bool {
@@ -5145,6 +5146,15 @@ fn plan_unrestored_platform_extensions(
         &extensions.windows_attributes,
         "Windows attribute",
         "Windows attributes",
+        warnings,
+    );
+    plan_unrestored_metadata_summary(
+        relative_path,
+        source_platform,
+        "sparse_extents",
+        &extensions.sparse_extents,
+        "sparse extent",
+        "sparse extents",
         warnings,
     );
 }
@@ -5669,6 +5679,7 @@ fn metadata_status(metadata: &EntryMetadata) -> MetadataStatus {
         &metadata.extensions.file_flags,
         &metadata.extensions.resource_forks,
         &metadata.extensions.windows_attributes,
+        &metadata.extensions.sparse_extents,
     ] {
         match value {
             MetadataValue::Captured(summary) if summary.count > 0 => saw_captured = true,
@@ -8844,9 +8855,70 @@ mod tests {
     }
 
     #[test]
+    fn plan_unrestored_platform_extensions_warns_for_sparse_extent_status() {
+        let mut warnings = Vec::new();
+        let captured = MetadataExtensions {
+            sparse_extents: MetadataValue::Captured(MetadataFieldSummary { count: 2 }),
+            ..MetadataExtensions::default()
+        };
+        let denied = MetadataExtensions {
+            sparse_extents: MetadataValue::Denied("permission denied".to_owned()),
+            ..MetadataExtensions::default()
+        };
+
+        assert_eq!(planned_extension_field_count(&captured), 1);
+        assert_eq!(planned_extension_field_count(&denied), 1);
+
+        plan_unrestored_platform_extensions(
+            Path::new("captured.txt"),
+            PlatformKind::Linux,
+            &captured,
+            &mut warnings,
+        );
+        plan_unrestored_platform_extensions(
+            Path::new("denied.txt"),
+            PlatformKind::Linux,
+            &denied,
+            &mut warnings,
+        );
+
+        assert_eq!(
+            warnings,
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("captured.txt"),
+                    namespace: "linux",
+                    field: "sparse_extents",
+                    source_platform: PlatformKind::Linux,
+                    destination_platform: current_platform(),
+                    reason: "2 sparse extents are not restored by this version".to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("denied.txt"),
+                    namespace: "linux",
+                    field: "sparse_extents",
+                    source_platform: PlatformKind::Linux,
+                    destination_platform: current_platform(),
+                    reason: "sparse extents were denied during backup: permission denied"
+                        .to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn metadata_status_counts_resource_fork_denial_as_partial() {
         let mut entry = test_manifest_entry("sample.txt", EntryKind::RegularFile, Some(6));
         entry.metadata.extensions.resource_forks =
+            MetadataValue::Denied("permission denied".to_owned());
+
+        assert_eq!(metadata_status(&entry.metadata), MetadataStatus::Partial);
+    }
+
+    #[test]
+    fn metadata_status_counts_sparse_extent_denial_as_partial() {
+        let mut entry = test_manifest_entry("sample.txt", EntryKind::RegularFile, Some(6));
+        entry.metadata.extensions.sparse_extents =
             MetadataValue::Denied("permission denied".to_owned());
 
         assert_eq!(metadata_status(&entry.metadata), MetadataStatus::Partial);

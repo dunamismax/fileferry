@@ -375,10 +375,10 @@ creation/birth timestamps, selected symlink timestamps, and captured Unix
 symlink mode/ownership are reported as not restored. New manifests record
 reportable xattr presence/count status where the platform and filesystem
 expose xattr listing, plus ACL status, file flag status, resource fork status,
-and Windows attribute status scaffolding. ACL contents, file flag values,
-resource fork values, Windows attribute values, and xattr names/values are not
-restored; special mode bits and other metadata application are not implemented
-yet.
+Windows attribute status, and sparse extent status scaffolding. ACL contents,
+file flag values, resource fork values, Windows attribute values, sparse extent
+maps, and xattr names/values are not restored; special mode bits and other
+metadata application are not implemented yet.
 Non-dry-run restore preflights selected destination paths for observed
 case-insensitive path collisions and rejects Windows reserved-name segments on
 Windows destinations before writes; this is not a broader platform-support

@@ -84,8 +84,10 @@ or file flag capture was denied in constructed or future manifests, plus
 selected resource fork status fields when resource forks were observed or
 resource fork capture was denied in constructed or future manifests, plus
 selected Windows attribute status fields when Windows attributes were observed
-or Windows attribute capture was denied in constructed or future manifests. It
-can surface denied, unsupported, invalid, unrepresentable, or
+or Windows attribute capture was denied in constructed or future manifests,
+plus selected sparse extent status fields when sparse extents were observed or
+sparse extent capture was denied in constructed or future manifests. It can
+surface denied, unsupported, invalid, unrepresentable, or
 not-yet-restored metadata warnings without writing destination entries.
 Captured entry metadata records the source platform for new manifests; older
 v0 manifests that lack this field are read as `unknown`. Current restores do
@@ -108,13 +110,15 @@ attribute status scaffolding, but current capture records Windows attribute
 status as unsupported and does not read or restore Windows attribute values.
 New manifests also have resource fork status scaffolding, but current capture
 records resource fork status as unsupported and does not read or restore
-resource fork values. A selected timestamp, Unix mode, Unix ownership,
-creation/birth timestamp, symlink metadata field, xattr status field, ACL
-status field, file flag status field, resource fork status field, or Windows
-attribute status field that could not be applied, represented, or restored by
-this version is reported as a metadata warning with entry id, metadata
-namespace, field, source platform, destination platform, and reason; a restore
-with only metadata warnings returns
+resource fork values. New manifests also have sparse extent status
+scaffolding, but current capture records sparse extent status as unsupported
+and does not read or restore sparse extent maps. A selected timestamp, Unix
+mode, Unix ownership, creation/birth timestamp, symlink metadata field, xattr
+status field, ACL status field, file flag status field, resource fork status
+field, Windows attribute status field, or sparse extent status field that
+could not be applied, represented, or restored by this version is reported as
+a metadata warning with entry id, metadata namespace, field, source platform,
+destination platform, and reason; a restore with only metadata warnings returns
 partial-success exit code `10`.
 
 When metadata cannot be represented on the destination platform, FileFerry must:
@@ -142,8 +146,9 @@ which field was skipped and why.
 - Symlinks are restored as symlinks by default and must not be followed during
   restore writes.
 - Special files require explicit opt-in before creation.
-- Ownership, ACLs, file flags, Windows attributes, xattrs, resource forks, and
-  alternate data streams are restored only after path destination checks pass.
+- Ownership, ACLs, file flags, Windows attributes, xattrs, resource forks,
+  sparse extents, and alternate data streams are restored only after path
+  destination checks pass.
 - Case collisions and reserved names must be detected before writes begin.
 - Timestamp restoration happens after content writes and fsync where practical.
 - Any metadata parser failure after decryption is a repository integrity error,
