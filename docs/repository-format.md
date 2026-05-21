@@ -362,5 +362,30 @@ Every repository has a detectable format version. Future migrations must:
 
 ## Fixture Status
 
-No golden fixtures exist yet. Add fixtures only after the format version is
-intentionally frozen, and treat them as compatibility contracts.
+Initial golden fixtures now exist under
+`tests/fixtures/repository-format/v0/bootstrap-keyslot/` for the bootstrap
+object, one external key-slot object, and one key-slot removal marker.
+
+This is the first compatibility-fixture slice for format v0. It does not freeze
+all of format v0. Chunks, indexes, manifests, commit markers, forget markers,
+prune state, recovery exports, migration fixtures, and full cross-version
+compatibility remain open Milestone H work.
+
+For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
+
+- `bootstrap`: `magic`, `format_version`, `repository_id`, `key_slots`, each
+  embedded key-slot KDF field, salt, nonce, wrapped master-key bytes, and
+  `features`.
+- `key-slots/<key-slot-id>`: `magic`, `format_version`, `repository_id`,
+  `key_slot_id`, the nested key-slot KDF fields, salt, nonce, wrapped
+  master-key bytes, and `master_key_check`.
+- `key-slot-removals/<key-slot-id>`: `schema_version`, `magic`,
+  `format_version`, `repository_id`, `key_slot_id`, `key_slot_object`,
+  `removed_at_unix_seconds`, and `master_key_removal_check`.
+
+The fixture passphrases are test-only unlock inputs. They are not production
+secrets and do not imply a recovery mechanism. Tests prove current code can
+read the fixture, reject malformed bootstrap JSON, reject unsupported bootstrap
+versions, reject a tampered external key-slot master-key check, reject a
+tampered key-slot removal marker check, and fail closed when a removed key-slot
+passphrase is used.

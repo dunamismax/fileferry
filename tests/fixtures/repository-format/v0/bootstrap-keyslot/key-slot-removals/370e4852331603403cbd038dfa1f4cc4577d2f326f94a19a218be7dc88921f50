@@ -1,0 +1,10 @@
+{
+  "schema_version": 0,
+  "magic": "fileferry",
+  "format_version": 0,
+  "repository_id": "b65c7dfa2394e1b21ebea003397da66b721cc793b376e1edcd78d7f990954771",
+  "key_slot_id": "370e4852331603403cbd038dfa1f4cc4577d2f326f94a19a218be7dc88921f50",
+  "key_slot_object": "key-slots/370e4852331603403cbd038dfa1f4cc4577d2f326f94a19a218be7dc88921f50",
+  "removed_at_unix_seconds": 1779375673,
+  "master_key_removal_check": "b00c71050997a55d12d1aa737c51a9d9118fba8f8a89255ca274503c2690b96d"
+}

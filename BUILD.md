@@ -364,6 +364,15 @@ Milestone I.
 Goal: Freeze repository format `0` only after durable fixtures and migration
 expectations exist.
 
+Current status:
+
+- Started with a narrow bootstrap/key-slot fixture slice. Golden fixture bytes
+  now exist for `bootstrap`, one external `key-slots/<key-slot-id>` object,
+  and one `key-slot-removals/<key-slot-id>` marker. Focused tests prove the
+  current reader can open those bytes and rejects malformed, tampered, removed,
+  and unsupported-version variants with the current documented error classes.
+  This does not freeze the rest of format v0.
+
 Definition of done:
 
 - Add golden fixtures for bootstrap, key slots, key-slot removal markers,
@@ -934,6 +943,21 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Started Milestone H with the first repository-format fixture
+  slice. Added golden fixture bytes under
+  `tests/fixtures/repository-format/v0/bootstrap-keyslot/` for the plaintext
+  bootstrap object, an externally added passphrase key slot, and a marker-based
+  key-slot removal. Added focused `fileferry-core` fixture tests that open the
+  fixture with the primary and added passphrases, verify the removal marker
+  hides the retired slot, reject malformed bootstrap JSON, reject unsupported
+  bootstrap format versions, reject a tampered external key-slot
+  `master_key_check`, and reject a tampered removal-marker
+  `master_key_removal_check`. Updated `docs/repository-format.md` to identify
+  the compatibility-facing fields for this slice and to keep the broader
+  format-v0 freeze limits explicit. This does not freeze chunks, indexes,
+  manifests, commit markers, forget markers, prune state, recovery exports, or
+  all of format v0. Verified the focused test with
+  `cargo test -p fileferry-core --test repository_format_fixtures -- --nocapture`.
 - 2026-05-21 - Completed the Milestone G exit audit and closed Milestone G
   without adding another status-only metadata group. The audit compared the
   Milestone G definition of done against `docs/platform-metadata.md`, current
