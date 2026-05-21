@@ -345,6 +345,15 @@ pub enum CoreError {
     #[error("repository lease {lease_id} is expired")]
     RepositoryLeaseExpired { lease_id: String },
 
+    #[error(
+        "repository is locked by active {command_kind:?} lease {lease_id} until {expires_at_unix_seconds}"
+    )]
+    RepositoryLeaseConflict {
+        lease_id: String,
+        command_kind: RepositoryLeaseCommandKind,
+        expires_at_unix_seconds: u64,
+    },
+
     #[error("repository commit or forget state changed after upload state {upload_id} was marked")]
     UploadRepositoryStateChanged {
         writer_id: String,
@@ -659,6 +668,7 @@ const PRUNE_PLAN_ID_BYTES: usize = 32;
 const POLICY_CONFIG_ID_BYTES: usize = 32;
 const UPLOAD_STATE_ID_BYTES: usize = 32;
 const LEASE_STATE_ID_BYTES: usize = 32;
+const DEFAULT_REPOSITORY_LEASE_SECONDS: u64 = 15 * 60;
 const KEY_SLOT_PREFIX: &str = "key-slots";
 const KEY_SLOT_REMOVAL_PREFIX: &str = "key-slot-removals";
 const POLICY_CONFIG_PREFIX: &str = "objects/policy";
@@ -951,6 +961,11 @@ pub struct RepositoryLeaseState {
     pub acquired_at_unix_seconds: u64,
     pub expires_at_unix_seconds: u64,
     pub state_identity: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RepositoryMutationLease {
+    lease_object: ObjectKey,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -2634,9 +2649,19 @@ impl BackupPipeline {
         lease_id: &str,
     ) -> CoreResult<RepositoryLeaseState> {
         let lease_object = lease_state_object_key(lease_id)?;
+        self.read_repository_lease_state_object(store, master_key, &lease_object)
+            .await
+    }
+
+    async fn read_repository_lease_state_object(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        lease_object: &ObjectKey,
+    ) -> CoreResult<RepositoryLeaseState> {
         let lease_key = self.derive_lease_state_key(master_key)?;
         let lease_state: RepositoryLeaseState =
-            read_encrypted_json_object(store, &lease_key, ObjectKind::LeaseState, &lease_object)
+            read_encrypted_json_object(store, &lease_key, ObjectKind::LeaseState, lease_object)
                 .await
                 .map_err(|error| match error {
                     CoreError::ObjectDecode { key, source }
@@ -2647,7 +2672,7 @@ impl BackupPipeline {
                 })?;
         validate_lease_state(
             &lease_state,
-            &lease_object,
+            lease_object,
             &self.config.repository_id,
             master_key,
         )?;
@@ -2670,6 +2695,97 @@ impl BackupPipeline {
             });
         }
         Ok(lease_state)
+    }
+
+    async fn acquire_repository_mutation_lease(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        command_kind: RepositoryLeaseCommandKind,
+    ) -> CoreResult<RepositoryMutationLease> {
+        let now = current_unix_seconds()?;
+        if let Some(conflict) = self
+            .active_repository_leases(store, master_key, now, None)
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Err(repository_lease_conflict(conflict));
+        }
+
+        let lease_id = hex_bytes(&random_bytes::<LEASE_STATE_ID_BYTES>());
+        let writer_id = hex_bytes(&random_bytes::<LEASE_STATE_ID_BYTES>());
+        let acquired = now;
+        let expires = acquired + DEFAULT_REPOSITORY_LEASE_SECONDS;
+        let written = self
+            .write_repository_lease_state(
+                store,
+                master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id,
+                    writer_id,
+                    command_kind,
+                    acquired_at_unix_seconds: acquired,
+                    expires_at_unix_seconds: expires,
+                },
+            )
+            .await?;
+
+        if let Some(conflict) = self
+            .active_repository_leases(
+                store,
+                master_key,
+                current_unix_seconds()?,
+                Some(&written.lease_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+        {
+            self.release_repository_mutation_lease(store, &written.lease_object)
+                .await;
+            return Err(repository_lease_conflict(conflict));
+        }
+
+        Ok(RepositoryMutationLease {
+            lease_object: written.lease_object,
+        })
+    }
+
+    async fn active_repository_leases(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        now_unix_seconds: u64,
+        exclude_lease_id: Option<&str>,
+    ) -> CoreResult<Vec<RepositoryLeaseState>> {
+        let prefix = ObjectKeyPrefix::new(LEASE_STATE_PREFIX)
+            .map_err(|source| CoreError::ObjectKey { source })?;
+        let mut lease_objects = store
+            .list_prefix(&prefix)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        lease_objects.sort();
+
+        let mut leases = Vec::new();
+        for lease_object in lease_objects {
+            let lease_id = lease_id_from_object_key(&lease_object)?;
+            if exclude_lease_id.is_some_and(|excluded| excluded == lease_id.as_str()) {
+                continue;
+            }
+            let lease = self
+                .read_repository_lease_state_object(store, master_key, &lease_object)
+                .await?;
+            if lease.expires_at_unix_seconds > now_unix_seconds {
+                leases.push(lease);
+            }
+        }
+
+        Ok(leases)
+    }
+
+    async fn release_repository_mutation_lease(&self, store: &dyn ObjectStore, key: &ObjectKey) {
+        let _ = store.delete(key).await;
     }
 
     pub async fn write_snapshot(
@@ -3092,6 +3208,23 @@ impl BackupPipeline {
             ));
         }
 
+        let lease = self
+            .acquire_repository_mutation_lease(store, master_key, RepositoryLeaseCommandKind::Prune)
+            .await?;
+        let result = self
+            .prune_repository_sweep(store, master_key, options)
+            .await;
+        self.release_repository_mutation_lease(store, &lease.lease_object)
+            .await;
+        result
+    }
+
+    async fn prune_repository_sweep(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        options: PruneRepositoryOptions,
+    ) -> CoreResult<RepositoryPruneResult> {
         let prune_key = master_key
             .derive_subkey(KeyPurpose::PruneMark, self.config.repository_id.as_bytes())
             .map_err(|source| CoreError::Encryption { source })?;
@@ -7316,6 +7449,30 @@ fn lease_state_object_key(lease_id: &str) -> CoreResult<ObjectKey> {
         .map_err(|source| CoreError::ObjectKey { source })
 }
 
+fn lease_id_from_object_key(key: &ObjectKey) -> CoreResult<String> {
+    let Some(lease_id) = key.as_str().strip_prefix("locks/") else {
+        return Err(CoreError::InvalidLeaseState {
+            key: key.clone(),
+            reason: "lease state object key is not under locks prefix",
+        });
+    };
+    if !lease_state_id_is_valid(lease_id) {
+        return Err(CoreError::InvalidLeaseState {
+            key: key.clone(),
+            reason: "lease state object key does not contain a valid lease id",
+        });
+    }
+    Ok(lease_id.to_owned())
+}
+
+fn repository_lease_conflict(lease: RepositoryLeaseState) -> CoreError {
+    CoreError::RepositoryLeaseConflict {
+        lease_id: lease.lease_id,
+        command_kind: lease.command_kind,
+        expires_at_unix_seconds: lease.expires_at_unix_seconds,
+    }
+}
+
 fn hex_bytes(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -7478,6 +7635,69 @@ mod tests {
         (0..len)
             .map(|index| ((index * 31 + seed * 17 + index / 5) % 251) as u8)
             .collect()
+    }
+
+    async fn repository_with_forgotten_snapshot(
+        first_seed: usize,
+        second_seed: usize,
+    ) -> (
+        fileferry_testkit::FakeObjectStore,
+        OpenedRepository,
+        BackupPipeline,
+        SnapshotWriteResult,
+    ) {
+        let first_source = tempfile::tempdir().expect("first source");
+        fs::write(
+            first_source.path().join("file.txt"),
+            varied_bytes(first_seed, 2048),
+        )
+        .expect("write one");
+        let second_source = tempfile::tempdir().expect("second source");
+        fs::write(
+            second_source.path().join("file.txt"),
+            varied_bytes(second_seed, 2048),
+        )
+        .expect("write two");
+
+        let store = fileferry_testkit::FakeObjectStore::new();
+        let passphrase = SecretString::from("test-passphrase");
+        let created = create_repository(&store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let repository = created.repository;
+        let pipeline =
+            BackupPipeline::new(BackupPipelineConfig::new(repository.repository_id.clone()))
+                .expect("pipeline");
+        let first = pipeline
+            .write_snapshot(
+                &store,
+                &repository.master_key,
+                BackupRequest {
+                    roots: vec![first_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("first snapshot");
+        pipeline
+            .write_snapshot(
+                &store,
+                &repository.master_key,
+                BackupRequest {
+                    roots: vec![second_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("second snapshot");
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget first");
+
+        (store, repository, pipeline, first)
     }
 
     fn planned_metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
@@ -9285,6 +9505,141 @@ mod tests {
             .expect("visible snapshots");
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].snapshot_id, second.snapshot_id);
+    }
+
+    #[tokio::test]
+    async fn prune_sweep_rejects_active_repository_lease_before_deletes() {
+        let (store, repository, pipeline, forgotten) =
+            repository_with_forgotten_snapshot(31, 32).await;
+        let active_lease_id = "aa".repeat(LEASE_STATE_ID_BYTES);
+        let active_writer_id = "bb".repeat(LEASE_STATE_ID_BYTES);
+        let now = current_unix_seconds().expect("current time");
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &repository.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: active_lease_id.clone(),
+                    writer_id: active_writer_id,
+                    command_kind: RepositoryLeaseCommandKind::Prune,
+                    acquired_at_unix_seconds: now,
+                    expires_at_unix_seconds: now + DEFAULT_REPOSITORY_LEASE_SECONDS,
+                },
+            )
+            .await
+            .expect("write active lease");
+
+        let error = pipeline
+            .prune_repository(
+                &store,
+                &repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect_err("active lease blocks prune");
+
+        assert!(matches!(
+            error,
+            CoreError::RepositoryLeaseConflict {
+                lease_id,
+                command_kind: RepositoryLeaseCommandKind::Prune,
+                ..
+            } if lease_id == active_lease_id
+        ));
+        assert!(
+            store
+                .exists(&forgotten.commit_object)
+                .await
+                .expect("forgotten commit still exists")
+        );
+        let prune_plan_prefix = ObjectKeyPrefix::new(PRUNE_PLAN_PREFIX).expect("prune prefix");
+        assert!(
+            store
+                .list_prefix(&prune_plan_prefix)
+                .await
+                .expect("list prune plans")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_sweep_ignores_expired_repository_lease_and_releases_own_lease() {
+        let (store, repository, pipeline, forgotten) =
+            repository_with_forgotten_snapshot(33, 34).await;
+        let expired_lease_id = "cc".repeat(LEASE_STATE_ID_BYTES);
+        let expired_writer_id = "dd".repeat(LEASE_STATE_ID_BYTES);
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &repository.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: expired_lease_id.clone(),
+                    writer_id: expired_writer_id,
+                    command_kind: RepositoryLeaseCommandKind::Prune,
+                    acquired_at_unix_seconds: 1,
+                    expires_at_unix_seconds: 2,
+                },
+            )
+            .await
+            .expect("write expired lease");
+
+        let pruned = pipeline
+            .prune_repository(
+                &store,
+                &repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect("expired lease does not block prune");
+
+        assert!(pruned.completed);
+        assert!(
+            !store
+                .exists(&forgotten.commit_object)
+                .await
+                .expect("forgotten commit pruned")
+        );
+        let lock_prefix = ObjectKeyPrefix::new(LEASE_STATE_PREFIX).expect("lock prefix");
+        assert_eq!(
+            store.list_prefix(&lock_prefix).await.expect("list locks"),
+            vec![lease_state_object_key(&expired_lease_id).expect("expired lease object")]
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_sweep_rejects_malformed_repository_lease_before_deletes() {
+        let (store, repository, pipeline, forgotten) =
+            repository_with_forgotten_snapshot(35, 36).await;
+        let malformed_lease_id = "ee".repeat(LEASE_STATE_ID_BYTES);
+        let malformed_lease_key = lease_state_object_key(&malformed_lease_id).expect("lease key");
+        store
+            .overwrite_for_tests(malformed_lease_key, b"not encrypted json".to_vec())
+            .await;
+
+        let error = pipeline
+            .prune_repository(
+                &store,
+                &repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect_err("malformed lease blocks prune");
+
+        assert!(matches!(error, CoreError::LeaseStateDecode { .. }));
+        assert!(
+            store
+                .exists(&forgotten.commit_object)
+                .await
+                .expect("forgotten commit still exists")
+        );
+        let prune_plan_prefix = ObjectKeyPrefix::new(PRUNE_PLAN_PREFIX).expect("prune prefix");
+        assert!(
+            store
+                .list_prefix(&prune_plan_prefix)
+                .await
+                .expect("list prune plans")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

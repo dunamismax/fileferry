@@ -431,7 +431,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         CoreError::Storage { source } => storage_exit_code(source),
         CoreError::RepositoryNotInitialized
         | CoreError::UnsupportedRepositoryFormat { .. }
-        | CoreError::UnsupportedRepositoryFeatures => 3,
+        | CoreError::UnsupportedRepositoryFeatures
+        | CoreError::RepositoryLeaseConflict { .. } => 3,
         CoreError::RepositoryUnlock { .. } => 4,
         CoreError::SnapshotNotFound { .. }
         | CoreError::ForgetNoSnapshotsMatched
@@ -1263,6 +1264,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::InvalidUploadState { .. } => "repository_upload_state_invalid",
         CoreError::LeaseStateDecode { .. } => "repository_lease_state_decode_failed",
         CoreError::InvalidLeaseState { .. } => "repository_lease_state_invalid",
+        CoreError::RepositoryLeaseConflict { .. } => "repository_locked",
         CoreError::PruneRepositoryStateChanged { .. } => "repository_prune_state_changed",
         CoreError::UploadRepositoryStateChanged { .. } => "repository_upload_state_changed",
         CoreError::RepositoryLeaseExpired { .. } => "repository_lease_expired",

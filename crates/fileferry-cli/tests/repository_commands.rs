@@ -1,5 +1,12 @@
 use assert_cmd::Command;
-use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, S3Store, S3StoreConfig};
+use fileferry_core::{
+    BackupPipeline, BackupPipelineConfig, RepositoryLeaseCommandKind, RepositoryLeaseStateRequest,
+    open_repository,
+};
+use fileferry_storage::{
+    LocalStore, ObjectKey, ObjectKeyPrefix, ObjectStore, S3Store, S3StoreConfig,
+};
+use secrecy::SecretString;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -1537,6 +1544,50 @@ fn prune_malformed_state_has_stable_integrity_exit_code() {
         failed["data"]["object_key"],
         "objects/prune-plan/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     );
+}
+
+#[test]
+fn prune_active_lease_has_stable_locked_exit_code() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let store = LocalStore::new(&repo);
+    let opened = runtime
+        .block_on(open_repository(&store, &SecretString::from(passphrase)))
+        .expect("open repository");
+    let pipeline =
+        BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id)).expect("pipeline");
+    runtime
+        .block_on(pipeline.write_repository_lease_state(
+            &store,
+            &opened.master_key,
+            RepositoryLeaseStateRequest {
+                lease_id: "ab".repeat(32),
+                writer_id: "cd".repeat(32),
+                command_kind: RepositoryLeaseCommandKind::Prune,
+                acquired_at_unix_seconds: 1,
+                expires_at_unix_seconds: 4_000_000_000,
+            },
+        ))
+        .expect("write active lease");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "prune"])
+        .assert()
+        .code(3)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failed: Value = serde_json::from_slice(&output).expect("failure json");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(failed["data"]["code"], "repository_locked");
+    assert_eq!(failed["data"]["exit_code"], 3);
 }
 
 #[test]

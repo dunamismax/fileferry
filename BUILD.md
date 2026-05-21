@@ -115,13 +115,17 @@ Last reviewed: 2026-05-21.
 - `ferry prune` opens initialized local and S3-compatible repositories,
   unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, computes
   objects reachable from forgotten snapshots and not reachable from
-  non-forgotten committed snapshots, supports dry-run, writes encrypted
-  durable prune plan state before sweeping, resumes incomplete sweeps when
-  commit/forget marker state still matches the marked plan, and writes
-  encrypted completion state after sweep. It deletes only planned commit
-  markers, forget markers, manifests, indexes, and chunks; it never deletes
-  bootstrap, key slots, key-slot removal markers, policy/config objects,
-  upload state, prune state, unknown objects, or non-forgotten snapshot data.
+  non-forgotten committed snapshots, supports dry-run, writes and verifies an
+  encrypted best-effort command lease before non-dry-run plan marking or
+  sweeping, rejects another active readable lease as a locked repository,
+  ignores expired readable leases, fails closed on malformed lease state before
+  candidate deletion, writes encrypted durable prune plan state before
+  sweeping, resumes incomplete sweeps when commit/forget marker state still
+  matches the marked plan, and writes encrypted completion state after sweep.
+  It deletes only planned commit markers, forget markers, manifests, indexes,
+  and chunks; it never deletes bootstrap, key slots, key-slot removal markers,
+  policy/config objects, upload state, lease state, prune state, unknown
+  objects, or non-forgotten snapshot data.
   JSON and JSONL output report candidate, retained, deleted, and missing
   objects, byte counts where known, dry-run status, completion status, and
   recovery state. S3-compatible prune uses the same immutable encrypted
@@ -425,8 +429,15 @@ Current status:
   malformed decrypted metadata, ciphertext tamper, wrong object name/kind
   context, metadata identity mismatches, unsupported lease-state schema and
   format versions, repository identity mismatches, invalid expiration windows,
-  and expired leases for active use. Command-level lease enforcement is not
-  implemented yet.
+  and expired leases for active use.
+- Continued with a prune command lease-coordination slice. Non-dry-run
+  `ferry prune` now uses encrypted `locks/<lease-id>` lease state before
+  marking or sweeping, rejects another active readable lease as a locked
+  repository, ignores expired readable leases, best-effort releases its own
+  lease after the sweep path returns, and fails closed on malformed lease state
+  before candidate deletion. Command-level lease enforcement is currently
+  proven only for prune; backup, forget, key-management, repository
+  maintenance, stale-lease breaking, and lease repair are not implemented yet.
 
 These slices do not freeze the rest of format v0.
 
@@ -1003,6 +1014,22 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with a prune command
+  lease-coordination slice. Non-dry-run `ferry prune` now acquires encrypted
+  `locks/<lease-id>` lease state before plan marking or sweeping, rejects
+  another active readable lease with the stable `repository_locked` failure
+  code and repository-locked exit family, ignores expired readable leases,
+  rechecks locks after writing its own lease, and best-effort releases its own
+  lease after the sweep path returns. Malformed or unauthenticatable lease
+  state now fails closed before prune marks a plan or deletes candidate
+  objects. Added focused core tests for active-lease rejection, expired-lease
+  tolerance plus own-lease release, and malformed-lease rejection before
+  deletion; updated `docs/repository-format.md`, `docs/security.md`, and
+  `docs/cli-contract.md` to document only this proven prune-specific command
+  coordination. This does not implement stale-lease breaking, lease repair,
+  backup/forget/key-management command leases, or freeze all of format v0.
+  Focused verification:
+  `cargo test -p fileferry-core prune_sweep_ -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with the lease-state fixture slice. Added
   a dedicated `lease-state` HKDF purpose and encrypted object kind, core-only
   repository lease-state request/state/read/write APIs, active-use expiration
@@ -1017,7 +1044,7 @@ Trust current primary docs and observed behavior over this file.
   unsupported lease-state schema and format versions, reject invalid expiration
   windows, and reject expired leases for active use. Updated
   `docs/repository-format.md` and `docs/security.md` to document only this
-  proven core-only slice. This does not implement command-level lease
+  proven core-only slice. That slice did not implement command-level lease
   enforcement or freeze all of format v0. Verified the focused test with
   `cargo test -p fileferry-core --test repository_format_fixtures lease_state_fixture -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with the migration-detection fixture

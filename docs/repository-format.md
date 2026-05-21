@@ -364,8 +364,17 @@ Current implementation status:
 - Readers validate schema, magic, format version, repository id, lease id,
   writer id, object-key identity, expiration window, and keyed state identity
   before returning the object. Active-use reads reject an expired lease.
-- The current API is core-only. Command-level lease acquisition, breaking stale
-  leases, and enforcement around mutating commands are not implemented yet.
+- Non-dry-run `ferry prune` now uses this lease-state format for command-level
+  coordination. Before marking or sweeping a plan, prune lists `locks/`,
+  authenticates and validates readable lease state, rejects another active
+  lease, ignores expired readable leases, writes its own encrypted lease, and
+  rechecks active leases after the write. When the sweep path returns, prune
+  best-effort deletes its own lease; if release is interrupted, timestamp
+  expiry is the fallback.
+- Lease enforcement is currently proven only for non-dry-run prune. Dry-run
+  prune writes no lease state. Command-level leases for backup, forget,
+  key-management, repository maintenance, stale-lease breaking, and lease
+  repair are not implemented yet.
 
 ## Concurrent Backup Behavior
 
@@ -402,12 +411,18 @@ Current implementation status:
 - `ferry prune` is implemented for initialized local filesystem and
   S3-compatible repositories through the shared encrypted object-store
   pipeline.
+- Non-dry-run prune writes and verifies an encrypted `locks/<lease-id>` command
+  lease before writing a prune plan or deleting candidate objects. Another
+  active readable lease rejects prune as a locked repository, expired readable
+  leases are ignored, and malformed lease state fails closed before candidate
+  deletion.
 - Candidate objects are limited to commit markers, forget markers, encrypted
   manifests, encrypted indexes, and encrypted chunks reachable from forgotten
   committed snapshots and not reachable from non-forgotten committed
   snapshots.
 - Prune never deletes `bootstrap`, `key-slots/`, `key-slot-removals/`,
-  `objects/policy/`, `objects/upload/`, prune state, or unknown objects.
+  `objects/policy/`, `objects/upload/`, `locks/`, prune state, or unknown
+  objects.
 - Prune plan and completion objects are encrypted and authenticated as
   `prune-mark` objects with the repository prune subkey.
 - Current readers validate prune plan and prune completion schema, magic,
@@ -621,4 +636,8 @@ framing and decrypted metadata, reject lease-state ciphertext tampering, reject
 wrong object names and authenticated kinds through AEAD context binding, reject
 lease metadata identity mismatches, reject unsupported lease-state schema and
 format versions, reject repository identity mismatches, reject invalid
-expiration windows, and reject expired leases for active use.
+expiration windows, and reject expired leases for active use. Focused prune
+tests now prove non-dry-run prune rejects an active lease before marking or
+deleting, ignores an expired readable lease, best-effort releases its own lease
+after a completed sweep, and rejects malformed lease state before deleting
+candidate objects.

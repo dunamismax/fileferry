@@ -294,8 +294,13 @@ object names and authenticated kinds through AEAD context binding, rejects lease
 metadata identity mismatches, rejects unsupported lease-state schema and format
 versions, rejects repository identity mismatches, rejects invalid lease
 expiration windows, rejects expired leases for active use, and treats an
-already-present matching lease state as an idempotent write result. Command-level
-lease enforcement is not implemented yet.
+already-present matching lease state as an idempotent write result. Non-dry-run
+prune now uses encrypted lease state for best-effort command coordination:
+active readable leases reject the command as a locked repository, expired
+readable leases are ignored, malformed lease objects fail closed before prune
+deletes candidates, and prune best-effort releases its own lease after the
+sweep path returns. Other command-level lease enforcement is not implemented
+yet.
 
 ## Key Rotation
 

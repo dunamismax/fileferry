@@ -316,7 +316,7 @@ ForgetSnapshotItem
 
 PruneObject
   object_key: repository object key string
-  kind: "bootstrap" | "key_slot" | "key_slot_removal" | "commit" | "forget_marker" | "manifest" | "index" | "chunk" | "policy" | "upload_state" | "prune_state" | "other"
+  kind: "bootstrap" | "key_slot" | "key_slot_removal" | "commit" | "forget_marker" | "manifest" | "index" | "chunk" | "policy" | "upload_state" | "lease_state" | "prune_state" | "other"
   bytes: integer | null
 
 KdfSummary
@@ -681,8 +681,14 @@ emits `load_snapshots`, `evaluate_policy`, `write_forget_state`, and
 that are reachable from forgotten committed snapshots and not reachable from
 any non-forgotten committed snapshot. It never deletes `bootstrap`, key-slot
 objects, key-slot-removal markers, policy objects, upload-state objects,
-unknown objects, or prune state. `--dry-run` uses the same reachability logic
-but writes no prune state and deletes nothing. A real prune writes an
+lease-state objects, unknown objects, or prune state. `--dry-run` uses the
+same reachability logic but writes no prune state or lease state and deletes
+nothing. A real prune first writes an encrypted best-effort command lease under
+`locks/`, rejects another active readable lease with exit code `3` and
+`repository_locked`, ignores expired readable leases, and fails closed on
+malformed or unauthenticatable lease objects. After the sweep returns, prune
+best-effort deletes its own lease; if that release is interrupted, the lease
+expires by timestamp. A real prune writes an
 encrypted durable prune plan under `objects/prune-plan/` before deleting
 candidates, then writes an encrypted completion object under
 `objects/prune-completion/` after the sweep. If a previous plan has no

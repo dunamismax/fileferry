@@ -392,13 +392,17 @@ referenced chunk data for initialized local and S3-compatible repositories.
 `ferry forget` evaluates retention keep rules, supports dry-run, writes forget
 markers only when not in dry-run, and does not delete objects itself.
 `ferry prune` supports initialized local and S3-compatible repositories,
-supports dry-run, writes encrypted prune plan/completion state, resumes an
+supports dry-run, writes encrypted command lease state before non-dry-run
+marking or sweeping, writes encrypted prune plan/completion state, resumes an
 incomplete sweep when repository commit/forget state still matches the marked
 plan, and deletes only forgotten-snapshot commit markers, forget markers,
 manifests, indexes, and chunks that are not reachable from non-forgotten
-committed snapshots. It does not clean stale temporary objects, repair
-corrupted repositories, compact beyond unreachable-object deletion, or provide
-provider-specific S3 lifecycle policy management. `ferry key add` writes one
+committed snapshots. It rejects another active readable prune lease as a locked
+repository, ignores expired readable leases, and fails closed on malformed
+lease state before candidate deletion. It does not clean stale temporary
+objects, repair corrupted repositories, compact beyond unreachable-object
+deletion, implement stale-lease breaking, or provide provider-specific S3
+lifecycle policy management. `ferry key add` writes one
 immutable additional key slot for the existing repository master key; it does not
 re-encrypt repository objects or recover lost keys. `ferry key remove` writes
 one immutable `key-slot-removals/<key-slot-id>` marker for an externally
