@@ -376,6 +376,53 @@ fn key_add_failures_are_structured_redacted_and_mapped_to_exit_codes() {
 }
 
 #[test]
+fn key_add_active_lease_has_stable_locked_exit_code_and_writes_no_slot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let added_passphrase = "added-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let store = LocalStore::new(&repo);
+    let opened = runtime
+        .block_on(open_repository(&store, &SecretString::from(passphrase)))
+        .expect("open repository");
+    let pipeline =
+        BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id)).expect("pipeline");
+    runtime
+        .block_on(pipeline.write_repository_lease_state(
+            &store,
+            &opened.master_key,
+            RepositoryLeaseStateRequest {
+                lease_id: "a1".repeat(32),
+                writer_id: "b2".repeat(32),
+                command_kind: RepositoryLeaseCommandKind::KeyManagement,
+                acquired_at_unix_seconds: 1,
+                expires_at_unix_seconds: 4_000_000_000,
+            },
+        ))
+        .expect("write active lease");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .code(3)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failed: Value = serde_json::from_slice(&output).expect("failure json");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(failed["data"]["code"], "repository_locked");
+    assert_eq!(failed["data"]["exit_code"], 3);
+    assert_eq!(file_count_under(&repo.join("key-slots")), 0);
+}
+
+#[test]
 fn key_remove_marks_added_slot_without_deleting_key_slot_object() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -602,6 +649,51 @@ fn key_remove_failures_are_structured_redacted_and_mapped_to_exit_codes() {
         malformed["data"]["object_key"],
         format!("key-slot-removals/{key_slot_id}")
     );
+}
+
+#[test]
+fn key_remove_malformed_lease_has_stable_integrity_exit_code_and_writes_no_marker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let added_passphrase = "added-passphrase";
+    init_repo(&repo_url, passphrase);
+    let add_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let add: Value = serde_json::from_slice(&add_output).expect("key add json");
+    let key_slot_id = add["data"]["key_slot_id"].as_str().expect("slot id");
+    let lease_id = "c3".repeat(32);
+    let lease_path = repo.join("locks").join(&lease_id);
+    fs::create_dir_all(lease_path.parent().expect("lease parent")).expect("create locks dir");
+    fs::write(&lease_path, b"not encrypted json").expect("write malformed lease");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "remove", key_slot_id])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failed: Value = serde_json::from_slice(&output).expect("failure json");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(
+        failed["data"]["code"],
+        "repository_lease_state_decode_failed"
+    );
+    assert_eq!(failed["data"]["exit_code"], 6);
+    assert_eq!(failed["data"]["object_key"], format!("locks/{lease_id}"));
+    assert_eq!(file_count_under(&repo.join("key-slot-removals")), 0);
 }
 
 #[test]
@@ -955,6 +1047,75 @@ fn key_rotate_reports_malformed_removal_marker_before_writing_new_slot() {
         format!("key-slot-removals/{old_key_slot_id}")
     );
     assert_eq!(file_count_under(&repo.join("key-slots")), 1);
+}
+
+#[test]
+fn key_rotate_active_lease_has_stable_locked_exit_code_and_writes_no_slot_or_marker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let old_passphrase = "old-passphrase";
+    let new_passphrase = "new-passphrase";
+    init_repo(&repo_url, passphrase);
+    let add_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", old_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let add: Value = serde_json::from_slice(&add_output).expect("key add json");
+    let old_key_slot_id = add["data"]["key_slot_id"].as_str().expect("slot id");
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let store = LocalStore::new(&repo);
+    let opened = runtime
+        .block_on(open_repository(&store, &SecretString::from(passphrase)))
+        .expect("open repository");
+    let pipeline =
+        BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id)).expect("pipeline");
+    runtime
+        .block_on(pipeline.write_repository_lease_state(
+            &store,
+            &opened.master_key,
+            RepositoryLeaseStateRequest {
+                lease_id: "d4".repeat(32),
+                writer_id: "e5".repeat(32),
+                command_kind: RepositoryLeaseCommandKind::Prune,
+                acquired_at_unix_seconds: 1,
+                expires_at_unix_seconds: 4_000_000_000,
+            },
+        ))
+        .expect("write active lease");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", old_passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", new_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "key",
+            "rotate",
+            "--retire-key-slot",
+            old_key_slot_id,
+        ])
+        .assert()
+        .code(3)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failed: Value = serde_json::from_slice(&output).expect("failure json");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(failed["data"]["code"], "repository_locked");
+    assert_eq!(failed["data"]["exit_code"], 3);
+    assert_eq!(file_count_under(&repo.join("key-slots")), 1);
+    assert_eq!(file_count_under(&repo.join("key-slot-removals")), 0);
 }
 
 #[test]

@@ -142,14 +142,20 @@ Unlock flow:
 ## Key Add
 
 `ferry key add` adds one new passphrase unlock path for an initialized local
-repository. The command must first unlock the repository with the existing
-passphrase from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`. The new
-passphrase comes from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+or S3-compatible repository. The command must first unlock the repository with
+the existing passphrase from `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`. The new passphrase comes from
+`--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
 `FILEFERRY_NEW_PASSWORD_FILE`.
 
 The command creates a new key slot that wraps the existing repository master
 key. It writes that slot as an immutable `key-slots/<key-slot-id>` object and
 does not rewrite the original bootstrap key slot.
+
+Before writing the new key-slot object, current code acquires encrypted
+`locks/<lease-id>` command lease state. Another active readable lease rejects
+the command as a locked repository, and malformed lease state fails closed
+before the key-slot object is written.
 
 `key add` does not create a new repository master key, does not re-encrypt or
 rewrite chunks, manifests, indexes, snapshot commit markers, forget markers,
@@ -160,8 +166,9 @@ slot.
 ## Key Remove
 
 `ferry key remove <KEY_SLOT_ID>` removes one externally added passphrase
-unlock path for an initialized local repository. The command must first unlock
-the repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`.
+unlock path for an initialized local or S3-compatible repository. The command
+must first unlock the repository with `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`.
 
 Removal is marker-based. The command writes an immutable
 `key-slot-removals/<key-slot-id>` marker and does not delete the original
@@ -175,6 +182,11 @@ slot is not removable. Before writing a removal marker, the command proves
 that the supplied current passphrase unlocks a remaining non-removed slot. If
 the supplied passphrase only proves the slot being removed, the command fails
 closed without writing removal state.
+
+Before writing the removal marker, current code acquires encrypted
+`locks/<lease-id>` command lease state. Another active readable lease rejects
+the command as a locked repository, and malformed lease state fails closed
+before the key-slot removal marker is written.
 
 `key remove` does not create a new repository master key, does not re-encrypt
 or rewrite chunks, manifests, indexes, snapshot commit markers, forget
@@ -295,12 +307,13 @@ metadata identity mismatches, rejects unsupported lease-state schema and format
 versions, rejects repository identity mismatches, rejects invalid lease
 expiration windows, rejects expired leases for active use, and treats an
 already-present matching lease state as an idempotent write result. Non-dry-run
-forget and prune now use encrypted lease state for best-effort command
-coordination: active readable leases reject the command as a locked repository,
-expired readable leases are ignored, malformed lease objects fail closed before
-forget writes markers or prune deletes candidates, and each command
-best-effort releases its own lease after the mutation path returns. Other
-command-level lease enforcement is not implemented yet.
+forget, non-dry-run prune, and key-management mutation paths now use encrypted
+lease state for best-effort command coordination: active readable leases reject
+the command as a locked repository, expired readable leases are ignored,
+malformed lease objects fail closed before forget writes markers, prune deletes
+candidates, or key-management writes key-slot mutation objects, and each
+command best-effort releases its own lease after the mutation path returns.
+Other command-level lease enforcement is not implemented yet.
 
 ## Key Rotation
 
@@ -311,21 +324,26 @@ Key rotation has two different meanings:
 - Repository rekey creates a new master key and rewrites or re-encrypts all
   repository objects.
 
-Format v0 `key rotate` means unlock rotation. For initialized local
-repositories, `ferry key rotate --retire-key-slot <KEY_SLOT_ID>...` unlocks
-the repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, writes
-one new immutable `key-slots/<key-slot-id>` object from
+Format v0 `key rotate` means unlock rotation. For initialized local and
+S3-compatible repositories, `ferry key rotate --retire-key-slot
+<KEY_SLOT_ID>...` unlocks the repository with `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`, writes one new immutable
+`key-slots/<key-slot-id>` object from
 `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
 `FILEFERRY_NEW_PASSWORD_FILE`, proves that the new slot unlocks the existing
 repository master key, then writes immutable removal markers for the
 explicitly selected externally added key slots.
 
+Before writing the new key-slot object or removal markers, current code
+acquires encrypted `locks/<lease-id>` command lease state. Another active
+readable lease rejects the command as a locked repository, and malformed lease
+state fails closed before the new key-slot object is written.
+
 `key rotate` does not create a new repository master key, does not re-encrypt
 or rewrite chunks, manifests, indexes, snapshot commit markers, forget
 markers, policy/config objects, or the original bootstrap slot, does not
 delete `key-slots/<key-slot-id>` objects, does not remove unselected key
-slots, and does not recover lost keys. S3-compatible key rotation is not
-implemented yet.
+slots, and does not recover lost keys.
 
 ## Tamper And Corruption Errors
 

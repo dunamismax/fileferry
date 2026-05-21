@@ -1124,37 +1124,42 @@ pub async fn add_repository_key_slot(
     kdf: KdfParams,
 ) -> CoreResult<KeyAddResult> {
     let opened = open_repository(store, current_passphrase).await?;
-    let key_slot = create_key_slot(&opened.master_key, new_passphrase, kdf)
-        .map_err(|source| CoreError::Encryption { source })?;
-    let key_slot_id = hex_bytes(&random_bytes::<KEY_SLOT_ID_BYTES>());
-    let object_key = key_slot_object_key(&key_slot_id)?;
-    let master_key_check =
-        master_key_check(&opened.master_key, &opened.repository_id, &key_slot_id)?;
-    let stored = StoredExternalKeySlot {
-        magic: REPOSITORY_MAGIC.to_owned(),
-        format_version: REPOSITORY_FORMAT_VERSION_V0,
-        repository_id: opened.repository_id.clone(),
-        key_slot_id: key_slot_id.clone(),
-        key_slot: StoredKeySlot::from_key_slot(&key_slot),
-        master_key_check,
-    };
-    let bytes =
-        serde_json::to_vec_pretty(&stored).map_err(|source| CoreError::Serialization { source })?;
-    let created = match store
-        .put_if_absent(&object_key, &bytes)
-        .await
-        .map_err(|source| CoreError::Storage { source })?
-    {
-        PutStatus::Created => true,
-        PutStatus::AlreadyPresent => false,
-    };
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
+    let lease = pipeline
+        .acquire_repository_mutation_lease(
+            store,
+            &opened.master_key,
+            RepositoryLeaseCommandKind::KeyManagement,
+        )
+        .await?;
+    let result: CoreResult<KeyAddResult> = async {
+        let (key_slot_id, stored) =
+            write_external_key_slot(store, &opened, new_passphrase, kdf).await?;
+        let added_object_key = key_slot_object_key(&key_slot_id)?;
+        let added_key_slot = stored.key_slot.to_key_slot()?;
+        let new_master_key = unlock_master_key(new_passphrase, &added_key_slot)
+            .map_err(|source| CoreError::RepositoryUnlock { source })?;
+        let actual_check = master_key_check(&new_master_key, &opened.repository_id, &key_slot_id)?;
+        if actual_check != stored.master_key_check {
+            return Err(CoreError::InvalidKeySlot {
+                key: added_object_key,
+                reason: "new key slot does not unlock this repository master key",
+            });
+        }
+        let reopened = open_repository(store, new_passphrase).await?;
 
-    Ok(KeyAddResult {
-        repository_id: opened.repository_id,
-        key_slot_id,
-        key_slots: opened.key_slots + usize::from(created),
-        kdf,
-    })
+        Ok(KeyAddResult {
+            repository_id: reopened.repository_id,
+            key_slot_id,
+            key_slots: reopened.key_slots,
+            kdf,
+        })
+    }
+    .await;
+    pipeline
+        .release_repository_mutation_lease(store, &lease.lease_object)
+        .await;
+    result
 }
 
 pub async fn remove_repository_key_slot(
@@ -1206,38 +1211,32 @@ pub async fn remove_repository_key_slot(
             key_slot_id: key_slot_id.to_owned(),
         });
     }
-
-    let removed_at_unix_seconds = current_unix_seconds()?;
-    let marker = StoredKeySlotRemoval {
-        schema_version: 0,
-        magic: REPOSITORY_MAGIC.to_owned(),
-        format_version: REPOSITORY_FORMAT_VERSION_V0,
-        repository_id: opened.repository_id.clone(),
-        key_slot_id: key_slot_id.to_owned(),
-        key_slot_object: key_slot_key.as_str().to_owned(),
-        removed_at_unix_seconds,
-        master_key_removal_check: master_key_removal_check(
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
+    let lease = pipeline
+        .acquire_repository_mutation_lease(
+            store,
             &opened.master_key,
-            &opened.repository_id,
-            key_slot_id,
-        )?,
-    };
-    let marker_bytes =
-        serde_json::to_vec_pretty(&marker).map_err(|source| CoreError::Serialization { source })?;
-    let created = store
-        .put_if_absent(&removal_key, &marker_bytes)
-        .await
-        .map_err(|source| CoreError::Storage { source })?
-        == PutStatus::Created;
-    let reopened = open_repository(store, current_passphrase).await?;
+            RepositoryLeaseCommandKind::KeyManagement,
+        )
+        .await?;
+    let result: CoreResult<KeyRemoveResult> = async {
+        let (removal_marker_object, removal_marker_created) =
+            write_key_slot_removal_marker(store, &opened, key_slot_id).await?;
+        let reopened = open_repository(store, current_passphrase).await?;
 
-    Ok(KeyRemoveResult {
-        repository_id: reopened.repository_id,
-        removed_key_slot_id: key_slot_id.to_owned(),
-        key_slots: reopened.key_slots,
-        removal_marker_object: removal_key.as_str().to_owned(),
-        removal_marker_created: created,
-    })
+        Ok(KeyRemoveResult {
+            repository_id: reopened.repository_id,
+            removed_key_slot_id: key_slot_id.to_owned(),
+            key_slots: reopened.key_slots,
+            removal_marker_object,
+            removal_marker_created,
+        })
+    }
+    .await;
+    pipeline
+        .release_repository_mutation_lease(store, &lease.lease_object)
+        .await;
+    result
 }
 
 pub async fn rotate_repository_key_slots(
@@ -1254,41 +1253,56 @@ pub async fn rotate_repository_key_slots(
         preflight_external_key_slot_for_removal(store, &opened, key_slot_id).await?;
     }
 
-    let (added_key_slot_id, stored) =
-        write_external_key_slot(store, &opened, new_passphrase, kdf).await?;
-    let added_object_key = key_slot_object_key(&added_key_slot_id)?;
-    let added_key_slot = stored.key_slot.to_key_slot()?;
-    let new_master_key = unlock_master_key(new_passphrase, &added_key_slot)
-        .map_err(|source| CoreError::RepositoryUnlock { source })?;
-    let actual_check =
-        master_key_check(&new_master_key, &opened.repository_id, &added_key_slot_id)?;
-    if actual_check != stored.master_key_check {
-        return Err(CoreError::InvalidKeySlot {
-            key: added_object_key,
-            reason: "new key slot does not unlock this repository master key",
-        });
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
+    let lease = pipeline
+        .acquire_repository_mutation_lease(
+            store,
+            &opened.master_key,
+            RepositoryLeaseCommandKind::KeyManagement,
+        )
+        .await?;
+    let result: CoreResult<KeyRotateResult> = async {
+        let (added_key_slot_id, stored) =
+            write_external_key_slot(store, &opened, new_passphrase, kdf).await?;
+        let added_object_key = key_slot_object_key(&added_key_slot_id)?;
+        let added_key_slot = stored.key_slot.to_key_slot()?;
+        let new_master_key = unlock_master_key(new_passphrase, &added_key_slot)
+            .map_err(|source| CoreError::RepositoryUnlock { source })?;
+        let actual_check =
+            master_key_check(&new_master_key, &opened.repository_id, &added_key_slot_id)?;
+        if actual_check != stored.master_key_check {
+            return Err(CoreError::InvalidKeySlot {
+                key: added_object_key,
+                reason: "new key slot does not unlock this repository master key",
+            });
+        }
+
+        let mut removal_marker_objects = Vec::with_capacity(retire_key_slot_ids.len());
+        let mut removal_markers_created = 0;
+        for key_slot_id in &retire_key_slot_ids {
+            let (marker_object, marker_created) =
+                write_key_slot_removal_marker(store, &opened, key_slot_id).await?;
+            removal_marker_objects.push(marker_object);
+            removal_markers_created += usize::from(marker_created);
+        }
+
+        let reopened = open_repository(store, new_passphrase).await?;
+
+        Ok(KeyRotateResult {
+            repository_id: reopened.repository_id,
+            added_key_slot_id,
+            removed_key_slot_ids: retire_key_slot_ids,
+            key_slots: reopened.key_slots,
+            removal_marker_objects,
+            removal_markers_created,
+            kdf,
+        })
     }
-
-    let mut removal_marker_objects = Vec::with_capacity(retire_key_slot_ids.len());
-    let mut removal_markers_created = 0;
-    for key_slot_id in &retire_key_slot_ids {
-        let (marker_object, marker_created) =
-            write_key_slot_removal_marker(store, &opened, key_slot_id).await?;
-        removal_marker_objects.push(marker_object);
-        removal_markers_created += usize::from(marker_created);
-    }
-
-    let reopened = open_repository(store, new_passphrase).await?;
-
-    Ok(KeyRotateResult {
-        repository_id: reopened.repository_id,
-        added_key_slot_id,
-        removed_key_slot_ids: retire_key_slot_ids,
-        key_slots: reopened.key_slots,
-        removal_marker_objects,
-        removal_markers_created,
-        kdf,
-    })
+    .await;
+    pipeline
+        .release_repository_mutation_lease(store, &lease.lease_object)
+        .await;
+    result
 }
 
 pub async fn export_repository_recovery(
@@ -8006,6 +8020,138 @@ mod tests {
             .expect("open repository with added passphrase");
         assert_eq!(opened.repository_id, created.repository.repository_id);
         assert_eq!(opened.key_slots, 2);
+
+        let lock_prefix = ObjectKeyPrefix::new(LEASE_STATE_PREFIX).expect("lock prefix");
+        assert!(
+            store
+                .list_prefix(&lock_prefix)
+                .await
+                .expect("list locks")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_key_add_rejects_active_repository_lease_before_slot_write() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let added = SecretString::from("added passphrase");
+        let opened = create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository")
+            .repository;
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))
+            .expect("pipeline");
+        let active_lease_id = "aa".repeat(LEASE_STATE_ID_BYTES);
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &opened.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: active_lease_id.clone(),
+                    writer_id: "bb".repeat(LEASE_STATE_ID_BYTES),
+                    command_kind: RepositoryLeaseCommandKind::KeyManagement,
+                    acquired_at_unix_seconds: 1,
+                    expires_at_unix_seconds: 4_000_000_000,
+                },
+            )
+            .await
+            .expect("write active lease");
+
+        let error = add_repository_key_slot(&store, &original, &added, KdfParams::for_tests())
+            .await
+            .expect_err("active lease blocks key add");
+
+        assert!(matches!(
+            error,
+            CoreError::RepositoryLeaseConflict {
+                lease_id,
+                command_kind: RepositoryLeaseCommandKind::KeyManagement,
+                ..
+            } if lease_id == active_lease_id
+        ));
+        assert!(
+            store
+                .list_prefix(&key_slot_prefix().expect("key slot prefix"))
+                .await
+                .expect("list key slots")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_key_add_rejects_malformed_repository_lease_before_slot_write() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let added = SecretString::from("added passphrase");
+        create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let malformed_lease_id = "cc".repeat(LEASE_STATE_ID_BYTES);
+        store
+            .overwrite_for_tests(
+                lease_state_object_key(&malformed_lease_id).expect("lease key"),
+                b"not encrypted json".to_vec(),
+            )
+            .await;
+
+        let error = add_repository_key_slot(&store, &original, &added, KdfParams::for_tests())
+            .await
+            .expect_err("malformed lease blocks key add");
+
+        assert!(matches!(error, CoreError::LeaseStateDecode { .. }));
+        assert!(
+            store
+                .list_prefix(&key_slot_prefix().expect("key slot prefix"))
+                .await
+                .expect("list key slots")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_key_add_ignores_expired_repository_lease_and_releases_own_lease() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let added = SecretString::from("added passphrase");
+        let opened = create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository")
+            .repository;
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))
+            .expect("pipeline");
+        let expired_lease_id = "ce".repeat(LEASE_STATE_ID_BYTES);
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &opened.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: expired_lease_id.clone(),
+                    writer_id: "df".repeat(LEASE_STATE_ID_BYTES),
+                    command_kind: RepositoryLeaseCommandKind::KeyManagement,
+                    acquired_at_unix_seconds: 1,
+                    expires_at_unix_seconds: 2,
+                },
+            )
+            .await
+            .expect("write expired lease");
+
+        let result = add_repository_key_slot(&store, &original, &added, KdfParams::for_tests())
+            .await
+            .expect("expired lease does not block key add");
+
+        assert_eq!(result.key_slots, 2);
+        let lock_prefix = ObjectKeyPrefix::new(LEASE_STATE_PREFIX).expect("lock prefix");
+        assert_eq!(
+            store.list_prefix(&lock_prefix).await.expect("list locks"),
+            vec![lease_state_object_key(&expired_lease_id).expect("expired lease object")]
+        );
     }
 
     #[tokio::test]
@@ -8061,6 +8207,67 @@ mod tests {
             .expect("repeat removal is idempotent");
         assert_eq!(removed_again.key_slots, 1);
         assert!(!removed_again.removal_marker_created);
+
+        let lock_prefix = ObjectKeyPrefix::new(LEASE_STATE_PREFIX).expect("lock prefix");
+        assert!(
+            store
+                .list_prefix(&lock_prefix)
+                .await
+                .expect("list locks")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_key_remove_rejects_active_repository_lease_before_marker_write() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let added = SecretString::from("added passphrase");
+        let opened = create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository")
+            .repository;
+        let added_slot = add_repository_key_slot(&store, &original, &added, KdfParams::for_tests())
+            .await
+            .expect("add key slot");
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))
+            .expect("pipeline");
+        let active_lease_id = "dd".repeat(LEASE_STATE_ID_BYTES);
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &opened.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: active_lease_id.clone(),
+                    writer_id: "ee".repeat(LEASE_STATE_ID_BYTES),
+                    command_kind: RepositoryLeaseCommandKind::Prune,
+                    acquired_at_unix_seconds: 1,
+                    expires_at_unix_seconds: 4_000_000_000,
+                },
+            )
+            .await
+            .expect("write active lease");
+
+        let error = remove_repository_key_slot(&store, &original, &added_slot.key_slot_id)
+            .await
+            .expect_err("active lease blocks key remove");
+
+        assert!(matches!(
+            error,
+            CoreError::RepositoryLeaseConflict {
+                lease_id,
+                command_kind: RepositoryLeaseCommandKind::Prune,
+                ..
+            } if lease_id == active_lease_id
+        ));
+        assert!(
+            !store
+                .exists(&key_slot_removal_object_key(&added_slot.key_slot_id).expect("removal key"))
+                .await
+                .expect("removal marker absent")
+        );
     }
 
     #[tokio::test]
@@ -8185,6 +8392,65 @@ mod tests {
         open_repository(&store, &original)
             .await
             .expect("bootstrap passphrase remains");
+
+        let lock_prefix = ObjectKeyPrefix::new(LEASE_STATE_PREFIX).expect("lock prefix");
+        assert!(
+            store
+                .list_prefix(&lock_prefix)
+                .await
+                .expect("list locks")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_key_rotate_rejects_malformed_repository_lease_before_slot_write() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let store = FakeObjectStore::new();
+        let original = SecretString::from("original passphrase");
+        let old = SecretString::from("old passphrase");
+        let new = SecretString::from("new passphrase");
+        create_repository(&store, &original, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let old_slot = add_repository_key_slot(&store, &original, &old, KdfParams::for_tests())
+            .await
+            .expect("add old key slot");
+        let malformed_lease_id = "ff".repeat(LEASE_STATE_ID_BYTES);
+        store
+            .overwrite_for_tests(
+                lease_state_object_key(&malformed_lease_id).expect("lease key"),
+                b"not encrypted json".to_vec(),
+            )
+            .await;
+
+        let error = rotate_repository_key_slots(
+            &store,
+            &old,
+            &new,
+            std::slice::from_ref(&old_slot.key_slot_id),
+            KdfParams::for_tests(),
+        )
+        .await
+        .expect_err("malformed lease blocks key rotate");
+
+        assert!(matches!(error, CoreError::LeaseStateDecode { .. }));
+        assert_eq!(
+            store
+                .list_prefix(&key_slot_prefix().expect("key slot prefix"))
+                .await
+                .expect("list key slots")
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .list_prefix(&key_slot_removal_prefix().expect("key-slot-removal prefix"))
+                .await
+                .expect("list key-slot removals")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

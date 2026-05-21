@@ -58,29 +58,33 @@ Current implementation status:
 - The key-slot fields are plaintext only to the extent required for
   passphrase unlock; the repository master key remains encrypted and
   authenticated.
-- `ferry key add` for initialized local repositories writes additional
-  passphrase key slots as immutable `key-slots/<key-slot-id>` JSON objects.
-  These objects contain the non-sensitive slot id, repository id, format
-  version, KDF parameters, salt, nonce, encrypted master-key bytes, and a
-  keyed master-key check used to reject slots that decrypt to a different
+- `ferry key add` for initialized local and S3-compatible repositories writes
+  additional passphrase key slots as immutable `key-slots/<key-slot-id>` JSON
+  objects. These objects contain the non-sensitive slot id, repository id,
+  format version, KDF parameters, salt, nonce, encrypted master-key bytes, and
+  a keyed master-key check used to reject slots that decrypt to a different
   repository master key. Added key slots do not rewrite existing repository
   objects or the original bootstrap key slot.
-- `ferry key remove` for initialized local repositories writes immutable
-  `key-slot-removals/<key-slot-id>` JSON marker objects for externally added
-  key slots. These markers contain the slot id, repository id, format version,
-  target key-slot object name, removal timestamp, and a keyed removal check
-  derived from the repository master key. Removal markers hide matching
-  external key slots during unlock after the marker check verifies. They do
-  not delete `key-slots/<key-slot-id>` objects and do not rewrite the
+- `ferry key remove` for initialized local and S3-compatible repositories
+  writes immutable `key-slot-removals/<key-slot-id>` JSON marker objects for
+  externally added key slots. These markers contain the slot id, repository id,
+  format version, target key-slot object name, removal timestamp, and a keyed
+  removal check derived from the repository master key. Removal markers hide
+  matching external key slots during unlock after the marker check verifies.
+  They do not delete `key-slots/<key-slot-id>` objects and do not rewrite the
   bootstrap key slot or encrypted repository objects.
-- `ferry key rotate` for initialized local repositories is unlock rotation:
-  it writes one new immutable `key-slots/<key-slot-id>` object for the
-  existing repository master key, proves the new slot unlocks that master key,
-  then writes immutable `key-slot-removals/<key-slot-id>` marker objects for
-  explicitly selected externally added key slots. It does not create a new
-  repository master key, delete key-slot objects, remove the original
-  bootstrap key slot, retire unselected slots, or rewrite encrypted repository
-  objects.
+- `ferry key rotate` for initialized local and S3-compatible repositories is
+  unlock rotation: it writes one new immutable `key-slots/<key-slot-id>` object
+  for the existing repository master key, proves the new slot unlocks that
+  master key, then writes immutable `key-slot-removals/<key-slot-id>` marker
+  objects for explicitly selected externally added key slots. It does not
+  create a new repository master key, delete key-slot objects, remove the
+  original bootstrap key slot, retire unselected slots, or rewrite encrypted
+  repository objects.
+- `ferry key add`, `ferry key remove`, and `ferry key rotate` acquire encrypted
+  `locks/<lease-id>` command lease state before key-slot mutation writes.
+  Active readable leases reject the command as locked, and malformed lease
+  state fails closed before key-slot objects or removal markers are written.
 - `ferry key export-recovery --output <FILE>` for initialized local
   repositories writes a standalone encrypted JSON recovery package outside the
   repository. The destination file must not already exist. The package
@@ -364,18 +368,20 @@ Current implementation status:
 - Readers validate schema, magic, format version, repository id, lease id,
   writer id, object-key identity, expiration window, and keyed state identity
   before returning the object. Active-use reads reject an expired lease.
-- Non-dry-run `ferry forget` and `ferry prune` now use this lease-state format
-  for command-level coordination. Before writing forget markers or before
-  marking/sweeping a prune plan, the command lists `locks/`, authenticates and
-  validates readable lease state, rejects another active lease, ignores expired
-  readable leases, writes its own encrypted lease, and rechecks active leases
-  after the write. When the mutation path returns, the command best-effort
-  deletes its own lease; if release is interrupted, timestamp expiry is the
-  fallback.
-- Lease enforcement is currently proven only for non-dry-run forget and prune.
-  Dry-run forget and dry-run prune write no lease state. Command-level leases
-  for backup, key-management, repository maintenance, stale-lease breaking, and
-  lease repair are not implemented yet.
+- Non-dry-run `ferry forget`, non-dry-run `ferry prune`, and key-management
+  mutation paths now use this lease-state format for command-level
+  coordination. Before writing forget markers, marking/sweeping a prune plan,
+  writing key-slot objects, or writing key-slot removal markers, the command
+  lists `locks/`, authenticates and validates readable lease state, rejects
+  another active lease, ignores expired readable leases, writes its own
+  encrypted lease, and rechecks active leases after the write. When the
+  mutation path returns, the command best-effort deletes its own lease; if
+  release is interrupted, timestamp expiry is the fallback.
+- Lease enforcement is currently proven only for non-dry-run forget, non-dry-run
+  prune, `ferry key add`, `ferry key remove`, and `ferry key rotate`. Dry-run
+  forget and dry-run prune write no lease state. Command-level leases for
+  backup, repository maintenance, stale-lease breaking, and lease repair are
+  not implemented yet.
 
 ## Concurrent Backup Behavior
 
@@ -645,4 +651,8 @@ candidate objects. Focused forget tests now prove non-dry-run forget rejects
 an active lease before writing markers, ignores an expired readable lease,
 best-effort releases its own lease after successful marker writes, rejects
 malformed lease state before writing markers, and keeps dry-run forget
-lease-free.
+lease-free. Focused key-management tests now prove `key add`, `key remove`,
+and `key rotate` reject active or malformed lease state before key-slot object
+or key-slot removal-marker writes, that the shared key-management lease path
+ignores expired readable leases, and that successful key-management mutations
+release their own leases.

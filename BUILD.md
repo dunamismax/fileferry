@@ -445,9 +445,17 @@ Current status:
   writing forget markers, rejects another active readable lease as a locked
   repository, ignores expired readable leases, best-effort releases its own
   lease after marker writes return, and fails closed on malformed lease state
-  before marker writes. Command-level lease enforcement is currently proven
-  only for forget and prune; backup, key-management, repository maintenance,
-  stale-lease breaking, and lease repair are not implemented yet.
+  before marker writes.
+- Continued with a key-management lease-coordination slice. `ferry key add`,
+  `ferry key remove`, and `ferry key rotate` now use encrypted
+  `locks/<lease-id>` lease state before writing key-slot objects or key-slot
+  removal markers, reject another active readable lease as a locked
+  repository, ignore expired readable leases, best-effort release their own
+  lease after the mutation path returns, and fail closed on malformed lease
+  state before key-slot mutation writes. Command-level lease enforcement is
+  currently proven only for forget, prune, and key-management mutation paths;
+  backup, repository maintenance, stale-lease breaking, and lease repair are
+  not implemented yet.
 
 These slices do not freeze the rest of format v0.
 
@@ -1024,6 +1032,28 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with a key-management
+  lease-coordination slice. `ferry key add`, `ferry key remove`, and
+  `ferry key rotate` now acquire encrypted `locks/<lease-id>` lease state
+  before writing additional key-slot objects or key-slot removal markers.
+  Active readable leases return the stable `repository_locked` failure code
+  and repository-locked exit family before key-slot mutation writes; malformed
+  or unauthenticatable lease state fails closed with machine-readable
+  lease-object context before key-slot mutation writes. The key-management
+  paths ignore expired readable leases, best-effort release their own lease
+  after the mutation path returns, and focused core tests verify successful
+  release. Added focused core tests for active-lease and malformed-lease
+  rejection before key add/remove/rotate writes, expired-lease tolerance on the
+  shared key-management lease path, plus CLI tests for stable locked/integrity
+  failures and no accidental key-slot or removal-marker writes. Updated
+  `docs/repository-format.md`,
+  `docs/security.md`, and this build plan to document only this proven
+  key-management coordination. This does not implement backup leases,
+  repository-maintenance leases, stale-lease breaking, lease repair, recovery
+  import, full repository rekey, or freeze all of format v0. Focused
+  verification:
+  `cargo test -p fileferry-core repository_key_ --all-features` and
+  `cargo test -p fileferry-cli key_ --all-features`.
 - 2026-05-21 - Continued Milestone H with a forget command
   lease-coordination slice. Non-dry-run `ferry forget` now acquires encrypted
   `locks/<lease-id>` lease state before writing forget markers, rejects another
