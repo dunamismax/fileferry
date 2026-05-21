@@ -583,7 +583,9 @@ and creation/birth timestamp fields, captured Unix permission and ownership
 fields, selected symlink timestamp plus captured Unix symlink metadata fields,
 selected reportable xattr status fields where xattrs were observed or xattr
 capture was denied, and selected ACL status fields where ACLs were observed or
-ACL capture was denied in constructed or future manifests. JSON
+ACL capture was denied in constructed or future manifests, plus selected file
+flag status fields where file flags were observed or file flag capture was
+denied in constructed or future manifests. JSON
 output follows the Restore data schema above; JSONL output emits the
 implemented progress phases listed above. Current metadata application is
 limited to captured modified timestamps for restored regular files and
@@ -599,16 +601,19 @@ captured where xattr listing is exposed, but xattr names and values are not
 restored; the observed macOS `com.apple.provenance` implementation detail is
 not counted as reportable restore metadata. ACL status scaffolding is present
 in manifests, but this version records ACL status as unsupported during normal
-capture and does not read or restore ACL contents.
-Unix ownership changes, Unix special mode bits, ACLs, xattr values, resource
-forks, Windows attributes, BSD flags, and other platform-specific metadata are
-not restored yet. If a selected timestamp, Unix mode, Unix ownership,
-creation/birth timestamp, symlink metadata field, xattr status field, or ACL
-status field cannot be applied, represented, or restored by this version, or if
-dry-run planning determines that the selected metadata is denied, unsupported,
-unrepresentable, or outside the destination system time range, restore reports a
-`metadata_warnings` item and exits with partial-success code `10`; JSON and
-JSONL modes keep those warnings on stdout.
+capture and does not read or restore ACL contents. File flag status
+scaffolding is present in manifests, but this version records file flag status
+as unsupported during normal capture and does not read or restore file flag
+values. Unix ownership changes, Unix special mode bits, ACLs, xattr values,
+resource forks, Windows attributes, BSD flags, and other platform-specific
+metadata are not restored yet. If a selected timestamp, Unix mode, Unix
+ownership, creation/birth timestamp, symlink metadata field, xattr status
+field, ACL status field, or file flag status field cannot be applied,
+represented, or restored by this version, or if dry-run planning determines
+that the selected metadata is denied, unsupported, unrepresentable, or outside
+the destination system time range, restore reports a `metadata_warnings` item
+and exits with partial-success code `10`; JSON and JSONL modes keep those
+warnings on stdout.
 
 `ferry check` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

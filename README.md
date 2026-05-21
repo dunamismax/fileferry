@@ -374,9 +374,9 @@ warning when created destination ownership does not match. It does not call
 creation/birth timestamps, selected symlink timestamps, and captured Unix
 symlink mode/ownership are reported as not restored. New manifests record
 reportable xattr presence/count status where the platform and filesystem
-expose xattr listing, plus ACL status scaffolding. ACL contents and xattr
-names/values are not restored; special mode bits and other metadata
-application are not implemented yet.
+expose xattr listing, plus ACL status and file flag status scaffolding. ACL
+contents, file flag values, and xattr names/values are not restored; special
+mode bits and other metadata application are not implemented yet.
 Non-dry-run restore preflights selected destination paths for observed
 case-insensitive path collisions and rejects Windows reserved-name segments on
 Windows destinations before writes; this is not a broader platform-support

@@ -106,6 +106,8 @@ pub struct MetadataExtensions {
     pub xattrs: MetadataValue<MetadataFieldSummary>,
     #[serde(default)]
     pub acls: MetadataValue<MetadataFieldSummary>,
+    #[serde(default)]
+    pub file_flags: MetadataValue<MetadataFieldSummary>,
 }
 
 impl Default for MetadataExtensions {
@@ -113,6 +115,7 @@ impl Default for MetadataExtensions {
         Self {
             xattrs: MetadataValue::Unsupported,
             acls: MetadataValue::Unsupported,
+            file_flags: MetadataValue::Unsupported,
         }
     }
 }
@@ -289,6 +292,7 @@ fn metadata_extensions(path: &Path) -> MetadataExtensions {
     MetadataExtensions {
         xattrs: xattr_summary(path),
         acls: MetadataValue::Unsupported,
+        file_flags: MetadataValue::Unsupported,
     }
 }
 
@@ -385,6 +389,7 @@ mod tests {
             MetadataValue::Captured(MetadataFieldSummary { .. }) | MetadataValue::Unsupported
         ));
         assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
+        assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
     }
 
     #[test]
@@ -438,6 +443,7 @@ mod tests {
             MetadataValue::Captured(MetadataFieldSummary { count: 2 })
         );
         assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
+        assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
     }
 
     #[test]
@@ -461,6 +467,17 @@ mod tests {
     fn filters_macos_provenance_xattr_from_reported_count() {
         assert!(!reportable_xattr_name(OsStr::new("com.apple.provenance")));
         assert!(reportable_xattr_name(OsStr::new(test_xattr_name())));
+    }
+
+    #[test]
+    fn captures_file_flag_status_as_unsupported_until_platform_capture_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"hello").expect("write file");
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
     }
 
     #[cfg(unix)]
