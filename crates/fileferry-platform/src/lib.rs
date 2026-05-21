@@ -109,6 +109,8 @@ pub struct MetadataExtensions {
     #[serde(default)]
     pub file_flags: MetadataValue<MetadataFieldSummary>,
     #[serde(default)]
+    pub resource_forks: MetadataValue<MetadataFieldSummary>,
+    #[serde(default)]
     pub windows_attributes: MetadataValue<MetadataFieldSummary>,
 }
 
@@ -118,6 +120,7 @@ impl Default for MetadataExtensions {
             xattrs: MetadataValue::Unsupported,
             acls: MetadataValue::Unsupported,
             file_flags: MetadataValue::Unsupported,
+            resource_forks: MetadataValue::Unsupported,
             windows_attributes: MetadataValue::Unsupported,
         }
     }
@@ -296,6 +299,7 @@ fn metadata_extensions(path: &Path) -> MetadataExtensions {
         xattrs: xattr_summary(path),
         acls: MetadataValue::Unsupported,
         file_flags: MetadataValue::Unsupported,
+        resource_forks: MetadataValue::Unsupported,
         windows_attributes: MetadataValue::Unsupported,
     }
 }
@@ -395,6 +399,10 @@ mod tests {
         assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
         assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
         assert_eq!(
+            metadata.extensions.resource_forks,
+            MetadataValue::Unsupported
+        );
+        assert_eq!(
             metadata.extensions.windows_attributes,
             MetadataValue::Unsupported
         );
@@ -453,6 +461,10 @@ mod tests {
         assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
         assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
         assert_eq!(
+            metadata.extensions.resource_forks,
+            MetadataValue::Unsupported
+        );
+        assert_eq!(
             metadata.extensions.windows_attributes,
             MetadataValue::Unsupported
         );
@@ -502,6 +514,20 @@ mod tests {
 
         assert_eq!(
             metadata.extensions.windows_attributes,
+            MetadataValue::Unsupported
+        );
+    }
+
+    #[test]
+    fn captures_resource_fork_status_as_unsupported_until_platform_capture_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"hello").expect("write file");
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_eq!(
+            metadata.extensions.resource_forks,
             MetadataValue::Unsupported
         );
     }

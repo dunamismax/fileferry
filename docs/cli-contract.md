@@ -585,9 +585,11 @@ selected reportable xattr status fields where xattrs were observed or xattr
 capture was denied, and selected ACL status fields where ACLs were observed or
 ACL capture was denied in constructed or future manifests, plus selected file
 flag status fields where file flags were observed or file flag capture was
-denied in constructed or future manifests, plus selected Windows attribute
-status fields where Windows attributes were observed or Windows attribute
-capture was denied in constructed or future manifests. JSON output follows
+denied in constructed or future manifests, plus selected resource fork status
+fields where resource forks were observed or resource fork capture was denied
+in constructed or future manifests, plus selected Windows attribute status
+fields where Windows attributes were observed or Windows attribute capture was
+denied in constructed or future manifests. JSON output follows
 the Restore data schema above; JSONL output emits the
 implemented progress phases listed above. Current metadata application is
 limited to captured modified timestamps for restored regular files and
@@ -608,12 +610,15 @@ scaffolding is present in manifests, but this version records file flag status
 as unsupported during normal capture and does not read or restore file flag
 values. Windows attribute status scaffolding is present in manifests, but this
 version records Windows attribute status as unsupported during normal capture
-and does not read or restore Windows attribute values. Unix ownership changes,
-Unix special mode bits, ACLs, xattr values, resource forks, Windows
-attributes, BSD flags, and other platform-specific metadata are not restored
-yet. If a selected timestamp, Unix mode, Unix ownership, creation/birth
-timestamp, symlink metadata field, xattr status field, ACL status field, file
-flag status field, or Windows attribute status field cannot be applied,
+and does not read or restore Windows attribute values. Resource fork status
+scaffolding is present in manifests, but this version records resource fork
+status as unsupported during normal capture and does not read or restore
+resource fork values. Unix ownership changes, Unix special mode bits, ACLs,
+xattr values, resource forks, Windows attributes, BSD flags, and other
+platform-specific metadata are not restored yet. If a selected timestamp, Unix
+mode, Unix ownership, creation/birth timestamp, symlink metadata field, xattr
+status field, ACL status field, file flag status field, resource fork status
+field, or Windows attribute status field cannot be applied,
 represented, or restored by this version, or if dry-run planning determines
 that the selected metadata is denied, unsupported, unrepresentable, or outside
 the destination system time range, restore reports a `metadata_warnings` item

@@ -81,6 +81,8 @@ were observed or xattr capture was denied, and selected ACL status fields when
 ACLs were observed or ACL capture was denied in constructed or future
 manifests, plus selected file flag status fields when file flags were observed
 or file flag capture was denied in constructed or future manifests, plus
+selected resource fork status fields when resource forks were observed or
+resource fork capture was denied in constructed or future manifests, plus
 selected Windows attribute status fields when Windows attributes were observed
 or Windows attribute capture was denied in constructed or future manifests. It
 can surface denied, unsupported, invalid, unrepresentable, or
@@ -103,13 +105,16 @@ entries, permissions, or values. New manifests also have file flag status
 scaffolding, but current capture records file flag status as unsupported and
 does not read or restore file flag values. New manifests also have Windows
 attribute status scaffolding, but current capture records Windows attribute
-status as unsupported and does not read or restore Windows attribute values. A
-selected timestamp, Unix mode, Unix ownership, creation/birth timestamp,
-symlink metadata field, xattr status field, ACL status field, file flag status
-field, or Windows attribute status field that could not be applied,
-represented, or restored by this version is reported as a metadata warning
-with entry id, metadata namespace, field, source platform, destination
-platform, and reason; a restore with only metadata warnings returns
+status as unsupported and does not read or restore Windows attribute values.
+New manifests also have resource fork status scaffolding, but current capture
+records resource fork status as unsupported and does not read or restore
+resource fork values. A selected timestamp, Unix mode, Unix ownership,
+creation/birth timestamp, symlink metadata field, xattr status field, ACL
+status field, file flag status field, resource fork status field, or Windows
+attribute status field that could not be applied, represented, or restored by
+this version is reported as a metadata warning with entry id, metadata
+namespace, field, source platform, destination platform, and reason; a restore
+with only metadata warnings returns
 partial-success exit code `10`.
 
 When metadata cannot be represented on the destination platform, FileFerry must:

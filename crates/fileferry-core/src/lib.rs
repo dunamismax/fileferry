@@ -5084,6 +5084,7 @@ fn planned_extension_field_count(extensions: &MetadataExtensions) -> usize {
     usize::from(metadata_summary_selected(&extensions.xattrs))
         + usize::from(metadata_summary_selected(&extensions.acls))
         + usize::from(metadata_summary_selected(&extensions.file_flags))
+        + usize::from(metadata_summary_selected(&extensions.resource_forks))
         + usize::from(metadata_summary_selected(&extensions.windows_attributes))
 }
 
@@ -5126,6 +5127,15 @@ fn plan_unrestored_platform_extensions(
         &extensions.file_flags,
         "file flag",
         "file flags",
+        warnings,
+    );
+    plan_unrestored_metadata_summary(
+        relative_path,
+        source_platform,
+        "resource_forks",
+        &extensions.resource_forks,
+        "resource fork",
+        "resource forks",
         warnings,
     );
     plan_unrestored_metadata_summary(
@@ -5653,15 +5663,18 @@ fn metadata_status(metadata: &EntryMetadata) -> MetadataStatus {
         }
     }
 
-    match &metadata.extensions.xattrs {
-        MetadataValue::Captured(summary) if summary.count > 0 => saw_captured = true,
-        MetadataValue::Denied(_) => return MetadataStatus::Partial,
-        MetadataValue::Captured(_) | MetadataValue::Unsupported => {}
-    }
-    match &metadata.extensions.acls {
-        MetadataValue::Captured(summary) if summary.count > 0 => saw_captured = true,
-        MetadataValue::Denied(_) => return MetadataStatus::Partial,
-        MetadataValue::Captured(_) | MetadataValue::Unsupported => {}
+    for value in [
+        &metadata.extensions.xattrs,
+        &metadata.extensions.acls,
+        &metadata.extensions.file_flags,
+        &metadata.extensions.resource_forks,
+        &metadata.extensions.windows_attributes,
+    ] {
+        match value {
+            MetadataValue::Captured(summary) if summary.count > 0 => saw_captured = true,
+            MetadataValue::Denied(_) => return MetadataStatus::Partial,
+            MetadataValue::Captured(_) | MetadataValue::Unsupported => {}
+        }
     }
 
     match (saw_captured, saw_unsupported) {
@@ -8776,6 +8789,67 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn plan_unrestored_platform_extensions_warns_for_resource_fork_status() {
+        let mut warnings = Vec::new();
+        let captured = MetadataExtensions {
+            resource_forks: MetadataValue::Captured(MetadataFieldSummary { count: 1 }),
+            ..MetadataExtensions::default()
+        };
+        let denied = MetadataExtensions {
+            resource_forks: MetadataValue::Denied("permission denied".to_owned()),
+            ..MetadataExtensions::default()
+        };
+
+        assert_eq!(planned_extension_field_count(&captured), 1);
+        assert_eq!(planned_extension_field_count(&denied), 1);
+
+        plan_unrestored_platform_extensions(
+            Path::new("captured.txt"),
+            PlatformKind::Macos,
+            &captured,
+            &mut warnings,
+        );
+        plan_unrestored_platform_extensions(
+            Path::new("denied.txt"),
+            PlatformKind::Macos,
+            &denied,
+            &mut warnings,
+        );
+
+        assert_eq!(
+            warnings,
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("captured.txt"),
+                    namespace: "macos",
+                    field: "resource_forks",
+                    source_platform: PlatformKind::Macos,
+                    destination_platform: current_platform(),
+                    reason: "1 resource fork is not restored by this version".to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("denied.txt"),
+                    namespace: "macos",
+                    field: "resource_forks",
+                    source_platform: PlatformKind::Macos,
+                    destination_platform: current_platform(),
+                    reason: "resource forks were denied during backup: permission denied"
+                        .to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_status_counts_resource_fork_denial_as_partial() {
+        let mut entry = test_manifest_entry("sample.txt", EntryKind::RegularFile, Some(6));
+        entry.metadata.extensions.resource_forks =
+            MetadataValue::Denied("permission denied".to_owned());
+
+        assert_eq!(metadata_status(&entry.metadata), MetadataStatus::Partial);
     }
 
     #[test]

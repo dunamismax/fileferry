@@ -71,7 +71,9 @@ Last reviewed: 2026-05-21.
   status warnings when ACLs were observed or ACL capture was denied in
   constructed or future manifests, selected file flag status warnings when
   file flags were observed or file flag capture was denied in constructed or
-  future manifests, selected Windows attribute status warnings when Windows
+  future manifests, selected resource fork status warnings when resource forks
+  were observed or resource fork capture was denied in constructed or future
+  manifests, selected Windows attribute status warnings when Windows
   attributes were observed or Windows attribute capture was denied in
   constructed or future manifests, and metadata planning warnings, returns
   partial-success exit code `10` when metadata warnings are produced, and
@@ -201,8 +203,9 @@ Last reviewed: 2026-05-21.
   kind, source platform, regular-file size, timestamps where exposed by `std`,
   symlink targets, Unix mode/ownership where available, and reportable xattr
   presence/count status where the platform and filesystem expose xattr
-  listing, plus ACL, file flag, and Windows attribute status scaffolding that
-  currently records unsupported during normal capture. It also has focused
+  listing, plus ACL, file flag, resource fork, and Windows attribute status
+  scaffolding that currently records unsupported during normal capture. It
+  also has focused
   tests for path normalization facts, Windows reserved-name detection, observed case behavior, Unix symlink
   capture, xattr status capture where available, backward-compatible extension
   metadata deserialization, long-path metadata capture where the filesystem
@@ -231,8 +234,9 @@ Last reviewed: 2026-05-21.
   symlink metadata not-restored warnings, selected xattr status not-restored
   warnings, selected ACL status not-restored warnings from constructed or
   future manifests, selected file flag status not-restored warnings from
-  constructed or future manifests, selected Windows attribute status
-  not-restored warnings from constructed or future manifests, metadata
+  constructed or future manifests, selected resource fork status not-restored
+  warnings from constructed or future manifests, selected Windows attribute
+  status not-restored warnings from constructed or future manifests, metadata
   planning, and optional byte-for-byte verification.
 - `fileferry-core` writes commit markers after encrypted snapshot manifests,
   can discover committed manifests from those markers, and has tested snapshot
@@ -266,6 +270,9 @@ ACL status scaffolding is present, but normal capture currently records ACL
 status as unsupported and does not read or restore ACL contents.
 File flag status scaffolding is present, but normal capture currently records
 file flag status as unsupported and does not read or restore file flag values.
+Resource fork status scaffolding is present, but normal capture currently
+records resource fork status as unsupported and does not read or restore
+resource fork values.
 Windows attribute status scaffolding is present, but normal capture currently
 records Windows attribute status as unsupported and does not read or restore
 Windows attribute values.
@@ -898,6 +905,30 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Completed a Milestone G resource fork status scaffolding and
+  restore warning slice without claiming resource fork value capture, resource
+  fork restoration, or broader macOS platform support. New manifests now
+  include a resource fork status field under encrypted platform extensions;
+  normal capture records it as unsupported until platform-specific resource
+  fork capture is implemented and verified. Restore planning carries selected
+  resource fork status from constructed or future manifests, counts selected
+  captured/denied resource fork status in `metadata_planned`, and emits
+  structured `macos` namespace / `resource_forks` metadata warnings when
+  resource forks were observed or resource fork capture was denied because
+  this version does not restore resource fork values. Older extension metadata
+  that only contains xattr, ACL, file flag, or Windows attribute status still
+  deserializes with resource fork status defaulted to unsupported. Metadata
+  capture summaries now treat denied resource fork status as partial metadata
+  capture. Updated `README.md`, `docs/cli-contract.md`,
+  `docs/platform-metadata.md`, and this file. No live S3 gates were enabled
+  in this session. Verified with
+  `cargo test -p fileferry-platform resource_fork -- --nocapture`,
+  `cargo test -p fileferry-platform deserializes_xattr_only_extensions_with_default_extension_statuses -- --nocapture`,
+  `cargo test -p fileferry-core plan_unrestored_platform_extensions_warns_for_resource_fork_status -- --nocapture`,
+  `cargo test -p fileferry-core metadata_status_counts_resource_fork_denial_as_partial -- --nocapture`,
+  `cargo test -p fileferry-platform -p fileferry-core -p fileferry-cli --no-fail-fast`,
+  `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check`.
 - 2026-05-21 - Completed a Milestone G Windows attribute status scaffolding
   and restore warning slice without claiming Windows attribute value capture,
   Windows attribute restoration, or broader Windows platform support. New
