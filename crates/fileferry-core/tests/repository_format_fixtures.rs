@@ -1,7 +1,7 @@
 use fileferry_core::{
-    BackupPipeline, BackupPipelineConfig, CheckRepositoryOptions, CoreError,
-    RepositoryAeadAlgorithm, RestoreContentRequest, SnapshotManifest, open_repository,
-    verify_repository_recovery_export,
+    BackupPipeline, BackupPipelineConfig, CheckRepositoryOptions, CoreError, PruneObjectKind,
+    PruneRepositoryOptions, RepositoryAeadAlgorithm, RestoreContentRequest, SnapshotManifest,
+    open_repository, verify_repository_recovery_export,
 };
 use fileferry_crypto::{
     AeadAlgorithm, EncryptedObject, KeyPurpose, ObjectContext, ObjectKind, decrypt_object,
@@ -33,6 +33,28 @@ const SECOND_CHUNK_OBJECT: &str =
     "objects/chunk/11/1158295b80156c95e5f834e39001dbe1f2be572c94e52314aef27ab9af50cae3";
 const COMMIT_OBJECT: &str =
     "commits/23502e57ab2eb5ffad9bbe1361cd2d2687d9d167366b4eb01218f471db276b33";
+const FORGET_PRUNE_REPOSITORY_ID: &str =
+    "80fb1310ac9c3293a713888c4f470aaf3e02d5518a852639ec6c32afd0a83749";
+const FORGET_PRUNE_PASSPHRASE: &str = "forget-prune-fixture-passphrase-v0";
+const FORGOTTEN_SNAPSHOT_ID: &str =
+    "80a86bb83a513f56ae8c36263af3438170cd309777e3397cb2d1c8049e56bdb6";
+const RETAINED_SNAPSHOT_ID: &str =
+    "fa502652337a0db2c09fbe5d6916c0dd2920932691f63be8be9317b23548b6da";
+const PRUNE_PLAN_ID: &str = "e0ab98bab38ae3654bf1a54813126d192fa5235797cf16942c692683cc01cec1";
+const FORGET_MARKER_OBJECT: &str =
+    "forgets/80a86bb83a513f56ae8c36263af3438170cd309777e3397cb2d1c8049e56bdb6";
+const PRUNE_PLAN_OBJECT: &str =
+    "objects/prune-plan/e0/e0ab98bab38ae3654bf1a54813126d192fa5235797cf16942c692683cc01cec1";
+const PRUNE_COMPLETION_OBJECT: &str =
+    "objects/prune-completion/e0/e0ab98bab38ae3654bf1a54813126d192fa5235797cf16942c692683cc01cec1";
+const RETAINED_COMMIT_OBJECT: &str =
+    "commits/fa502652337a0db2c09fbe5d6916c0dd2920932691f63be8be9317b23548b6da";
+const RETAINED_MANIFEST_OBJECT: &str =
+    "objects/manifest/fa/fa502652337a0db2c09fbe5d6916c0dd2920932691f63be8be9317b23548b6da";
+const RETAINED_INDEX_OBJECT: &str =
+    "objects/index/17/173970a92ca87e28601637550571fdd7dc42d7d673c2a3b00709bc99ec0c8e10";
+const RETAINED_CHUNK_OBJECT: &str =
+    "objects/chunk/33/3357bb277f6fa50b3762efb6284930137bdd5fb5e01cea053ce44f412d313c79";
 
 const BOOTSTRAP: &[u8] =
     include_bytes!("../../../tests/fixtures/repository-format/v0/bootstrap-keyslot/bootstrap");
@@ -61,6 +83,29 @@ const SNAPSHOT_DATA_FIRST_CHUNK: &[u8] = include_bytes!(
 );
 const SNAPSHOT_DATA_SECOND_CHUNK: &[u8] = include_bytes!(
     "../../../tests/fixtures/repository-format/v0/snapshot-data/objects/chunk/11/1158295b80156c95e5f834e39001dbe1f2be572c94e52314aef27ab9af50cae3"
+);
+const FORGET_PRUNE_BOOTSTRAP: &[u8] =
+    include_bytes!("../../../tests/fixtures/repository-format/v0/forget-prune-state/bootstrap");
+const FORGET_PRUNE_FORGET_MARKER: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/forget-prune-state/forgets/80a86bb83a513f56ae8c36263af3438170cd309777e3397cb2d1c8049e56bdb6"
+);
+const FORGET_PRUNE_RETAINED_COMMIT: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/forget-prune-state/commits/fa502652337a0db2c09fbe5d6916c0dd2920932691f63be8be9317b23548b6da"
+);
+const FORGET_PRUNE_RETAINED_MANIFEST: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/forget-prune-state/objects/manifest/fa/fa502652337a0db2c09fbe5d6916c0dd2920932691f63be8be9317b23548b6da"
+);
+const FORGET_PRUNE_RETAINED_INDEX: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/forget-prune-state/objects/index/17/173970a92ca87e28601637550571fdd7dc42d7d673c2a3b00709bc99ec0c8e10"
+);
+const FORGET_PRUNE_RETAINED_CHUNK: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/forget-prune-state/objects/chunk/33/3357bb277f6fa50b3762efb6284930137bdd5fb5e01cea053ce44f412d313c79"
+);
+const FORGET_PRUNE_PLAN: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/forget-prune-state/objects/prune-plan/e0/e0ab98bab38ae3654bf1a54813126d192fa5235797cf16942c692683cc01cec1"
+);
+const FORGET_PRUNE_COMPLETION: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/forget-prune-state/objects/prune-completion/e0/e0ab98bab38ae3654bf1a54813126d192fa5235797cf16942c692683cc01cec1"
 );
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -122,9 +167,47 @@ async fn load_snapshot_data_fixture() -> FakeObjectStore {
     store
 }
 
+async fn load_forget_prune_state_fixture() -> FakeObjectStore {
+    let store = FakeObjectStore::new();
+    for (key, bytes) in [
+        ("bootstrap", FORGET_PRUNE_BOOTSTRAP),
+        (FORGET_MARKER_OBJECT, FORGET_PRUNE_FORGET_MARKER),
+        (RETAINED_COMMIT_OBJECT, FORGET_PRUNE_RETAINED_COMMIT),
+        (RETAINED_MANIFEST_OBJECT, FORGET_PRUNE_RETAINED_MANIFEST),
+        (RETAINED_INDEX_OBJECT, FORGET_PRUNE_RETAINED_INDEX),
+        (RETAINED_CHUNK_OBJECT, FORGET_PRUNE_RETAINED_CHUNK),
+        (PRUNE_PLAN_OBJECT, FORGET_PRUNE_PLAN),
+        (PRUNE_COMPLETION_OBJECT, FORGET_PRUNE_COMPLETION),
+    ] {
+        store
+            .overwrite_for_tests(object_key(key), bytes.to_vec())
+            .await;
+    }
+    store
+}
+
+async fn load_pending_prune_plan_fixture() -> FakeObjectStore {
+    let store = FakeObjectStore::new();
+    for (key, bytes) in [
+        ("bootstrap", FORGET_PRUNE_BOOTSTRAP),
+        (FORGET_MARKER_OBJECT, FORGET_PRUNE_FORGET_MARKER),
+        (PRUNE_PLAN_OBJECT, FORGET_PRUNE_PLAN),
+    ] {
+        store
+            .overwrite_for_tests(object_key(key), bytes.to_vec())
+            .await;
+    }
+    store
+}
+
 fn snapshot_data_pipeline() -> BackupPipeline {
     BackupPipeline::new(BackupPipelineConfig::new(SNAPSHOT_DATA_REPOSITORY_ID))
         .expect("snapshot-data pipeline")
+}
+
+fn forget_prune_pipeline() -> BackupPipeline {
+    BackupPipeline::new(BackupPipelineConfig::new(FORGET_PRUNE_REPOSITORY_ID))
+        .expect("forget-prune pipeline")
 }
 
 fn decode_fixture_encrypted_object(bytes: &[u8]) -> EncryptedObject {
@@ -222,6 +305,40 @@ fn reencrypt_chunk_index_variant(
     mutate(&mut index);
     let mutated = serde_json::to_vec(&index).expect("mutated index json");
     let encrypted = encrypt_object(&key, &context, &mutated).expect("mutated index encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_prune_mark_value(
+    opened: &fileferry_core::OpenedRepository,
+    object_name: &str,
+    bytes: &[u8],
+    mutate: impl FnOnce(&mut Value),
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(KeyPurpose::PruneMark, FORGET_PRUNE_REPOSITORY_ID.as_bytes())
+        .expect("prune subkey");
+    let context = ObjectContext::new(ObjectKind::PruneMark, object_name).expect("prune context");
+    let plaintext = decrypt_object(&key, &context, &decode_fixture_encrypted_object(bytes))
+        .expect("fixture prune mark decrypts");
+    let mut value: Value = serde_json::from_slice(&plaintext).expect("fixture prune mark json");
+    mutate(&mut value);
+    let mutated = serde_json::to_vec(&value).expect("mutated prune mark json");
+    let encrypted = encrypt_object(&key, &context, &mutated).expect("mutated prune mark encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_prune_mark_plaintext(
+    opened: &fileferry_core::OpenedRepository,
+    object_name: &str,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(KeyPurpose::PruneMark, FORGET_PRUNE_REPOSITORY_ID.as_bytes())
+        .expect("prune subkey");
+    let context = ObjectContext::new(ObjectKind::PruneMark, object_name).expect("prune context");
+    let encrypted = encrypt_object(&key, &context, plaintext).expect("prune mark encrypts");
     encode_fixture_encrypted_object(encrypted)
 }
 
@@ -749,5 +866,377 @@ async fn snapshot_data_fixture_rejects_unsupported_schema_versions() {
             reason: "unsupported chunk index schema version",
             ..
         }
+    ));
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_reads_validates_and_checks_retained_snapshot() {
+    let store = load_forget_prune_state_fixture().await;
+    let opened = open_repository(&store, &secret(FORGET_PRUNE_PASSPHRASE))
+        .await
+        .expect("forget-prune fixture opens");
+    assert_eq!(opened.repository_id, FORGET_PRUNE_REPOSITORY_ID);
+
+    let pipeline = forget_prune_pipeline();
+    let forgotten = pipeline
+        .read_forgotten_snapshot_ids(&store)
+        .await
+        .expect("forget marker reads");
+    assert!(forgotten.contains(FORGOTTEN_SNAPSHOT_ID));
+
+    let plan = pipeline
+        .read_prune_plan_state(&store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect("prune plan reads");
+    assert_eq!(plan.repository_id, FORGET_PRUNE_REPOSITORY_ID);
+    assert_eq!(plan.plan_id, PRUNE_PLAN_ID);
+    assert_eq!(plan.candidate_objects.len(), 5);
+    assert!(
+        plan.candidate_objects
+            .iter()
+            .any(|object| object.object_key == FORGET_MARKER_OBJECT
+                && object.kind == PruneObjectKind::ForgetMarker)
+    );
+
+    let completion = pipeline
+        .read_prune_completion_state(&store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect("prune completion reads");
+    assert_eq!(completion.repository_id, FORGET_PRUNE_REPOSITORY_ID);
+    assert_eq!(completion.plan_id, PRUNE_PLAN_ID);
+    assert_eq!(completion.candidate_objects, plan.candidate_objects.len());
+    assert_eq!(completion.deleted_objects, plan.candidate_objects.len());
+    assert_eq!(completion.missing_objects, 0);
+
+    let manifests = pipeline
+        .read_committed_snapshot_manifests(&store, &opened.master_key)
+        .await
+        .expect("retained committed snapshot reads");
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].snapshot_id, RETAINED_SNAPSHOT_ID);
+
+    let check = pipeline
+        .check_repository_with_options(&store, &opened.master_key, CheckRepositoryOptions::full())
+        .await
+        .expect("retained repository data checks");
+    assert_eq!(check.repository_id, FORGET_PRUNE_REPOSITORY_ID);
+    assert_eq!(check.errors, Vec::new());
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_malformed_forget_marker() {
+    let store = load_forget_prune_state_fixture().await;
+    store
+        .overwrite_for_tests(object_key(FORGET_MARKER_OBJECT), b"not-json".to_vec())
+        .await;
+
+    let error = forget_prune_pipeline()
+        .read_forgotten_snapshot_ids(&store)
+        .await
+        .expect_err("malformed forget marker is rejected");
+
+    assert!(matches!(error, CoreError::ForgetMarkerDecode { .. }));
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_forget_marker_identity_and_schema_mismatches() {
+    let unsupported_store = load_forget_prune_state_fixture().await;
+    let mut marker: Value =
+        serde_json::from_slice(FORGET_PRUNE_FORGET_MARKER).expect("fixture forget marker json");
+    marker["schema_version"] = json!(999);
+    unsupported_store
+        .overwrite_for_tests(
+            object_key(FORGET_MARKER_OBJECT),
+            serde_json::to_vec(&marker).expect("unsupported forget marker json"),
+        )
+        .await;
+    let unsupported = forget_prune_pipeline()
+        .read_forgotten_snapshot_ids(&unsupported_store)
+        .await
+        .expect_err("unsupported forget marker schema is rejected");
+    assert!(matches!(
+        unsupported,
+        CoreError::InvalidForgetMarker {
+            reason: "unsupported forget marker schema version",
+            ..
+        }
+    ));
+
+    let mismatch_store = load_forget_prune_state_fixture().await;
+    let mut marker: Value =
+        serde_json::from_slice(FORGET_PRUNE_FORGET_MARKER).expect("fixture forget marker json");
+    marker["manifest_object"] = json!(RETAINED_MANIFEST_OBJECT);
+    mismatch_store
+        .overwrite_for_tests(
+            object_key(FORGET_MARKER_OBJECT),
+            serde_json::to_vec(&marker).expect("mismatched forget marker json"),
+        )
+        .await;
+    let mismatch = forget_prune_pipeline()
+        .read_forgotten_snapshot_ids(&mismatch_store)
+        .await
+        .expect_err("forget marker metadata identity mismatch is rejected");
+    assert!(matches!(
+        mismatch,
+        CoreError::InvalidForgetMarker {
+            reason: "forget marker manifest object does not match snapshot id",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_malformed_prune_framing_and_metadata() {
+    let store = load_forget_prune_state_fixture().await;
+    let opened = open_repository(&store, &secret(FORGET_PRUNE_PASSPHRASE))
+        .await
+        .expect("forget-prune fixture opens");
+    let pipeline = forget_prune_pipeline();
+
+    store
+        .overwrite_for_tests(object_key(PRUNE_PLAN_OBJECT), b"not-json".to_vec())
+        .await;
+    let framing_error = pipeline
+        .read_prune_plan_state(&store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("malformed prune plan frame is rejected");
+    assert!(matches!(framing_error, CoreError::PrunePlanDecode { .. }));
+
+    store
+        .overwrite_for_tests(
+            object_key(PRUNE_PLAN_OBJECT),
+            reencrypt_prune_mark_plaintext(
+                &opened,
+                PRUNE_PLAN_OBJECT,
+                br#"{"schema_version":"bad"}"#,
+            ),
+        )
+        .await;
+    let metadata_error = pipeline
+        .read_prune_plan_state(&store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("malformed decrypted prune plan metadata is rejected");
+    assert!(matches!(metadata_error, CoreError::PrunePlanDecode { .. }));
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_tampered_prune_plan_and_completion() {
+    let opened_store = load_forget_prune_state_fixture().await;
+    let opened = open_repository(&opened_store, &secret(FORGET_PRUNE_PASSPHRASE))
+        .await
+        .expect("forget-prune fixture opens");
+    let pipeline = forget_prune_pipeline();
+
+    let plan_store = load_forget_prune_state_fixture().await;
+    plan_store
+        .overwrite_for_tests(
+            object_key(PRUNE_PLAN_OBJECT),
+            tamper_fixture_ciphertext(FORGET_PRUNE_PLAN),
+        )
+        .await;
+    let plan_error = pipeline
+        .read_prune_plan_state(&plan_store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("tampered prune plan authentication fails");
+    assert!(matches!(
+        plan_error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == PRUNE_PLAN_OBJECT
+    ));
+
+    let completion_store = load_forget_prune_state_fixture().await;
+    completion_store
+        .overwrite_for_tests(
+            object_key(PRUNE_COMPLETION_OBJECT),
+            tamper_fixture_ciphertext(FORGET_PRUNE_COMPLETION),
+        )
+        .await;
+    let completion_error = pipeline
+        .read_prune_completion_state(&completion_store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("tampered prune completion authentication fails");
+    assert!(matches!(
+        completion_error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == PRUNE_COMPLETION_OBJECT
+    ));
+
+    let resume_error = pipeline
+        .prune_repository(
+            &completion_store,
+            &opened.master_key,
+            PruneRepositoryOptions::sweep(),
+        )
+        .await
+        .expect_err("tampered completion is rejected during prune recovery scan");
+    assert!(matches!(
+        resume_error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == PRUNE_COMPLETION_OBJECT
+    ));
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_wrong_authenticated_name_or_kind() {
+    let store = load_forget_prune_state_fixture().await;
+    let opened = open_repository(&store, &secret(FORGET_PRUNE_PASSPHRASE))
+        .await
+        .expect("forget-prune fixture opens");
+    let pipeline = forget_prune_pipeline();
+
+    let wrong_plan_id = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let wrong_plan_object =
+        "objects/prune-plan/ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    store
+        .overwrite_for_tests(object_key(wrong_plan_object), FORGET_PRUNE_PLAN.to_vec())
+        .await;
+    let wrong_name_error = pipeline
+        .read_prune_plan_state(&store, &opened.master_key, wrong_plan_id)
+        .await
+        .expect_err("prune plan bytes under the wrong object name fail authentication");
+    assert!(matches!(
+        wrong_name_error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == wrong_plan_object
+    ));
+
+    let prune_key = opened
+        .master_key
+        .derive_subkey(KeyPurpose::PruneMark, FORGET_PRUNE_REPOSITORY_ID.as_bytes())
+        .expect("prune subkey");
+    let wrong_kind_context =
+        ObjectContext::new(ObjectKind::Index, PRUNE_PLAN_OBJECT).expect("wrong-kind context");
+    let wrong_kind = decrypt_object(
+        &prune_key,
+        &wrong_kind_context,
+        &decode_fixture_encrypted_object(FORGET_PRUNE_PLAN),
+    );
+    assert!(wrong_kind.is_err());
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_prune_metadata_identity_mismatches() {
+    let plan_store = load_forget_prune_state_fixture().await;
+    let opened = open_repository(&plan_store, &secret(FORGET_PRUNE_PASSPHRASE))
+        .await
+        .expect("forget-prune fixture opens");
+    let pipeline = forget_prune_pipeline();
+
+    plan_store
+        .overwrite_for_tests(
+            object_key(PRUNE_PLAN_OBJECT),
+            reencrypt_prune_mark_value(&opened, PRUNE_PLAN_OBJECT, FORGET_PRUNE_PLAN, |plan| {
+                plan["repository_id"] =
+                    json!("0000000000000000000000000000000000000000000000000000000000000000");
+            }),
+        )
+        .await;
+    let plan_error = pipeline
+        .read_prune_plan_state(&plan_store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("prune plan repository mismatch is rejected");
+    assert!(matches!(
+        plan_error,
+        CoreError::InvalidPrunePlan {
+            reason: "prune plan repository id does not match this repository",
+            ..
+        }
+    ));
+
+    let completion_store = load_forget_prune_state_fixture().await;
+    completion_store
+        .overwrite_for_tests(
+            object_key(PRUNE_COMPLETION_OBJECT),
+            reencrypt_prune_mark_value(
+                &opened,
+                PRUNE_COMPLETION_OBJECT,
+                FORGET_PRUNE_COMPLETION,
+                |completion| {
+                    completion["plan_object"] = json!(
+                        "objects/prune-plan/ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    );
+                },
+            ),
+        )
+        .await;
+    let completion_error = pipeline
+        .read_prune_completion_state(&completion_store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("prune completion plan-object mismatch is rejected");
+    assert!(matches!(
+        completion_error,
+        CoreError::InvalidPruneCompletion {
+            reason: "prune completion plan object does not match plan id",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_unsupported_prune_versions() {
+    let plan_store = load_forget_prune_state_fixture().await;
+    let opened = open_repository(&plan_store, &secret(FORGET_PRUNE_PASSPHRASE))
+        .await
+        .expect("forget-prune fixture opens");
+    let pipeline = forget_prune_pipeline();
+
+    plan_store
+        .overwrite_for_tests(
+            object_key(PRUNE_PLAN_OBJECT),
+            reencrypt_prune_mark_value(&opened, PRUNE_PLAN_OBJECT, FORGET_PRUNE_PLAN, |plan| {
+                plan["schema_version"] = json!(999);
+            }),
+        )
+        .await;
+    let plan_schema_error = pipeline
+        .read_prune_plan_state(&plan_store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("unsupported prune plan schema is rejected");
+    assert!(matches!(
+        plan_schema_error,
+        CoreError::InvalidPrunePlan {
+            reason: "unsupported prune plan schema version",
+            ..
+        }
+    ));
+
+    let completion_store = load_forget_prune_state_fixture().await;
+    completion_store
+        .overwrite_for_tests(
+            object_key(PRUNE_COMPLETION_OBJECT),
+            reencrypt_prune_mark_value(
+                &opened,
+                PRUNE_COMPLETION_OBJECT,
+                FORGET_PRUNE_COMPLETION,
+                |completion| {
+                    completion["format_version"] = json!(999);
+                },
+            ),
+        )
+        .await;
+    let completion_format_error = pipeline
+        .read_prune_completion_state(&completion_store, &opened.master_key, PRUNE_PLAN_ID)
+        .await
+        .expect_err("unsupported prune completion format is rejected");
+    assert!(matches!(
+        completion_format_error,
+        CoreError::InvalidPruneCompletion {
+            reason: "unsupported prune completion format version",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn forget_prune_state_fixture_rejects_stale_pending_prune_plan_replay() {
+    let store = load_pending_prune_plan_fixture().await;
+    let opened = open_repository(&store, &secret(FORGET_PRUNE_PASSPHRASE))
+        .await
+        .expect("forget-prune fixture opens");
+
+    let error = forget_prune_pipeline()
+        .prune_repository(&store, &opened.master_key, PruneRepositoryOptions::sweep())
+        .await
+        .expect_err("stale pending prune plan is rejected before deleting objects");
+
+    assert!(matches!(
+        error,
+        CoreError::PruneRepositoryStateChanged { .. }
     ));
 }

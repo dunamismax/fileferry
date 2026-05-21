@@ -686,19 +686,21 @@ but writes no prune state and deletes nothing. A real prune writes an
 encrypted durable prune plan under `objects/prune-plan/` before deleting
 candidates, then writes an encrypted completion object under
 `objects/prune-completion/` after the sweep. If a previous plan has no
-completion object, the next real prune resumes it. Missing candidate objects
-during sweep are reported as already gone, not as corruption. Before and
-during sweep, prune compares the current commit/forget marker state against
-the marked plan, allowing for objects already deleted by that same plan; a
-new commit or forget marker aborts the sweep with exit code `8` and
-`repository_prune_state_changed`. Malformed prune state fails closed as an
-integrity failure with exit code `6`. JSON and JSONL output report candidate,
-retained, deleted, and missing objects plus byte counts where object bytes
-were available. JSONL output emits `plan`, `mark`, `verify_reachability`,
-`sweep`, and `complete` progress phases. S3-compatible prune uses the same
-encrypted object-store prune pipeline and does not require rename operations
-for correctness; provider-specific lifecycle policies and arbitrary S3 repair
-remain out of scope.
+completion object, the next real prune resumes it. If a completion object
+exists for a marked plan, prune authenticates and validates that completion
+state before treating the plan as complete. Missing candidate objects during
+sweep are reported as already gone, not as corruption. Before and during
+sweep, prune compares the current commit/forget marker state against the
+marked plan, allowing for objects already deleted by that same plan; a new
+commit or forget marker aborts the sweep with exit code `8` and
+`repository_prune_state_changed`. Malformed prune plan or completion state
+fails closed as an integrity failure with exit code `6`. JSON and JSONL output
+report candidate, retained, deleted, and missing objects plus byte counts
+where object bytes were available. JSONL output emits `plan`, `mark`,
+`verify_reachability`, `sweep`, and `complete` progress phases.
+S3-compatible prune uses the same encrypted object-store prune pipeline and
+does not require rename operations for correctness; provider-specific
+lifecycle policies and arbitrary S3 repair remain out of scope.
 
 `ferry snapshots` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

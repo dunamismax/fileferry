@@ -242,6 +242,20 @@ manifest, index, and chunk ciphertext tampering; rejects wrong object names and
 kinds through AEAD context binding; rejects manifest and index metadata identity
 mismatches; and rejects unsupported commit, manifest, and index schema versions.
 
+Current forget/prune-state fixture coverage includes one initialized repository
+after a prune sweep, plus the captured plaintext forget marker that the sweep
+deleted. Focused tests prove that current code reads the forget marker,
+authenticates and validates encrypted prune plan and completion state, checks
+the retained post-prune snapshot data, rejects malformed forget-marker JSON,
+rejects forget-marker schema and metadata identity mismatches, rejects malformed
+prune encrypted-object framing and decrypted metadata, rejects prune plan and
+completion ciphertext tampering, rejects wrong object names and authenticated
+kinds through AEAD context binding, rejects prune metadata identity mismatches,
+rejects unsupported prune schemas and format versions, rejects tampered
+completion state during prune recovery scanning, and rejects stale pending
+prune-plan replay when current commit/forget marker state no longer matches the
+marked plan.
+
 ## Key Rotation
 
 Key rotation has two different meanings:

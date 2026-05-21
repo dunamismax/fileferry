@@ -2,9 +2,10 @@
 
 FileFerry's repository format is original to FileFerry. Format v0 is not frozen.
 Initial compatibility fixtures exist for narrow bootstrap/key-slot and
-recovery-export slices plus one committed snapshot-data slice. This document
-defines the initial shape needed for implementation work; byte-level fixtures
-become the compatibility contract only after the first intentional freeze.
+recovery-export, committed snapshot-data, and forget/prune-state slices. This
+document defines the initial shape needed for implementation work; byte-level
+fixtures become the compatibility contract only after the first intentional
+freeze.
 
 ## Format Principles
 
@@ -339,6 +340,9 @@ Current implementation status:
   `objects/policy/`, `objects/upload/`, prune state, or unknown objects.
 - Prune plan and completion objects are encrypted and authenticated as
   `prune-mark` objects with the repository prune subkey.
+- Current readers validate prune plan and prune completion schema, magic,
+  repository id, format version, object-name identity, and plan identity before
+  using prune state for recovery decisions.
 - S3-compatible prune relies on immutable prune state, idempotent object
   deletes, and prefix listing. It does not require rename operations for
   correctness and does not use provider-specific lifecycle policies.
@@ -376,11 +380,15 @@ Initial golden fixtures now exist under:
 - `tests/fixtures/repository-format/v0/snapshot-data/` for one initialized
   repository containing one plaintext commit marker, one encrypted snapshot
   manifest, one encrypted chunk index, and two encrypted chunk objects.
+- `tests/fixtures/repository-format/v0/forget-prune-state/` for one initialized
+  repository after a prune sweep, plus the captured forget marker that the
+  sweep deleted. The fixture covers one plaintext forget marker, one encrypted
+  prune plan, one encrypted prune completion object, and the retained snapshot
+  data needed to check the post-prune repository.
 
 These are narrow compatibility-fixture slices for format v0. They do not freeze
-all of format v0. Forget markers, prune state, migration fixtures,
-policy/config objects, upload state, and full cross-version compatibility
-remain open Milestone H work.
+all of format v0. Migration fixtures, policy/config objects, upload state, and
+full cross-version compatibility remain open Milestone H work.
 
 For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 
@@ -415,6 +423,19 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
   and the exact object name. The decrypted bytes are zstd-compressed chunk
   payloads whose decompressed bytes must match the keyed chunk identity recorded
   in the manifest and index.
+- `forget-prune-state/forgets/<snapshot-id>`: `schema_version`, `snapshot_id`,
+  `manifest_object`, `commit_object`, and `forgotten_at_unix_seconds`.
+- `forget-prune-state/objects/prune-plan/<prefix>/<plan-id>`: encrypted-object
+  `algorithm`, `nonce`, and `ciphertext`, authenticated as object kind
+  `prune-mark` and the exact object name; decrypted `schema_version`, `magic`,
+  `format_version`, `repository_id`, `plan_id`, `created_at_unix_seconds`,
+  `commit_objects`, `forget_marker_objects`, `candidate_objects`, and
+  `retained_objects`.
+- `forget-prune-state/objects/prune-completion/<prefix>/<plan-id>`:
+  encrypted-object `algorithm`, `nonce`, and `ciphertext`, authenticated as
+  object kind `prune-mark` and the exact object name; decrypted
+  `schema_version`, `magic`, `format_version`, `repository_id`, `plan_id`,
+  `plan_object`, `completed_at_unix_seconds`, object counts, and byte counts.
 
 The fixture passphrases are test-only unlock inputs. They are not production
 secrets and do not imply recovery import. Tests prove current code can read the
@@ -433,3 +454,14 @@ framing and decrypted manifest metadata, reject encrypted manifest/index/chunk
 tampering, reject wrong object names and kinds through AEAD context binding,
 reject manifest and index metadata identity mismatches, and reject unsupported
 commit, manifest, and index schema versions.
+The forget/prune-state fixture tests prove current code can unlock the fixture,
+read the forget marker, authenticate and validate prune plan and completion
+state, check the retained post-prune snapshot data, reject malformed forget
+marker JSON, reject forget marker schema and identity mismatches, reject
+malformed prune encrypted-object framing and decrypted metadata, reject prune
+plan and completion ciphertext tampering, reject wrong object names and
+authenticated kinds through AEAD context binding, reject prune metadata identity
+mismatches, reject unsupported prune schemas and format versions, reject a
+tampered completion object during prune recovery scanning, and reject stale
+pending prune-plan replay when current commit/forget marker state no longer
+matches the marked plan.

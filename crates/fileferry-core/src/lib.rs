@@ -290,6 +290,19 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("prune completion {key} could not be decoded")]
+    PruneCompletionDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("prune completion {key} is invalid: {reason}")]
+    InvalidPruneCompletion {
+        key: ObjectKey,
+        reason: &'static str,
+    },
+
     #[error("repository commit or forget state changed after prune plan {plan_id} was marked")]
     PruneRepositoryStateChanged { plan_id: String },
 
@@ -705,6 +718,37 @@ pub struct RepositoryPruneResult {
     pub missing_object_count: usize,
     pub candidate_bytes: u64,
     pub retained_bytes: u64,
+    pub deleted_bytes: u64,
+    pub missing_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrunePlanState {
+    pub schema_version: u16,
+    pub magic: String,
+    pub format_version: u16,
+    pub repository_id: String,
+    pub plan_id: String,
+    pub created_at_unix_seconds: u64,
+    pub commit_objects: Vec<String>,
+    pub forget_marker_objects: Vec<String>,
+    pub candidate_objects: Vec<PruneObject>,
+    pub retained_objects: Vec<PruneObject>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PruneCompletionState {
+    pub schema_version: u16,
+    pub magic: String,
+    pub format_version: u16,
+    pub repository_id: String,
+    pub plan_id: String,
+    pub plan_object: String,
+    pub completed_at_unix_seconds: u64,
+    pub candidate_objects: usize,
+    pub deleted_objects: usize,
+    pub missing_objects: usize,
+    pub candidate_bytes: u64,
     pub deleted_bytes: u64,
     pub missing_bytes: u64,
 }
@@ -2670,16 +2714,91 @@ impl BackupPipeline {
                     })?;
             plan.validate(&plan_key, &self.config.repository_id)?;
             let completion_key = prune_completion_object_key(&plan.plan_id)?;
-            if !store
+            if store
                 .exists(&completion_key)
                 .await
                 .map_err(|source| CoreError::Storage { source })?
             {
+                let completion = self
+                    .read_prune_completion_object(store, prune_key, &completion_key)
+                    .await?;
+                completion.validate_for_plan(&completion_key, &self.config.repository_id, &plan)?;
+            } else {
                 return Ok(Some((plan, plan_key)));
             }
         }
 
         Ok(None)
+    }
+
+    pub async fn read_prune_plan_state(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        plan_id: &str,
+    ) -> CoreResult<PrunePlanState> {
+        let prune_key = self.derive_prune_key(master_key)?;
+        let plan_key = prune_plan_object_key(plan_id)?;
+        let plan = self
+            .read_prune_plan_object(store, &prune_key, &plan_key)
+            .await?;
+        plan.validate(&plan_key, &self.config.repository_id)?;
+        Ok(PrunePlanState::from(plan))
+    }
+
+    pub async fn read_prune_completion_state(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        plan_id: &str,
+    ) -> CoreResult<PruneCompletionState> {
+        let prune_key = self.derive_prune_key(master_key)?;
+        let completion_key = prune_completion_object_key(plan_id)?;
+        let completion = self
+            .read_prune_completion_object(store, &prune_key, &completion_key)
+            .await?;
+        completion.validate(&completion_key, &self.config.repository_id)?;
+        Ok(PruneCompletionState::from(completion))
+    }
+
+    fn derive_prune_key(&self, master_key: &MasterKey) -> CoreResult<fileferry_crypto::Subkey> {
+        master_key
+            .derive_subkey(KeyPurpose::PruneMark, self.config.repository_id.as_bytes())
+            .map_err(|source| CoreError::Encryption { source })
+    }
+
+    async fn read_prune_plan_object(
+        &self,
+        store: &dyn ObjectStore,
+        prune_key: &fileferry_crypto::Subkey,
+        plan_key: &ObjectKey,
+    ) -> CoreResult<StoredPrunePlan> {
+        read_encrypted_json_object(store, prune_key, ObjectKind::PruneMark, plan_key)
+            .await
+            .map_err(|error| match error {
+                CoreError::ObjectDecode { key, source }
+                | CoreError::MetadataDecode { key, source } => {
+                    CoreError::PrunePlanDecode { key, source }
+                }
+                other => other,
+            })
+    }
+
+    async fn read_prune_completion_object(
+        &self,
+        store: &dyn ObjectStore,
+        prune_key: &fileferry_crypto::Subkey,
+        completion_key: &ObjectKey,
+    ) -> CoreResult<StoredPruneCompletion> {
+        read_encrypted_json_object(store, prune_key, ObjectKind::PruneMark, completion_key)
+            .await
+            .map_err(|error| match error {
+                CoreError::ObjectDecode { key, source }
+                | CoreError::MetadataDecode { key, source } => {
+                    CoreError::PruneCompletionDecode { key, source }
+                }
+                other => other,
+            })
     }
 
     async fn read_snapshot_commit(
@@ -3814,6 +3933,23 @@ impl StoredPrunePlan {
     }
 }
 
+impl From<StoredPrunePlan> for PrunePlanState {
+    fn from(plan: StoredPrunePlan) -> Self {
+        Self {
+            schema_version: plan.schema_version,
+            magic: plan.magic,
+            format_version: plan.format_version,
+            repository_id: plan.repository_id,
+            plan_id: plan.plan_id,
+            created_at_unix_seconds: plan.created_at_unix_seconds,
+            commit_objects: plan.commit_objects,
+            forget_marker_objects: plan.forget_marker_objects,
+            candidate_objects: plan.candidate_objects,
+            retained_objects: plan.retained_objects,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct StoredPruneCompletion {
     schema_version: u16,
@@ -3829,6 +3965,130 @@ struct StoredPruneCompletion {
     candidate_bytes: u64,
     deleted_bytes: u64,
     missing_bytes: u64,
+}
+
+impl StoredPruneCompletion {
+    fn validate(&self, key: &ObjectKey, repository_id: &str) -> CoreResult<()> {
+        if self.schema_version != 0 {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "unsupported prune completion schema version",
+            });
+        }
+        if self.magic != REPOSITORY_MAGIC {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion magic is not recognized",
+            });
+        }
+        if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "unsupported prune completion format version",
+            });
+        }
+        if self.repository_id != repository_id {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion repository id does not match this repository",
+            });
+        }
+        if !repository_id_is_valid(&self.repository_id) || !prune_plan_id_is_valid(&self.plan_id) {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion plan id is invalid",
+            });
+        }
+        if prune_completion_object_key(&self.plan_id)? != *key {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion object key does not match plan id",
+            });
+        }
+        if self.plan_object != prune_plan_object_key(&self.plan_id)?.as_str() {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion plan object does not match plan id",
+            });
+        }
+        if self
+            .deleted_objects
+            .checked_add(self.missing_objects)
+            .filter(|total| *total == self.candidate_objects)
+            .is_none()
+        {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion object counts do not match candidates",
+            });
+        }
+        if self
+            .deleted_bytes
+            .checked_add(self.missing_bytes)
+            .filter(|total| *total == self.candidate_bytes)
+            .is_none()
+        {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion byte counts do not match candidates",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_for_plan(
+        &self,
+        key: &ObjectKey,
+        repository_id: &str,
+        plan: &StoredPrunePlan,
+    ) -> CoreResult<()> {
+        self.validate(key, repository_id)?;
+        if self.plan_id != plan.plan_id {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion plan id does not match marked plan",
+            });
+        }
+        if self.plan_object != prune_plan_object_key(&plan.plan_id)?.as_str() {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion plan object does not match marked plan",
+            });
+        }
+        if self.candidate_objects != plan.candidate_objects.len() {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion candidate count does not match marked plan",
+            });
+        }
+        if self.candidate_bytes != sum_object_bytes(&plan.candidate_objects) {
+            return Err(CoreError::InvalidPruneCompletion {
+                key: key.clone(),
+                reason: "prune completion candidate bytes do not match marked plan",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl From<StoredPruneCompletion> for PruneCompletionState {
+    fn from(completion: StoredPruneCompletion) -> Self {
+        Self {
+            schema_version: completion.schema_version,
+            magic: completion.magic,
+            format_version: completion.format_version,
+            repository_id: completion.repository_id,
+            plan_id: completion.plan_id,
+            plan_object: completion.plan_object,
+            completed_at_unix_seconds: completion.completed_at_unix_seconds,
+            candidate_objects: completion.candidate_objects,
+            deleted_objects: completion.deleted_objects,
+            missing_objects: completion.missing_objects,
+            candidate_bytes: completion.candidate_bytes,
+            deleted_bytes: completion.deleted_bytes,
+            missing_bytes: completion.missing_bytes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

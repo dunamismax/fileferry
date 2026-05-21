@@ -453,6 +453,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidForgetMarker { .. }
         | CoreError::PrunePlanDecode { .. }
         | CoreError::InvalidPrunePlan { .. }
+        | CoreError::PruneCompletionDecode { .. }
+        | CoreError::InvalidPruneCompletion { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::ObjectDecode { .. }
         | CoreError::ObjectAuthentication { .. }
@@ -1245,6 +1247,8 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::InvalidForgetMarker { .. } => "repository_forget_marker_invalid",
         CoreError::PrunePlanDecode { .. } => "repository_prune_plan_decode_failed",
         CoreError::InvalidPrunePlan { .. } => "repository_prune_plan_invalid",
+        CoreError::PruneCompletionDecode { .. } => "repository_prune_completion_decode_failed",
+        CoreError::InvalidPruneCompletion { .. } => "repository_prune_completion_invalid",
         CoreError::PruneRepositoryStateChanged { .. } => "repository_prune_state_changed",
         CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
         CoreError::RepositoryNotInitialized => "repository_not_initialized",
@@ -1430,6 +1434,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         | CoreError::InvalidForgetMarker { key, .. }
         | CoreError::PrunePlanDecode { key, .. }
         | CoreError::InvalidPrunePlan { key, .. }
+        | CoreError::PruneCompletionDecode { key, .. }
+        | CoreError::InvalidPruneCompletion { key, .. }
         | CoreError::RepositoryCheckMissingObject { key }
         | CoreError::RepositoryReferencedObjectMissing { key } => Some(key.as_str().to_owned()),
         CoreError::MissingChunkIndexEntry { object_key, .. }

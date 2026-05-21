@@ -384,6 +384,16 @@ Current status:
   framing, malformed decrypted manifest metadata, encrypted manifest/index/chunk
   tamper, wrong object name/kind context, manifest/index metadata identity
   mismatches, and unsupported commit/manifest/index schema versions.
+- Continued with a forget/prune-state fixture slice. Golden fixture bytes now
+  exist for one plaintext forget marker, one encrypted prune plan, one
+  encrypted prune completion object, and the retained post-prune snapshot data.
+  Focused tests prove current code can read, authenticate, and validate those
+  bytes and reject malformed forget marker JSON, forget marker identity and
+  schema mismatches, malformed prune encrypted framing and decrypted metadata,
+  prune plan/completion tamper, wrong object name/kind context, prune metadata
+  identity mismatches, unsupported prune schema/format versions, tampered
+  completion state during recovery scanning, and stale pending prune-plan
+  replay.
 
 These slices do not freeze the rest of format v0.
 
@@ -957,6 +967,30 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with the forget/prune-state fixture
+  slice. Added golden fixture bytes under
+  `tests/fixtures/repository-format/v0/forget-prune-state/` for one initialized
+  repository after a prune sweep, plus the captured plaintext forget marker
+  deleted by that sweep. The fixture covers one forget marker, one encrypted
+  prune plan, one encrypted prune completion object, and retained post-prune
+  snapshot data. Added focused `fileferry-core` fixture tests that unlock the
+  fixture, read forgotten snapshot ids, authenticate and validate prune plan and
+  completion state, check the retained snapshot data, reject malformed forget
+  marker JSON, reject forget marker schema and identity mismatches, reject
+  malformed prune encrypted-object framing and decrypted metadata, reject prune
+  plan/completion ciphertext tampering, reject wrong object names and
+  authenticated kinds through AEAD context binding, reject prune metadata
+  identity mismatches, reject unsupported prune schemas and format versions,
+  reject tampered completion state during prune recovery scanning, and reject a
+  stale pending prune-plan replay when current commit/forget marker state no
+  longer matches the marked plan. Tightened prune recovery scanning so a
+  completion object must decrypt and validate before a marked plan is treated as
+  complete, added prune completion error-code mapping, and updated
+  `docs/repository-format.md`, `docs/security.md`, and
+  `docs/cli-contract.md` to describe only this proven slice. This does not
+  freeze migration behavior, policy/config objects, upload state, or all of
+  format v0. Verified the focused test with
+  `cargo test -p fileferry-core --test repository_format_fixtures -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with the committed snapshot-data fixture
   slice. Added golden fixture bytes under
   `tests/fixtures/repository-format/v0/snapshot-data/` for one initialized
