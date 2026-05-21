@@ -67,9 +67,10 @@ Last reviewed: 2026-05-21.
   creation/birth timestamp metadata warnings, captured Unix permission
   metadata, captured Unix ownership metadata, selected symlink timestamp
   metadata, captured Unix symlink metadata, selected reportable xattr status
-  warnings when xattrs were observed or xattr capture was denied, and metadata
-  planning warnings, returns partial-success exit code `10` when metadata
-  warnings are produced, and exposes tested
+  warnings when xattrs were observed or xattr capture was denied, selected ACL
+  status warnings when ACLs were observed or ACL capture was denied in
+  constructed or future manifests, and metadata planning warnings, returns
+  partial-success exit code `10` when metadata warnings are produced, and exposes tested
   human, JSON, and JSONL-safe output paths. Authenticated manifests with
   invalid entry topology are rejected as integrity failures before restore
   destination writes.
@@ -196,11 +197,13 @@ Last reviewed: 2026-05-21.
   kind, source platform, regular-file size, timestamps where exposed by `std`,
   symlink targets, Unix mode/ownership where available, and reportable xattr
   presence/count status where the platform and filesystem expose xattr
-  listing. It also has focused tests for path normalization facts, Windows
-  reserved-name detection, observed case behavior, Unix symlink capture, xattr
-  status capture where available, long-path metadata capture where the
-  filesystem allows it, and permission-denied metadata reads where the
-  platform exposes them.
+  listing, plus ACL status scaffolding that currently records unsupported
+  during normal capture. It also has focused tests for path normalization
+  facts, Windows reserved-name detection, observed case behavior, Unix symlink
+  capture, xattr status capture where available, backward-compatible extension
+  metadata deserialization, long-path metadata capture where the filesystem
+  allows it, and permission-denied metadata reads where the platform exposes
+  them.
 - `fileferry-testkit` has a tested in-memory fake object store for future
   repository and pipeline tests.
 - `fileferry-core` has a tested deterministic source walker with wildcard
@@ -222,7 +225,8 @@ Last reviewed: 2026-05-21.
   reporting, selected regular-file and directory creation/birth timestamp
   not-restored warnings, captured Unix ownership verification, selected
   symlink metadata not-restored warnings, selected xattr status not-restored
-  warnings, metadata planning, and optional byte-for-byte verification.
+  warnings, selected ACL status not-restored warnings from constructed or
+  future manifests, metadata planning, and optional byte-for-byte verification.
 - `fileferry-core` writes commit markers after encrypted snapshot manifests,
   can discover committed manifests from those markers, and has tested snapshot
   summary and immediate-entry listing primitives for future `snapshots` and
@@ -251,6 +255,8 @@ metadata warnings because they are not restored yet.
 Reportable xattr presence/count status is captured where the platform and
 filesystem expose xattr listing, but xattr names and values are reported as
 metadata warnings when selected because they are not restored yet.
+ACL status scaffolding is present, but normal capture currently records ACL
+status as unsupported and does not read or restore ACL contents.
 S3-compatible repository URLs are parsed through the shared repository
 resolver, and S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`,
 `check`, `forget`, `prune`, and key-management commands use the existing
@@ -880,6 +886,24 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Completed a Milestone G ACL status scaffolding and restore
+  warning slice without claiming ACL value capture, ACL restoration, or broader
+  platform support. New manifests now include an ACL status field under
+  encrypted platform extensions; normal capture records it as unsupported until
+  platform-specific ACL capture is implemented and verified. Restore planning
+  carries selected ACL status from constructed or future manifests, counts
+  selected captured/denied ACL status in `metadata_planned`, and emits
+  structured source-platform namespace / `acls` metadata warnings when ACLs
+  were observed or ACL capture was denied because this version does not restore
+  ACL contents. Older extension metadata that only contains xattr status still
+  deserializes with ACL status defaulted to unsupported. Updated `README.md`,
+  `docs/cli-contract.md`, `docs/platform-metadata.md`, and this file. No live
+  S3 gates were enabled in this session. Verified with `cargo test -p
+  fileferry-platform acl -- --nocapture`, `cargo test -p fileferry-core
+  plan_unrestored_platform_extensions_warns_for_acl_status -- --nocapture`,
+  `cargo test -p fileferry-platform -p fileferry-core -p fileferry-cli
+  --no-fail-fast`, `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check`.
 - 2026-05-21 - Completed a Milestone G reportable xattr status warning slice
   without claiming broader platform support or full xattr restoration. New
   manifests now record reportable xattr presence/count status where the

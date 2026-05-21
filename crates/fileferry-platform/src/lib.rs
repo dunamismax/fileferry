@@ -35,10 +35,11 @@ pub enum EntryKind {
     Other,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataValue<T> {
     Captured(T),
+    #[default]
     Unsupported,
     Denied(String),
 }
@@ -101,13 +102,17 @@ pub struct UnixMetadata {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct MetadataExtensions {
+    #[serde(default)]
     pub xattrs: MetadataValue<MetadataFieldSummary>,
+    #[serde(default)]
+    pub acls: MetadataValue<MetadataFieldSummary>,
 }
 
 impl Default for MetadataExtensions {
     fn default() -> Self {
         Self {
             xattrs: MetadataValue::Unsupported,
+            acls: MetadataValue::Unsupported,
         }
     }
 }
@@ -283,6 +288,7 @@ fn metadata_value_from_time(result: io::Result<SystemTime>) -> MetadataValue<Tim
 fn metadata_extensions(path: &Path) -> MetadataExtensions {
     MetadataExtensions {
         xattrs: xattr_summary(path),
+        acls: MetadataValue::Unsupported,
     }
 }
 
@@ -378,6 +384,7 @@ mod tests {
             metadata.extensions.xattrs,
             MetadataValue::Captured(MetadataFieldSummary { .. }) | MetadataValue::Unsupported
         ));
+        assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
     }
 
     #[test]
@@ -406,6 +413,31 @@ mod tests {
 
         assert_eq!(metadata.source_platform, PlatformKind::Unknown);
         assert_eq!(metadata.extensions, MetadataExtensions::default());
+    }
+
+    #[test]
+    fn deserializes_xattr_only_extensions_with_default_acl_status() {
+        let metadata: EntryMetadata = serde_json::from_str(
+            r#"{
+                "kind": "regular_file",
+                "source_platform": "linux",
+                "size_bytes": 5,
+                "modified": { "captured": { "seconds": 1, "nanoseconds": 0 } },
+                "created": "unsupported",
+                "symlink_target": "unsupported",
+                "unix": null,
+                "extensions": {
+                    "xattrs": { "captured": { "count": 2 } }
+                }
+            }"#,
+        )
+        .expect("deserialize metadata");
+
+        assert_eq!(
+            metadata.extensions.xattrs,
+            MetadataValue::Captured(MetadataFieldSummary { count: 2 })
+        );
+        assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
     }
 
     #[test]

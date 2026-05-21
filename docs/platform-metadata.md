@@ -77,9 +77,10 @@ creation/birth timestamp fields selected for warning, captured Unix permission
 fields selected for restore, captured Unix ownership fields selected for
 restore, and selected symlink timestamp plus captured Unix symlink metadata
 fields. It also reports selected reportable xattr status fields when xattrs
-were observed or xattr capture was denied. It can surface denied, unsupported,
-invalid, unrepresentable, or not-yet-restored metadata warnings without
-writing destination entries.
+were observed or xattr capture was denied, and selected ACL status fields when
+ACLs were observed or ACL capture was denied in constructed or future
+manifests. It can surface denied, unsupported, invalid, unrepresentable, or
+not-yet-restored metadata warnings without writing destination entries.
 Captured entry metadata records the source platform for new manifests; older
 v0 manifests that lack this field are read as `unknown`. Current restores do
 not restore symlink timestamps, symlink Unix mode/ownership, creation/birth
@@ -92,12 +93,14 @@ version does not restore them. New manifests also record reportable xattr
 presence/count status where the destination build and filesystem expose xattr
 listing; xattr names and values are not restored by this version. The observed
 macOS `com.apple.provenance` implementation detail is not counted as a
-reportable xattr. A selected timestamp, Unix mode, Unix ownership,
-creation/birth timestamp, symlink metadata field, or xattr status field that
-could not be applied, represented, or restored by this version is reported as a
-metadata warning with entry id, metadata namespace, field, source platform,
-destination platform, and reason; a restore with only metadata warnings returns
-partial-success exit code `10`.
+reportable xattr. New manifests also have ACL status scaffolding, but current
+capture records ACL status as unsupported and does not read ACL names,
+entries, permissions, or values. A selected timestamp, Unix mode, Unix
+ownership, creation/birth timestamp, symlink metadata field, xattr status
+field, or ACL status field that could not be applied, represented, or restored
+by this version is reported as a metadata warning with entry id, metadata
+namespace, field, source platform, destination platform, and reason; a restore
+with only metadata warnings returns partial-success exit code `10`.
 
 When metadata cannot be represented on the destination platform, FileFerry must:
 

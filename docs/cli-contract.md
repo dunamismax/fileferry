@@ -258,7 +258,7 @@ RestoreMetadataWarning
   entry_id: snapshot entry identifier; currently the snapshot-relative path
   path: snapshot-relative string
   namespace: metadata namespace, for example "portable", "unix", or the
-             source platform namespace for xattr status warnings
+             source platform namespace for xattr/ACL status warnings
   field: string
   source_platform: "windows" | "macos" | "linux" | "freebsd" | "netbsd" |
                    "openbsd" | "unix" | "unknown"
@@ -282,7 +282,7 @@ RestoreMetadataWarning
   entry_id: snapshot entry identifier; currently the snapshot-relative path
   path: snapshot-relative string
   namespace: metadata namespace, for example "portable", "unix", or the
-             source platform namespace for xattr status warnings
+             source platform namespace for xattr/ACL status warnings
   field: string
   source_platform: "windows" | "macos" | "linux" | "freebsd" | "netbsd" |
                    "openbsd" | "unix" | "unknown"
@@ -581,8 +581,9 @@ entries. It also reports
 `metadata_planned`, the count of regular-file and directory modified timestamp
 and creation/birth timestamp fields, captured Unix permission and ownership
 fields, selected symlink timestamp plus captured Unix symlink metadata fields,
-and selected reportable xattr status fields where xattrs were observed or
-xattr capture was denied. JSON
+selected reportable xattr status fields where xattrs were observed or xattr
+capture was denied, and selected ACL status fields where ACLs were observed or
+ACL capture was denied in constructed or future manifests. JSON
 output follows the Restore data schema above; JSONL output emits the
 implemented progress phases listed above. Current metadata application is
 limited to captured modified timestamps for restored regular files and
@@ -596,14 +597,16 @@ directories is reported as a structured `portable`/`created` warning because
 this version does not restore it. Reportable xattr presence/count status is
 captured where xattr listing is exposed, but xattr names and values are not
 restored; the observed macOS `com.apple.provenance` implementation detail is
-not counted as reportable restore metadata.
+not counted as reportable restore metadata. ACL status scaffolding is present
+in manifests, but this version records ACL status as unsupported during normal
+capture and does not read or restore ACL contents.
 Unix ownership changes, Unix special mode bits, ACLs, xattr values, resource
 forks, Windows attributes, BSD flags, and other platform-specific metadata are
 not restored yet. If a selected timestamp, Unix mode, Unix ownership,
-creation/birth timestamp, symlink metadata field, or xattr status field cannot
-be applied, represented, or restored by this version, or if dry-run planning
-determines that the selected metadata is denied, unsupported, unrepresentable,
-or outside the destination system time range, restore reports a
+creation/birth timestamp, symlink metadata field, xattr status field, or ACL
+status field cannot be applied, represented, or restored by this version, or if
+dry-run planning determines that the selected metadata is denied, unsupported,
+unrepresentable, or outside the destination system time range, restore reports a
 `metadata_warnings` item and exits with partial-success code `10`; JSON and
 JSONL modes keep those warnings on stdout.
 

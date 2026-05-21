@@ -5082,6 +5082,7 @@ fn plan_unrestored_symlink_metadata(
 
 fn planned_extension_field_count(extensions: &MetadataExtensions) -> usize {
     usize::from(metadata_summary_selected(&extensions.xattrs))
+        + usize::from(metadata_summary_selected(&extensions.acls))
 }
 
 fn metadata_summary_selected(value: &MetadataValue<MetadataFieldSummary>) -> bool {
@@ -5098,16 +5099,46 @@ fn plan_unrestored_platform_extensions(
     extensions: &MetadataExtensions,
     warnings: &mut Vec<RestoreMetadataWarning>,
 ) {
-    let reason = match &extensions.xattrs {
+    plan_unrestored_metadata_summary(
+        relative_path,
+        source_platform,
+        "xattrs",
+        &extensions.xattrs,
+        "extended attribute",
+        "extended attributes",
+        warnings,
+    );
+    plan_unrestored_metadata_summary(
+        relative_path,
+        source_platform,
+        "acls",
+        &extensions.acls,
+        "ACL",
+        "ACLs",
+        warnings,
+    );
+}
+
+fn plan_unrestored_metadata_summary(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    field: &'static str,
+    value: &MetadataValue<MetadataFieldSummary>,
+    singular: &str,
+    plural: &str,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    let reason = match value {
         MetadataValue::Captured(summary) if summary.count > 0 => {
-            format!(
-                "{} extended attribute{} not restored by this version",
-                summary.count,
-                if summary.count == 1 { " is" } else { "s are" }
-            )
+            let noun = if summary.count == 1 {
+                format!("{singular} is")
+            } else {
+                format!("{plural} are")
+            };
+            format!("{} {} not restored by this version", summary.count, noun)
         }
         MetadataValue::Denied(reason) => {
-            format!("extended attributes were denied during backup: {reason}")
+            format!("{plural} were denied during backup: {reason}")
         }
         MetadataValue::Captured(_) | MetadataValue::Unsupported => return,
     };
@@ -5115,7 +5146,7 @@ fn plan_unrestored_platform_extensions(
     warnings.push(RestoreMetadataWarning {
         relative_path: relative_path.to_path_buf(),
         namespace: platform_metadata_namespace(source_platform),
-        field: "xattrs",
+        field,
         source_platform,
         destination_platform: current_platform(),
         reason,
@@ -5603,6 +5634,11 @@ fn metadata_status(metadata: &EntryMetadata) -> MetadataStatus {
     }
 
     match &metadata.extensions.xattrs {
+        MetadataValue::Captured(summary) if summary.count > 0 => saw_captured = true,
+        MetadataValue::Denied(_) => return MetadataStatus::Partial,
+        MetadataValue::Captured(_) | MetadataValue::Unsupported => {}
+    }
+    match &metadata.extensions.acls {
         MetadataValue::Captured(summary) if summary.count > 0 => saw_captured = true,
         MetadataValue::Denied(_) => return MetadataStatus::Partial,
         MetadataValue::Captured(_) | MetadataValue::Unsupported => {}
@@ -8566,6 +8602,57 @@ mod tests {
                 && warning.field == "xattrs"
                 && warning.reason.contains("not restored by this version")
         }));
+    }
+
+    #[test]
+    fn plan_unrestored_platform_extensions_warns_for_acl_status() {
+        let mut warnings = Vec::new();
+        let captured = MetadataExtensions {
+            acls: MetadataValue::Captured(MetadataFieldSummary { count: 1 }),
+            ..MetadataExtensions::default()
+        };
+        let denied = MetadataExtensions {
+            acls: MetadataValue::Denied("permission denied".to_owned()),
+            ..MetadataExtensions::default()
+        };
+
+        assert_eq!(planned_extension_field_count(&captured), 1);
+        assert_eq!(planned_extension_field_count(&denied), 1);
+
+        plan_unrestored_platform_extensions(
+            Path::new("captured.txt"),
+            current_platform(),
+            &captured,
+            &mut warnings,
+        );
+        plan_unrestored_platform_extensions(
+            Path::new("denied.txt"),
+            current_platform(),
+            &denied,
+            &mut warnings,
+        );
+
+        assert_eq!(
+            warnings,
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("captured.txt"),
+                    namespace: platform_metadata_namespace(current_platform()),
+                    field: "acls",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "1 ACL is not restored by this version".to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("denied.txt"),
+                    namespace: platform_metadata_namespace(current_platform()),
+                    field: "acls",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "ACLs were denied during backup: permission denied".to_owned(),
+                },
+            ]
+        );
     }
 
     #[test]
