@@ -91,11 +91,43 @@ fn file_count_under(path: &Path) -> usize {
     count
 }
 
-fn expected_restore_metadata_fields(entries_with_file_or_directory_metadata: usize) -> usize {
+fn expected_restore_metadata_planned_fields(
+    entries_with_file_or_directory_metadata: usize,
+) -> usize {
+    if cfg!(unix) {
+        entries_with_file_or_directory_metadata * 5
+    } else {
+        entries_with_file_or_directory_metadata * 2
+    }
+}
+
+fn expected_restore_metadata_applied_fields(
+    entries_with_file_or_directory_metadata: usize,
+) -> usize {
     if cfg!(unix) {
         entries_with_file_or_directory_metadata * 4
     } else {
         entries_with_file_or_directory_metadata
+    }
+}
+
+fn current_platform_json_name() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "freebsd") {
+        "freebsd"
+    } else if cfg!(target_os = "netbsd") {
+        "netbsd"
+    } else if cfg!(target_os = "openbsd") {
+        "openbsd"
+    } else if cfg!(unix) {
+        "unix"
+    } else {
+        "unknown"
     }
 }
 
@@ -1594,7 +1626,7 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
             destination.to_str().expect("destination path"),
         ])
         .assert()
-        .success()
+        .code(10)
         .stderr("")
         .get_output()
         .stdout
@@ -1618,13 +1650,35 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     assert_eq!(restore["data"]["symlinks_written"], 0);
     assert_eq!(
         restore["data"]["metadata_planned"],
-        expected_restore_metadata_fields(1)
+        expected_restore_metadata_planned_fields(1)
     );
     assert_eq!(
         restore["data"]["metadata_applied"],
-        expected_restore_metadata_fields(1)
+        expected_restore_metadata_applied_fields(1)
     );
-    assert_eq!(restore["data"]["metadata_warnings"], serde_json::json!([]));
+    assert_eq!(
+        restore["data"]["metadata_warnings"]
+            .as_array()
+            .expect("metadata warnings")
+            .len(),
+        1
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][0]["entry_id"],
+        serde_json::json!("nested/keep.txt")
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][0]["namespace"],
+        serde_json::json!("portable")
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][0]["field"],
+        serde_json::json!("created")
+    );
+    assert_eq!(
+        restore["data"]["metadata_warnings"][0]["destination_platform"],
+        serde_json::json!(current_platform_json_name())
+    );
     assert_eq!(restore["data"]["bytes_written"], 4);
     assert_eq!(restore["data"]["verified_files"], 1);
     assert_eq!(
@@ -1657,7 +1711,7 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
                 .expect("dry run destination path"),
         ])
         .assert()
-        .success()
+        .code(10)
         .stderr("")
         .get_output()
         .stdout
@@ -1670,10 +1724,23 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     assert_eq!(dry_run["data"]["dry_run"], true);
     assert_eq!(
         dry_run["data"]["metadata_planned"],
-        expected_restore_metadata_fields(4)
+        expected_restore_metadata_planned_fields(4)
     );
     assert_eq!(dry_run["data"]["metadata_applied"], 0);
-    assert_eq!(dry_run["data"]["metadata_warnings"], serde_json::json!([]));
+    assert_eq!(
+        dry_run["data"]["metadata_warnings"]
+            .as_array()
+            .expect("dry-run metadata warnings")
+            .len(),
+        4
+    );
+    assert!(
+        dry_run["data"]["metadata_warnings"]
+            .as_array()
+            .expect("dry-run metadata warnings")
+            .iter()
+            .all(|warning| warning["namespace"] == "portable" && warning["field"] == "created")
+    );
     assert_eq!(dry_run["data"]["verified_files"], 0);
     assert!(!dry_run_destination.exists());
 
@@ -1690,9 +1757,11 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
                 .expect("latest destination path"),
         ])
         .assert()
-        .success()
+        .code(10)
         .stdout(predicates::str::contains("Restored snapshot"))
-        .stderr("");
+        .stderr(predicates::str::contains(
+            "created timestamp is not restored by this version",
+        ));
     assert_eq!(
         fs::read(latest_destination.join("sample.txt")).expect("latest restored file"),
         b"sample"
@@ -1747,38 +1816,36 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
     assert_eq!(restore["data"]["symlinks_written"], 1);
     assert_eq!(
         restore["data"]["metadata_planned"],
-        expected_restore_metadata_fields(4) + expected_restore_symlink_metadata_fields(1)
+        expected_restore_metadata_planned_fields(4) + expected_restore_symlink_metadata_fields(1)
     );
     assert_eq!(
         restore["data"]["metadata_applied"],
-        expected_restore_metadata_fields(4)
+        expected_restore_metadata_applied_fields(4)
     );
     assert_eq!(
         restore["data"]["metadata_warnings"]
             .as_array()
             .expect("metadata warnings")
             .len(),
-        expected_restore_symlink_metadata_fields(1)
+        4 + expected_restore_symlink_metadata_fields(1)
     );
-    assert_eq!(
-        restore["data"]["metadata_warnings"][0]["entry_id"],
-        serde_json::json!("target.link")
+    assert!(
+        restore["data"]["metadata_warnings"]
+            .as_array()
+            .expect("metadata warnings")
+            .iter()
+            .any(|warning| warning["entry_id"] == "target.txt"
+                && warning["namespace"] == "portable"
+                && warning["field"] == "created")
     );
-    assert_eq!(
-        restore["data"]["metadata_warnings"][0]["namespace"],
-        serde_json::json!("portable")
-    );
-    assert_eq!(
-        restore["data"]["metadata_warnings"][0]["field"],
-        serde_json::json!("modified")
-    );
-    assert_eq!(
-        restore["data"]["metadata_warnings"][2]["namespace"],
-        serde_json::json!("unix")
-    );
-    assert_eq!(
-        restore["data"]["metadata_warnings"][2]["field"],
-        serde_json::json!("mode")
+    assert!(
+        restore["data"]["metadata_warnings"]
+            .as_array()
+            .expect("metadata warnings")
+            .iter()
+            .any(|warning| warning["entry_id"] == "target.link"
+                && warning["namespace"] == "unix"
+                && warning["field"] == "mode")
     );
     assert!(destination.join("empty/nested").is_dir());
     assert_eq!(
@@ -1909,7 +1976,7 @@ fn restore_jsonl_emits_progress_events_without_stderr() {
             destination.to_str().expect("destination path"),
         ])
         .assert()
-        .success()
+        .code(10)
         .stderr("")
         .get_output()
         .stdout
@@ -1918,7 +1985,7 @@ fn restore_jsonl_emits_progress_events_without_stderr() {
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .collect();
-    assert_eq!(lines.len(), 8);
+    assert_eq!(lines.len(), 10);
     let started: Value = serde_json::from_slice(lines[0]).expect("started event");
     assert_eq!(started["event"], "command_started");
     assert_eq!(started["command"], "restore");
@@ -1929,16 +1996,26 @@ fn restore_jsonl_emits_progress_events_without_stderr() {
     assert_eq!(progress[0]["event"], "progress");
     assert_eq!(progress[0]["data"]["phase"], "load_manifest");
     assert_eq!(progress[5]["data"]["phase"], "complete");
-    let completed: Value = serde_json::from_slice(lines[7]).expect("completed event");
+    let warnings: Vec<Value> = lines[7..9]
+        .iter()
+        .map(|line| serde_json::from_slice(line).expect("warning event"))
+        .collect();
+    assert!(warnings.iter().all(|warning| {
+        warning["event"] == "warning"
+            && warning["command"] == "restore"
+            && warning["data"]["namespace"] == "portable"
+            && warning["data"]["field"] == "created"
+    }));
+    let completed: Value = serde_json::from_slice(lines[9]).expect("completed event");
     assert_eq!(completed["event"], "command_completed");
     assert_eq!(completed["data"]["files_written"], 1);
     assert_eq!(
         completed["data"]["metadata_planned"],
-        expected_restore_metadata_fields(2)
+        expected_restore_metadata_planned_fields(2)
     );
     assert_eq!(
         completed["data"]["metadata_applied"],
-        expected_restore_metadata_fields(2)
+        expected_restore_metadata_applied_fields(2)
     );
 }
 
@@ -2000,8 +2077,10 @@ fn restore_requires_correct_password_and_safe_destination() {
             destination.to_str().expect("destination path"),
         ])
         .assert()
-        .success()
-        .stderr("");
+        .code(10)
+        .stderr(predicates::str::contains(
+            "created timestamp is not restored by this version",
+        ));
     assert_eq!(
         fs::read(destination.join("sample.txt")).expect("overwritten file"),
         b"sample"

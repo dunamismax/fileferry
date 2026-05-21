@@ -3106,6 +3106,7 @@ impl BackupPipeline {
                         relative_path: entry.relative_path.clone(),
                         source_platform: entry.metadata.source_platform,
                         modified: entry.metadata.modified.clone(),
+                        created: entry.metadata.created.clone(),
                         unix_mode: entry.metadata.unix.as_ref().map(|metadata| metadata.mode),
                         unix_owner,
                     });
@@ -3249,6 +3250,7 @@ impl BackupPipeline {
                 contents,
                 source_platform: entry.metadata.source_platform,
                 modified: entry.metadata.modified.clone(),
+                created: entry.metadata.created.clone(),
                 unix_mode: entry.metadata.unix.as_ref().map(|metadata| metadata.mode),
                 unix_owner: entry
                     .metadata
@@ -3336,6 +3338,7 @@ impl BackupPipeline {
                 destination_path,
                 source_platform: directory.source_platform,
                 modified: directory.modified,
+                created: directory.created,
                 unix_mode: directory.unix_mode,
                 unix_owner: directory.unix_owner,
                 action: if request.dry_run {
@@ -3364,6 +3367,7 @@ impl BackupPipeline {
                 bytes: byte_len,
                 source_platform: file.source_platform,
                 modified: file.modified,
+                created: file.created,
                 unix_mode: file.unix_mode,
                 unix_owner: file.unix_owner,
                 action: if request.dry_run {
@@ -3396,8 +3400,7 @@ impl BackupPipeline {
             });
         }
 
-        let metadata_planned = planned_files.len()
-            + planned_directories.len()
+        let metadata_planned = (planned_files.len() + planned_directories.len()) * 2
             + planned_files
                 .iter()
                 .filter(|file| file.unix_mode.is_some())
@@ -3434,6 +3437,12 @@ impl BackupPipeline {
                     &file.modified,
                     &mut metadata_warnings,
                 );
+                plan_unrestored_created_timestamp(
+                    &file.relative_path,
+                    file.source_platform,
+                    &file.created,
+                    &mut metadata_warnings,
+                );
                 plan_restored_unix_mode(
                     &file.relative_path,
                     file.source_platform,
@@ -3453,6 +3462,12 @@ impl BackupPipeline {
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.modified,
+                    &mut metadata_warnings,
+                );
+                plan_unrestored_created_timestamp(
+                    &directory.relative_path,
+                    directory.source_platform,
+                    &directory.created,
                     &mut metadata_warnings,
                 );
                 plan_restored_unix_mode(
@@ -3482,6 +3497,12 @@ impl BackupPipeline {
                     RestoredMetadataTarget::RegularFile,
                     &mut metadata_warnings,
                 );
+                plan_unrestored_created_timestamp(
+                    &file.relative_path,
+                    file.source_platform,
+                    &file.created,
+                    &mut metadata_warnings,
+                );
                 metadata_applied += apply_restored_unix_mode(
                     &file.destination_path,
                     &file.relative_path,
@@ -3505,6 +3526,12 @@ impl BackupPipeline {
                     directory.source_platform,
                     &directory.modified,
                     RestoredMetadataTarget::Directory,
+                    &mut metadata_warnings,
+                );
+                plan_unrestored_created_timestamp(
+                    &directory.relative_path,
+                    directory.source_platform,
+                    &directory.created,
                     &mut metadata_warnings,
                 );
                 metadata_applied += apply_restored_unix_mode(
@@ -4041,6 +4068,7 @@ pub struct RestoredDirectory {
     pub relative_path: PathBuf,
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
+    pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
 }
@@ -4051,6 +4079,7 @@ pub struct RestoredFile {
     pub contents: Vec<u8>,
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
+    pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
 }
@@ -4110,6 +4139,7 @@ pub struct RestoreDestinationDirectory {
     pub destination_path: PathBuf,
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
+    pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
     pub action: RestoreDestinationAction,
@@ -4122,6 +4152,7 @@ pub struct RestoreDestinationFile {
     pub bytes: u64,
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
+    pub created: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
     pub unix_owner: Option<RestoredUnixOwner>,
     pub action: RestoreDestinationAction,
@@ -4910,6 +4941,32 @@ fn plan_restored_unix_owner(
     }
 
     warn_unix_owner_unrepresentable(relative_path, source_platform, warnings);
+}
+
+fn plan_unrestored_created_timestamp(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    created: &MetadataValue<Timestamp>,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    let reason = match created {
+        MetadataValue::Captured(_) => {
+            "created timestamp is not restored by this version".to_owned()
+        }
+        MetadataValue::Unsupported => "created timestamp was not captured".to_owned(),
+        MetadataValue::Denied(reason) => {
+            format!("created timestamp was denied during backup: {reason}")
+        }
+    };
+
+    warnings.push(RestoreMetadataWarning {
+        relative_path: relative_path.to_path_buf(),
+        namespace: "portable",
+        field: "created",
+        source_platform,
+        destination_platform: current_platform(),
+        reason,
+    });
 }
 
 fn plan_unrestored_symlink_metadata(
@@ -5808,7 +5865,11 @@ mod tests {
             .collect()
     }
 
-    fn metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
+    fn planned_metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
+        if cfg!(unix) { entries * 5 } else { entries * 2 }
+    }
+
+    fn applied_metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
         if cfg!(unix) { entries * 4 } else { entries }
     }
 
@@ -8139,7 +8200,7 @@ mod tests {
         assert_eq!(restored.files.len(), 2);
         assert_eq!(
             restored.metadata_planned,
-            metadata_field_count_for_file_and_directory_entries(3)
+            planned_metadata_field_count_for_file_and_directory_entries(3)
         );
         assert_eq!(restored.bytes, 6);
         assert_eq!(restored.verified_files, 2);
@@ -8210,13 +8271,19 @@ mod tests {
 
         assert_eq!(
             restored.metadata_applied,
-            metadata_field_count_for_file_and_directory_entries(2)
+            applied_metadata_field_count_for_file_and_directory_entries(2)
         );
         assert_eq!(
             restored.metadata_planned,
-            metadata_field_count_for_file_and_directory_entries(2)
+            planned_metadata_field_count_for_file_and_directory_entries(2)
         );
-        assert_eq!(restored.metadata_warnings, Vec::new());
+        assert_eq!(restored.metadata_warnings.len(), 2);
+        assert!(
+            restored
+                .metadata_warnings
+                .iter()
+                .all(|warning| { warning.namespace == "portable" && warning.field == "created" })
+        );
         assert_eq!(
             capture_metadata(destination.path().join("docs"))
                 .expect("restored directory metadata")
@@ -8282,13 +8349,19 @@ mod tests {
 
         assert_eq!(
             restored.metadata_applied,
-            metadata_field_count_for_file_and_directory_entries(2)
+            applied_metadata_field_count_for_file_and_directory_entries(2)
         );
         assert_eq!(
             restored.metadata_planned,
-            metadata_field_count_for_file_and_directory_entries(2)
+            planned_metadata_field_count_for_file_and_directory_entries(2)
         );
-        assert_eq!(restored.metadata_warnings, Vec::new());
+        assert_eq!(restored.metadata_warnings.len(), 2);
+        assert!(
+            restored
+                .metadata_warnings
+                .iter()
+                .all(|warning| { warning.namespace == "portable" && warning.field == "created" })
+        );
         assert_eq!(
             fs::metadata(destination.path().join("docs"))
                 .expect("restored directory metadata")
@@ -8376,6 +8449,64 @@ mod tests {
                     source_platform: current_platform(),
                     destination_platform: current_platform(),
                     reason: "modified timestamp is outside the supported system time range"
+                        .to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_unrestored_created_timestamp_reports_not_restored_and_capture_gaps() {
+        let mut warnings = Vec::new();
+
+        plan_unrestored_created_timestamp(
+            Path::new("captured.txt"),
+            current_platform(),
+            &MetadataValue::Captured(Timestamp {
+                seconds: 1,
+                nanoseconds: 0,
+            }),
+            &mut warnings,
+        );
+        plan_unrestored_created_timestamp(
+            Path::new("unsupported.txt"),
+            current_platform(),
+            &MetadataValue::Unsupported,
+            &mut warnings,
+        );
+        plan_unrestored_created_timestamp(
+            Path::new("denied.txt"),
+            current_platform(),
+            &MetadataValue::Denied("permission denied".to_owned()),
+            &mut warnings,
+        );
+
+        assert_eq!(
+            warnings,
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("captured.txt"),
+                    namespace: "portable",
+                    field: "created",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "created timestamp is not restored by this version".to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("unsupported.txt"),
+                    namespace: "portable",
+                    field: "created",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "created timestamp was not captured".to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("denied.txt"),
+                    namespace: "portable",
+                    field: "created",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "created timestamp was denied during backup: permission denied"
                         .to_owned(),
                 },
             ]
@@ -8540,31 +8671,27 @@ mod tests {
         assert_eq!(restored.symlinks.len(), 1);
         assert_eq!(
             restored.metadata_planned,
-            metadata_field_count_for_file_and_directory_entries(4)
+            planned_metadata_field_count_for_file_and_directory_entries(4)
                 + metadata_field_count_for_symlink_entries(1)
         );
         assert_eq!(
             restored.metadata_applied,
-            metadata_field_count_for_file_and_directory_entries(4)
+            applied_metadata_field_count_for_file_and_directory_entries(4)
         );
         assert_eq!(
             restored.metadata_warnings.len(),
-            metadata_field_count_for_symlink_entries(1)
+            4 + metadata_field_count_for_symlink_entries(1)
         );
-        assert_eq!(
-            restored
-                .metadata_warnings
-                .iter()
-                .map(|warning| (warning.namespace, warning.field))
-                .collect::<Vec<_>>(),
-            vec![
-                ("portable", "modified"),
-                ("portable", "created"),
-                ("unix", "mode"),
-                ("unix", "uid"),
-                ("unix", "gid"),
-            ]
-        );
+        assert!(restored.metadata_warnings.iter().any(|warning| {
+            warning.relative_path == Path::new("target.txt")
+                && warning.namespace == "portable"
+                && warning.field == "created"
+        }));
+        assert!(restored.metadata_warnings.iter().any(|warning| {
+            warning.relative_path == Path::new("target.link")
+                && warning.namespace == "unix"
+                && warning.field == "mode"
+        }));
         assert!(restore_root.join("empty/nested").is_dir());
         assert_eq!(
             fs::read(restore_root.join("target.txt")).expect("restored target"),
@@ -8687,10 +8814,16 @@ mod tests {
         assert_eq!(restored.verified_files, 0);
         assert_eq!(
             restored.metadata_planned,
-            metadata_field_count_for_file_and_directory_entries(2)
+            planned_metadata_field_count_for_file_and_directory_entries(2)
         );
         assert_eq!(restored.metadata_applied, 0);
-        assert_eq!(restored.metadata_warnings, Vec::new());
+        assert_eq!(restored.metadata_warnings.len(), 2);
+        assert!(
+            restored
+                .metadata_warnings
+                .iter()
+                .all(|warning| { warning.namespace == "portable" && warning.field == "created" })
+        );
         assert_eq!(restored.files.len(), 1);
         assert_eq!(
             restored.files[0].action,
@@ -9079,6 +9212,7 @@ mod tests {
                     contents: Vec::new(),
                     source_platform: PlatformKind::Linux,
                     modified: MetadataValue::Unsupported,
+                    created: MetadataValue::Unsupported,
                     unix_mode: None,
                     unix_owner: None,
                 },
@@ -9087,6 +9221,7 @@ mod tests {
                     contents: Vec::new(),
                     source_platform: PlatformKind::Linux,
                     modified: MetadataValue::Unsupported,
+                    created: MetadataValue::Unsupported,
                     unix_mode: None,
                     unix_owner: None,
                 },
