@@ -3182,6 +3182,31 @@ impl BackupPipeline {
         Ok(SnapshotForgetWriteResult { markers })
     }
 
+    pub async fn write_snapshot_forget_markers_with_lease(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        snapshot_ids: &[String],
+    ) -> CoreResult<SnapshotForgetWriteResult> {
+        if snapshot_ids.is_empty() {
+            return Err(CoreError::ForgetNoSnapshotsMatched);
+        }
+
+        let lease = self
+            .acquire_repository_mutation_lease(
+                store,
+                master_key,
+                RepositoryLeaseCommandKind::Forget,
+            )
+            .await?;
+        let result = self
+            .write_snapshot_forget_markers(store, snapshot_ids)
+            .await;
+        self.release_repository_mutation_lease(store, &lease.lease_object)
+            .await;
+        result
+    }
+
     pub async fn prune_repository(
         &self,
         store: &dyn ObjectStore,
@@ -7646,6 +7671,25 @@ mod tests {
         BackupPipeline,
         SnapshotWriteResult,
     ) {
+        let (store, repository, pipeline, first) =
+            repository_with_two_snapshots(first_seed, second_seed).await;
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget first");
+
+        (store, repository, pipeline, first)
+    }
+
+    async fn repository_with_two_snapshots(
+        first_seed: usize,
+        second_seed: usize,
+    ) -> (
+        fileferry_testkit::FakeObjectStore,
+        OpenedRepository,
+        BackupPipeline,
+        SnapshotWriteResult,
+    ) {
         let first_source = tempfile::tempdir().expect("first source");
         fs::write(
             first_source.path().join("file.txt"),
@@ -7692,10 +7736,6 @@ mod tests {
             )
             .await
             .expect("second snapshot");
-        pipeline
-            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
-            .await
-            .expect("forget first");
 
         (store, repository, pipeline, first)
     }
@@ -9639,6 +9679,121 @@ mod tests {
                 .await
                 .expect("list prune plans")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn forget_markers_with_lease_rejects_active_repository_lease_before_markers() {
+        let (store, repository, pipeline, first) = repository_with_two_snapshots(37, 38).await;
+        let active_lease_id = "12".repeat(LEASE_STATE_ID_BYTES);
+        let now = current_unix_seconds().expect("current time");
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &repository.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: active_lease_id.clone(),
+                    writer_id: "34".repeat(LEASE_STATE_ID_BYTES),
+                    command_kind: RepositoryLeaseCommandKind::Prune,
+                    acquired_at_unix_seconds: now,
+                    expires_at_unix_seconds: now + DEFAULT_REPOSITORY_LEASE_SECONDS,
+                },
+            )
+            .await
+            .expect("write active lease");
+
+        let error = pipeline
+            .write_snapshot_forget_markers_with_lease(
+                &store,
+                &repository.master_key,
+                std::slice::from_ref(&first.snapshot_id),
+            )
+            .await
+            .expect_err("active lease blocks forget marker writes");
+
+        assert!(matches!(
+            error,
+            CoreError::RepositoryLeaseConflict {
+                lease_id,
+                command_kind: RepositoryLeaseCommandKind::Prune,
+                ..
+            } if lease_id == active_lease_id
+        ));
+        assert!(
+            !store
+                .exists(&object_key_for_forget_marker(&first.snapshot_id).expect("forget key"))
+                .await
+                .expect("forget marker does not exist")
+        );
+    }
+
+    #[tokio::test]
+    async fn forget_markers_with_lease_ignore_expired_repository_lease_and_release_own_lease() {
+        let (store, repository, pipeline, first) = repository_with_two_snapshots(39, 40).await;
+        let expired_lease_id = "56".repeat(LEASE_STATE_ID_BYTES);
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &repository.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: expired_lease_id.clone(),
+                    writer_id: "78".repeat(LEASE_STATE_ID_BYTES),
+                    command_kind: RepositoryLeaseCommandKind::Prune,
+                    acquired_at_unix_seconds: 1,
+                    expires_at_unix_seconds: 2,
+                },
+            )
+            .await
+            .expect("write expired lease");
+
+        let written = pipeline
+            .write_snapshot_forget_markers_with_lease(
+                &store,
+                &repository.master_key,
+                std::slice::from_ref(&first.snapshot_id),
+            )
+            .await
+            .expect("expired lease does not block forget marker writes");
+
+        assert_eq!(written.markers.len(), 1);
+        assert!(written.markers[0].created);
+        assert!(
+            store
+                .exists(&object_key_for_forget_marker(&first.snapshot_id).expect("forget key"))
+                .await
+                .expect("forget marker exists")
+        );
+        let lock_prefix = ObjectKeyPrefix::new(LEASE_STATE_PREFIX).expect("lock prefix");
+        assert_eq!(
+            store.list_prefix(&lock_prefix).await.expect("list locks"),
+            vec![lease_state_object_key(&expired_lease_id).expect("expired lease object")]
+        );
+    }
+
+    #[tokio::test]
+    async fn forget_markers_with_lease_rejects_malformed_repository_lease_before_markers() {
+        let (store, repository, pipeline, first) = repository_with_two_snapshots(41, 42).await;
+        let malformed_lease_id = "9a".repeat(LEASE_STATE_ID_BYTES);
+        let malformed_lease_key = lease_state_object_key(&malformed_lease_id).expect("lease key");
+        store
+            .overwrite_for_tests(malformed_lease_key, b"not encrypted json".to_vec())
+            .await;
+
+        let error = pipeline
+            .write_snapshot_forget_markers_with_lease(
+                &store,
+                &repository.master_key,
+                std::slice::from_ref(&first.snapshot_id),
+            )
+            .await
+            .expect_err("malformed lease blocks forget marker writes");
+
+        assert!(matches!(error, CoreError::LeaseStateDecode { .. }));
+        assert!(
+            !store
+                .exists(&object_key_for_forget_marker(&first.snapshot_id).expect("forget key"))
+                .await
+                .expect("forget marker does not exist")
         );
     }
 

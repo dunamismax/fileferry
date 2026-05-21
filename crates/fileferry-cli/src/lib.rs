@@ -1458,6 +1458,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         | CoreError::InvalidPolicyConfig { key, .. }
         | CoreError::UploadStateDecode { key, .. }
         | CoreError::InvalidUploadState { key, .. }
+        | CoreError::LeaseStateDecode { key, .. }
+        | CoreError::InvalidLeaseState { key, .. }
         | CoreError::RepositoryCheckMissingObject { key }
         | CoreError::RepositoryReferencedObjectMissing { key } => Some(key.as_str().to_owned()),
         CoreError::MissingChunkIndexEntry { object_key, .. }
@@ -2141,20 +2143,20 @@ fn forget(
         return Err(CoreError::ForgetNoSnapshotsMatched.into());
     }
 
-    let marker_writes =
-        if dry_run {
-            BTreeMap::new()
-        } else {
-            runtime
-                .block_on(pipeline.write_snapshot_forget_markers(
-                    repository.store.as_ref(),
-                    &forgotten_snapshot_ids,
-                ))?
-                .markers
-                .into_iter()
-                .map(|write| (write.snapshot_id, (write.marker_object, write.created)))
-                .collect()
-        };
+    let marker_writes = if dry_run {
+        BTreeMap::new()
+    } else {
+        runtime
+            .block_on(pipeline.write_snapshot_forget_markers_with_lease(
+                repository.store.as_ref(),
+                &opened.master_key,
+                &forgotten_snapshot_ids,
+            ))?
+            .markers
+            .into_iter()
+            .map(|write| (write.snapshot_id, (write.marker_object, write.created)))
+            .collect()
+    };
     let data = forget_data(policy, plan, dry_run, marker_writes);
 
     emit_forget_command(mode, data)

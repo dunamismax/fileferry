@@ -664,7 +664,13 @@ visible committed snapshot manifests, evaluates retention keep rules, and
 writes immutable snapshot forget markers for snapshots not retained by those
 rules. It never deletes chunks, manifests, indexes, or commit objects; object
 deletion is handled only by the separate `ferry prune` command.
-`--dry-run` evaluates the same plan but writes no forget markers. The
+Non-dry-run forget first writes an encrypted best-effort command lease under
+`locks/`, rejects another active readable lease with exit code `3` and
+`repository_locked`, ignores expired readable leases, and fails closed on
+malformed or unauthenticatable lease objects before writing markers. After
+marker writes return, forget best-effort deletes its own lease; if that release
+is interrupted, the lease expires by timestamp. `--dry-run` evaluates the same
+plan but writes no forget markers or lease state. The
 implemented keep rules are `--keep-last <N>`, `--keep-hourly <N>`,
 `--keep-daily <N>`,
 `--keep-weekly <N>`, `--keep-monthly <N>`, `--keep-yearly <N>`, and repeatable

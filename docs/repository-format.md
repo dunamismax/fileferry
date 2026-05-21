@@ -364,17 +364,18 @@ Current implementation status:
 - Readers validate schema, magic, format version, repository id, lease id,
   writer id, object-key identity, expiration window, and keyed state identity
   before returning the object. Active-use reads reject an expired lease.
-- Non-dry-run `ferry prune` now uses this lease-state format for command-level
-  coordination. Before marking or sweeping a plan, prune lists `locks/`,
-  authenticates and validates readable lease state, rejects another active
-  lease, ignores expired readable leases, writes its own encrypted lease, and
-  rechecks active leases after the write. When the sweep path returns, prune
-  best-effort deletes its own lease; if release is interrupted, timestamp
-  expiry is the fallback.
-- Lease enforcement is currently proven only for non-dry-run prune. Dry-run
-  prune writes no lease state. Command-level leases for backup, forget,
-  key-management, repository maintenance, stale-lease breaking, and lease
-  repair are not implemented yet.
+- Non-dry-run `ferry forget` and `ferry prune` now use this lease-state format
+  for command-level coordination. Before writing forget markers or before
+  marking/sweeping a prune plan, the command lists `locks/`, authenticates and
+  validates readable lease state, rejects another active lease, ignores expired
+  readable leases, writes its own encrypted lease, and rechecks active leases
+  after the write. When the mutation path returns, the command best-effort
+  deletes its own lease; if release is interrupted, timestamp expiry is the
+  fallback.
+- Lease enforcement is currently proven only for non-dry-run forget and prune.
+  Dry-run forget and dry-run prune write no lease state. Command-level leases
+  for backup, key-management, repository maintenance, stale-lease breaking, and
+  lease repair are not implemented yet.
 
 ## Concurrent Backup Behavior
 
@@ -411,11 +412,11 @@ Current implementation status:
 - `ferry prune` is implemented for initialized local filesystem and
   S3-compatible repositories through the shared encrypted object-store
   pipeline.
-- Non-dry-run prune writes and verifies an encrypted `locks/<lease-id>` command
-  lease before writing a prune plan or deleting candidate objects. Another
-  active readable lease rejects prune as a locked repository, expired readable
-  leases are ignored, and malformed lease state fails closed before candidate
-  deletion.
+- Non-dry-run forget and prune write and verify an encrypted
+  `locks/<lease-id>` command lease before shared repository mutation. Another
+  active readable lease rejects the command as a locked repository, expired
+  readable leases are ignored, and malformed lease state fails closed before
+  forget writes markers or prune deletes candidates.
 - Candidate objects are limited to commit markers, forget markers, encrypted
   manifests, encrypted indexes, and encrypted chunks reachable from forgotten
   committed snapshots and not reachable from non-forgotten committed
@@ -640,4 +641,8 @@ expiration windows, and reject expired leases for active use. Focused prune
 tests now prove non-dry-run prune rejects an active lease before marking or
 deleting, ignores an expired readable lease, best-effort releases its own lease
 after a completed sweep, and rejects malformed lease state before deleting
-candidate objects.
+candidate objects. Focused forget tests now prove non-dry-run forget rejects
+an active lease before writing markers, ignores an expired readable lease,
+best-effort releases its own lease after successful marker writes, rejects
+malformed lease state before writing markers, and keeps dry-run forget
+lease-free.

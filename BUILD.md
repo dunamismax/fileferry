@@ -106,9 +106,13 @@ Last reviewed: 2026-05-21.
   unlocks with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
   authenticates currently visible committed encrypted manifests, evaluates
   `fileferry-policy` keep rules, supports dry-run, and writes immutable
-  snapshot forget markers only when not in dry-run. It does not delete
-  chunks, manifests, indexes, or commit objects; storage reclamation is
-  handled by the separate `ferry prune` command.
+  snapshot forget markers only when not in dry-run. Non-dry-run forget writes
+  and verifies an encrypted best-effort command lease before marker writes,
+  rejects another active readable lease as a locked repository, ignores
+  expired readable leases, fails closed on malformed lease state before
+  marker writes, and best-effort releases its own lease after marker writes
+  return. It does not delete chunks, manifests, indexes, or commit objects;
+  storage reclamation is handled by the separate `ferry prune` command.
   JSON and JSONL output report candidate snapshots, kept snapshots, forgotten
   snapshots, item-level reasons, dry-run status, marker objects written, and
   explicit `object_deletion: false`.
@@ -435,9 +439,15 @@ Current status:
   marking or sweeping, rejects another active readable lease as a locked
   repository, ignores expired readable leases, best-effort releases its own
   lease after the sweep path returns, and fails closed on malformed lease state
-  before candidate deletion. Command-level lease enforcement is currently
-  proven only for prune; backup, forget, key-management, repository
-  maintenance, stale-lease breaking, and lease repair are not implemented yet.
+  before candidate deletion.
+- Continued with a forget command lease-coordination slice. Non-dry-run
+  `ferry forget` now uses encrypted `locks/<lease-id>` lease state before
+  writing forget markers, rejects another active readable lease as a locked
+  repository, ignores expired readable leases, best-effort releases its own
+  lease after marker writes return, and fails closed on malformed lease state
+  before marker writes. Command-level lease enforcement is currently proven
+  only for forget and prune; backup, key-management, repository maintenance,
+  stale-lease breaking, and lease repair are not implemented yet.
 
 These slices do not freeze the rest of format v0.
 
@@ -1014,6 +1024,25 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with a forget command
+  lease-coordination slice. Non-dry-run `ferry forget` now acquires encrypted
+  `locks/<lease-id>` lease state before writing forget markers, rejects another
+  active readable lease with the stable `repository_locked` failure code and
+  repository-locked exit family, ignores expired readable leases, rechecks
+  locks after writing its own lease, and best-effort releases its own lease
+  after marker writes return. Malformed or unauthenticatable lease state now
+  fails closed before forget writes markers, with machine-readable object-key
+  context for lease-state decode/validation failures. Added focused core tests
+  for active-lease rejection, expired-lease tolerance plus own-lease release,
+  and malformed-lease rejection before marker writes, plus CLI tests for
+  stable locked/integrity failures and dry-run remaining lease-free. Updated
+  `docs/repository-format.md`, `docs/security.md`, and
+  `docs/cli-contract.md` to document only this proven forget/prune command
+  coordination. This does not implement stale-lease breaking, lease repair,
+  backup/key-management command leases, or freeze all of format v0. Focused
+  verification:
+  `cargo test -p fileferry-core forget_markers_with_lease -- --nocapture` and
+  `cargo test -p fileferry-cli lease_has_stable -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with a prune command
   lease-coordination slice. Non-dry-run `ferry prune` now acquires encrypted
   `locks/<lease-id>` lease state before plan marking or sweeping, rejects
