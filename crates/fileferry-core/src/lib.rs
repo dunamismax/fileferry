@@ -5084,6 +5084,7 @@ fn planned_extension_field_count(extensions: &MetadataExtensions) -> usize {
     usize::from(metadata_summary_selected(&extensions.xattrs))
         + usize::from(metadata_summary_selected(&extensions.acls))
         + usize::from(metadata_summary_selected(&extensions.file_flags))
+        + usize::from(metadata_summary_selected(&extensions.windows_attributes))
 }
 
 fn metadata_summary_selected(value: &MetadataValue<MetadataFieldSummary>) -> bool {
@@ -5125,6 +5126,15 @@ fn plan_unrestored_platform_extensions(
         &extensions.file_flags,
         "file flag",
         "file flags",
+        warnings,
+    );
+    plan_unrestored_metadata_summary(
+        relative_path,
+        source_platform,
+        "windows_attributes",
+        &extensions.windows_attributes,
+        "Windows attribute",
+        "Windows attributes",
         warnings,
     );
 }
@@ -8711,6 +8721,58 @@ mod tests {
                     source_platform: current_platform(),
                     destination_platform: current_platform(),
                     reason: "file flags were denied during backup: permission denied".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_unrestored_platform_extensions_warns_for_windows_attribute_status() {
+        let mut warnings = Vec::new();
+        let captured = MetadataExtensions {
+            windows_attributes: MetadataValue::Captured(MetadataFieldSummary { count: 3 }),
+            ..MetadataExtensions::default()
+        };
+        let denied = MetadataExtensions {
+            windows_attributes: MetadataValue::Denied("permission denied".to_owned()),
+            ..MetadataExtensions::default()
+        };
+
+        assert_eq!(planned_extension_field_count(&captured), 1);
+        assert_eq!(planned_extension_field_count(&denied), 1);
+
+        plan_unrestored_platform_extensions(
+            Path::new("captured.txt"),
+            PlatformKind::Windows,
+            &captured,
+            &mut warnings,
+        );
+        plan_unrestored_platform_extensions(
+            Path::new("denied.txt"),
+            PlatformKind::Windows,
+            &denied,
+            &mut warnings,
+        );
+
+        assert_eq!(
+            warnings,
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("captured.txt"),
+                    namespace: "windows",
+                    field: "windows_attributes",
+                    source_platform: PlatformKind::Windows,
+                    destination_platform: current_platform(),
+                    reason: "3 Windows attributes are not restored by this version".to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("denied.txt"),
+                    namespace: "windows",
+                    field: "windows_attributes",
+                    source_platform: PlatformKind::Windows,
+                    destination_platform: current_platform(),
+                    reason: "Windows attributes were denied during backup: permission denied"
+                        .to_owned(),
                 },
             ]
         );

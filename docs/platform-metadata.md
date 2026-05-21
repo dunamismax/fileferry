@@ -80,9 +80,11 @@ fields. It also reports selected reportable xattr status fields when xattrs
 were observed or xattr capture was denied, and selected ACL status fields when
 ACLs were observed or ACL capture was denied in constructed or future
 manifests, plus selected file flag status fields when file flags were observed
-or file flag capture was denied in constructed or future manifests. It can
-surface denied, unsupported, invalid, unrepresentable, or not-yet-restored
-metadata warnings without writing destination entries.
+or file flag capture was denied in constructed or future manifests, plus
+selected Windows attribute status fields when Windows attributes were observed
+or Windows attribute capture was denied in constructed or future manifests. It
+can surface denied, unsupported, invalid, unrepresentable, or
+not-yet-restored metadata warnings without writing destination entries.
 Captured entry metadata records the source platform for new manifests; older
 v0 manifests that lack this field are read as `unknown`. Current restores do
 not restore symlink timestamps, symlink Unix mode/ownership, creation/birth
@@ -99,9 +101,12 @@ reportable xattr. New manifests also have ACL status scaffolding, but current
 capture records ACL status as unsupported and does not read ACL names,
 entries, permissions, or values. New manifests also have file flag status
 scaffolding, but current capture records file flag status as unsupported and
-does not read or restore file flag values. A selected timestamp, Unix mode,
-Unix ownership, creation/birth timestamp, symlink metadata field, xattr status
-field, ACL status field, or file flag status field that could not be applied,
+does not read or restore file flag values. New manifests also have Windows
+attribute status scaffolding, but current capture records Windows attribute
+status as unsupported and does not read or restore Windows attribute values. A
+selected timestamp, Unix mode, Unix ownership, creation/birth timestamp,
+symlink metadata field, xattr status field, ACL status field, file flag status
+field, or Windows attribute status field that could not be applied,
 represented, or restored by this version is reported as a metadata warning
 with entry id, metadata namespace, field, source platform, destination
 platform, and reason; a restore with only metadata warnings returns

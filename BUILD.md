@@ -71,9 +71,11 @@ Last reviewed: 2026-05-21.
   status warnings when ACLs were observed or ACL capture was denied in
   constructed or future manifests, selected file flag status warnings when
   file flags were observed or file flag capture was denied in constructed or
-  future manifests, and metadata planning warnings, returns partial-success
-  exit code `10` when metadata warnings are produced, and exposes tested
-  human, JSON, and JSONL-safe output paths. Authenticated manifests with
+  future manifests, selected Windows attribute status warnings when Windows
+  attributes were observed or Windows attribute capture was denied in
+  constructed or future manifests, and metadata planning warnings, returns
+  partial-success exit code `10` when metadata warnings are produced, and
+  exposes tested human, JSON, and JSONL-safe output paths. Authenticated manifests with
   invalid entry topology are rejected as integrity failures before restore
   destination writes.
 - `ferry check` opens initialized local and S3-compatible repositories,
@@ -199,9 +201,9 @@ Last reviewed: 2026-05-21.
   kind, source platform, regular-file size, timestamps where exposed by `std`,
   symlink targets, Unix mode/ownership where available, and reportable xattr
   presence/count status where the platform and filesystem expose xattr
-  listing, plus ACL and file flag status scaffolding that currently records
-  unsupported during normal capture. It also has focused tests for path normalization
-  facts, Windows reserved-name detection, observed case behavior, Unix symlink
+  listing, plus ACL, file flag, and Windows attribute status scaffolding that
+  currently records unsupported during normal capture. It also has focused
+  tests for path normalization facts, Windows reserved-name detection, observed case behavior, Unix symlink
   capture, xattr status capture where available, backward-compatible extension
   metadata deserialization, long-path metadata capture where the filesystem
   allows it, and permission-denied metadata reads where the platform exposes
@@ -229,7 +231,9 @@ Last reviewed: 2026-05-21.
   symlink metadata not-restored warnings, selected xattr status not-restored
   warnings, selected ACL status not-restored warnings from constructed or
   future manifests, selected file flag status not-restored warnings from
-  constructed or future manifests, metadata planning, and optional byte-for-byte verification.
+  constructed or future manifests, selected Windows attribute status
+  not-restored warnings from constructed or future manifests, metadata
+  planning, and optional byte-for-byte verification.
 - `fileferry-core` writes commit markers after encrypted snapshot manifests,
   can discover committed manifests from those markers, and has tested snapshot
   summary and immediate-entry listing primitives for future `snapshots` and
@@ -262,6 +266,9 @@ ACL status scaffolding is present, but normal capture currently records ACL
 status as unsupported and does not read or restore ACL contents.
 File flag status scaffolding is present, but normal capture currently records
 file flag status as unsupported and does not read or restore file flag values.
+Windows attribute status scaffolding is present, but normal capture currently
+records Windows attribute status as unsupported and does not read or restore
+Windows attribute values.
 S3-compatible repository URLs are parsed through the shared repository
 resolver, and S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`,
 `check`, `forget`, `prune`, and key-management commands use the existing
@@ -891,6 +898,28 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Completed a Milestone G Windows attribute status scaffolding
+  and restore warning slice without claiming Windows attribute value capture,
+  Windows attribute restoration, or broader Windows platform support. New
+  manifests now include a Windows attribute status field under encrypted
+  platform extensions; normal capture records it as unsupported until
+  platform-specific Windows attribute capture is implemented and verified.
+  Restore planning carries selected Windows attribute status from constructed
+  or future manifests, counts selected captured/denied Windows attribute
+  status in `metadata_planned`, and emits structured `windows` namespace /
+  `windows_attributes` metadata warnings when Windows attributes were observed
+  or Windows attribute capture was denied because this version does not
+  restore Windows attribute values. Older extension metadata that only
+  contains xattr, ACL, and file flag status still deserializes with Windows
+  attribute status defaulted to unsupported. Updated `README.md`,
+  `docs/cli-contract.md`, `docs/platform-metadata.md`, and this file. No live
+  S3 gates were enabled in this session. Verified with
+  `cargo test -p fileferry-platform windows_attribute -- --nocapture`,
+  `cargo test -p fileferry-platform deserializes_xattr_only_extensions_with_default_extension_statuses -- --nocapture`,
+  `cargo test -p fileferry-core plan_unrestored_platform_extensions_warns_for_windows_attribute_status -- --nocapture`,
+  `cargo test -p fileferry-platform -p fileferry-core -p fileferry-cli --no-fail-fast`,
+  `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check`.
 - 2026-05-21 - Completed a Milestone G file flag status scaffolding and
   restore warning slice without claiming file flag value capture, file flag
   restoration, or broader platform support. New manifests now include a file

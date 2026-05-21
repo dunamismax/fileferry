@@ -108,6 +108,8 @@ pub struct MetadataExtensions {
     pub acls: MetadataValue<MetadataFieldSummary>,
     #[serde(default)]
     pub file_flags: MetadataValue<MetadataFieldSummary>,
+    #[serde(default)]
+    pub windows_attributes: MetadataValue<MetadataFieldSummary>,
 }
 
 impl Default for MetadataExtensions {
@@ -116,6 +118,7 @@ impl Default for MetadataExtensions {
             xattrs: MetadataValue::Unsupported,
             acls: MetadataValue::Unsupported,
             file_flags: MetadataValue::Unsupported,
+            windows_attributes: MetadataValue::Unsupported,
         }
     }
 }
@@ -293,6 +296,7 @@ fn metadata_extensions(path: &Path) -> MetadataExtensions {
         xattrs: xattr_summary(path),
         acls: MetadataValue::Unsupported,
         file_flags: MetadataValue::Unsupported,
+        windows_attributes: MetadataValue::Unsupported,
     }
 }
 
@@ -390,6 +394,10 @@ mod tests {
         ));
         assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
         assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
+        assert_eq!(
+            metadata.extensions.windows_attributes,
+            MetadataValue::Unsupported
+        );
     }
 
     #[test]
@@ -421,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_xattr_only_extensions_with_default_acl_status() {
+    fn deserializes_xattr_only_extensions_with_default_extension_statuses() {
         let metadata: EntryMetadata = serde_json::from_str(
             r#"{
                 "kind": "regular_file",
@@ -444,6 +452,10 @@ mod tests {
         );
         assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
         assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
+        assert_eq!(
+            metadata.extensions.windows_attributes,
+            MetadataValue::Unsupported
+        );
     }
 
     #[test]
@@ -478,6 +490,20 @@ mod tests {
         let metadata = capture_metadata(&path).expect("metadata");
 
         assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
+    }
+
+    #[test]
+    fn captures_windows_attribute_status_as_unsupported_until_platform_capture_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"hello").expect("write file");
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_eq!(
+            metadata.extensions.windows_attributes,
+            MetadataValue::Unsupported
+        );
     }
 
     #[cfg(unix)]
