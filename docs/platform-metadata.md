@@ -63,6 +63,9 @@ restores apply captured modified timestamps for restored regular files and
 directories after content writes and verification. On Unix destinations,
 restores also apply captured regular-file and directory permission bits
 (`0o777`) where representable, after destination entries have been written.
+Restores verify captured Unix UID/GID ownership for restored regular files and
+directories after writes and warn when the destination ownership does not
+match, but they do not call `chown`.
 Non-dry-run restores preflight selected manifest entries for destination path
 case collisions when the destination filesystem can be observed as
 case-insensitive. Windows destinations reject selected paths with Windows
@@ -70,17 +73,18 @@ reserved-name segments before destination writes; this is a guardrail, not a
 claim that Windows restore support has met the release bar.
 Dry-run restore reports the count of regular-file and directory modified
 timestamp fields selected for restore plus captured Unix permission fields
-selected for restore, and can surface denied, unsupported, invalid, or
-unrepresentable metadata warnings without writing destination entries.
+selected for restore plus captured Unix ownership fields selected for restore,
+and can surface denied, unsupported, invalid, or unrepresentable metadata
+warnings without writing destination entries.
 Captured entry metadata records the source platform for new manifests; older
 v0 manifests that lack this field are read as `unknown`. Current restores do
-not restore symlink timestamps, creation/birth time, ownership, Unix special
-mode bits, ACLs, xattrs, resource forks, Windows attributes, BSD flags, sparse
-extents, or other platform-specific metadata yet. A selected timestamp or Unix
-mode field that could not be applied is reported as a metadata warning with
-entry id, metadata namespace, field, source platform, destination platform,
-and reason; a restore with only metadata warnings returns partial-success exit
-code `10`.
+not restore symlink timestamps, creation/birth time, Unix ownership by changing
+destination owners, Unix special mode bits, ACLs, xattrs, resource forks,
+Windows attributes, BSD flags, sparse extents, or other platform-specific
+metadata yet. A selected timestamp, Unix mode, or Unix ownership field that
+could not be represented is reported as a metadata warning with entry id,
+metadata namespace, field, source platform, destination platform, and reason;
+a restore with only metadata warnings returns partial-success exit code `10`.
 
 When metadata cannot be represented on the destination platform, FileFerry must:
 

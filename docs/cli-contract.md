@@ -577,19 +577,22 @@ with Windows reserved-name segments before destination writes. `--dry-run`
 reports selected entries and planned writes without creating destination
 entries. It also reports
 `metadata_planned`, the count of regular-file and directory modified timestamp
-fields plus captured Unix permission fields selected for restore. JSON output
-follows the Restore data schema above; JSONL output emits the implemented
-progress phases listed above. Current metadata application is limited to
-captured modified timestamps for restored regular files and directories, plus
-captured regular-file and directory Unix permission bits (`0o777`) on Unix
-destinations. Symlink timestamps, creation/birth time, ownership, Unix special
-mode bits, ACLs, xattrs, resource forks, Windows attributes, BSD flags, and
-other platform-specific metadata are not restored yet. If a selected timestamp
-or Unix mode field cannot be applied, or if dry-run planning determines that
-the selected metadata is denied, unsupported, unrepresentable, or outside the
-destination system time range, restore reports a `metadata_warnings` item and
-exits with partial-success code `10`; JSON and JSONL modes keep those warnings
-on stdout.
+fields plus captured Unix permission and ownership fields selected for
+restore. JSON output follows the Restore data schema above; JSONL output emits
+the implemented progress phases listed above. Current metadata application is
+limited to captured modified timestamps for restored regular files and
+directories, plus captured regular-file and directory Unix permission bits
+(`0o777`) on Unix destinations. Restore also verifies captured regular-file
+and directory Unix UID/GID ownership after writes and warns when destination
+ownership does not match, but it does not call `chown`. Symlink timestamps,
+creation/birth time, Unix ownership changes, Unix special mode bits, ACLs,
+xattrs, resource forks, Windows attributes, BSD flags, and other
+platform-specific metadata are not restored yet. If a selected timestamp, Unix
+mode, or Unix ownership field cannot be applied or represented, or if dry-run
+planning determines that the selected metadata is denied, unsupported,
+unrepresentable, or outside the destination system time range, restore reports
+a `metadata_warnings` item and exits with partial-success code `10`; JSON and
+JSONL modes keep those warnings on stdout.
 
 `ferry check` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

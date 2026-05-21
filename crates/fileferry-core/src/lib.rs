@@ -3093,11 +3093,21 @@ impl BackupPipeline {
         for entry in scoped_entries {
             match entry.metadata.kind {
                 EntryKind::Directory => {
+                    let unix_owner =
+                        entry
+                            .metadata
+                            .unix
+                            .as_ref()
+                            .map(|metadata| RestoredUnixOwner {
+                                uid: metadata.uid,
+                                gid: metadata.gid,
+                            });
                     directories.push(RestoredDirectory {
                         relative_path: entry.relative_path.clone(),
                         source_platform: entry.metadata.source_platform,
                         modified: entry.metadata.modified.clone(),
                         unix_mode: entry.metadata.unix.as_ref().map(|metadata| metadata.mode),
+                        unix_owner,
                     });
                     continue;
                 }
@@ -3226,6 +3236,14 @@ impl BackupPipeline {
                 source_platform: entry.metadata.source_platform,
                 modified: entry.metadata.modified.clone(),
                 unix_mode: entry.metadata.unix.as_ref().map(|metadata| metadata.mode),
+                unix_owner: entry
+                    .metadata
+                    .unix
+                    .as_ref()
+                    .map(|metadata| RestoredUnixOwner {
+                        uid: metadata.uid,
+                        gid: metadata.gid,
+                    }),
             });
         }
 
@@ -3305,6 +3323,7 @@ impl BackupPipeline {
                 source_platform: directory.source_platform,
                 modified: directory.modified,
                 unix_mode: directory.unix_mode,
+                unix_owner: directory.unix_owner,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -3332,6 +3351,7 @@ impl BackupPipeline {
                 source_platform: file.source_platform,
                 modified: file.modified,
                 unix_mode: file.unix_mode,
+                unix_owner: file.unix_owner,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -3366,7 +3386,17 @@ impl BackupPipeline {
             + planned_directories
                 .iter()
                 .filter(|directory| directory.unix_mode.is_some())
-                .count();
+                .count()
+            + planned_files
+                .iter()
+                .filter(|file| file.unix_owner.is_some())
+                .count()
+                * 2
+            + planned_directories
+                .iter()
+                .filter(|directory| directory.unix_owner.is_some())
+                .count()
+                * 2;
         if request.dry_run {
             for file in &planned_files {
                 plan_restored_modified_timestamp(
@@ -3379,6 +3409,12 @@ impl BackupPipeline {
                     &file.relative_path,
                     file.source_platform,
                     file.unix_mode,
+                    &mut metadata_warnings,
+                );
+                plan_restored_unix_owner(
+                    &file.relative_path,
+                    file.source_platform,
+                    file.unix_owner,
                     &mut metadata_warnings,
                 );
             }
@@ -3394,6 +3430,12 @@ impl BackupPipeline {
                     &directory.relative_path,
                     directory.source_platform,
                     directory.unix_mode,
+                    &mut metadata_warnings,
+                );
+                plan_restored_unix_owner(
+                    &directory.relative_path,
+                    directory.source_platform,
+                    directory.unix_owner,
                     &mut metadata_warnings,
                 );
             }
@@ -3414,6 +3456,13 @@ impl BackupPipeline {
                     file.unix_mode,
                     &mut metadata_warnings,
                 );
+                metadata_applied += verify_restored_unix_owner(
+                    &file.destination_path,
+                    &file.relative_path,
+                    file.source_platform,
+                    file.unix_owner,
+                    &mut metadata_warnings,
+                );
             }
 
             for directory in &planned_directories {
@@ -3430,6 +3479,13 @@ impl BackupPipeline {
                     &directory.relative_path,
                     directory.source_platform,
                     directory.unix_mode,
+                    &mut metadata_warnings,
+                );
+                metadata_applied += verify_restored_unix_owner(
+                    &directory.destination_path,
+                    &directory.relative_path,
+                    directory.source_platform,
+                    directory.unix_owner,
                     &mut metadata_warnings,
                 );
             }
@@ -3949,6 +4005,7 @@ pub struct RestoredDirectory {
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
+    pub unix_owner: Option<RestoredUnixOwner>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3958,6 +4015,13 @@ pub struct RestoredFile {
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
+    pub unix_owner: Option<RestoredUnixOwner>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RestoredUnixOwner {
+    pub uid: u32,
+    pub gid: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4005,6 +4069,7 @@ pub struct RestoreDestinationDirectory {
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
+    pub unix_owner: Option<RestoredUnixOwner>,
     pub action: RestoreDestinationAction,
 }
 
@@ -4016,6 +4081,7 @@ pub struct RestoreDestinationFile {
     pub source_platform: PlatformKind,
     pub modified: MetadataValue<Timestamp>,
     pub unix_mode: Option<u32>,
+    pub unix_owner: Option<RestoredUnixOwner>,
     pub action: RestoreDestinationAction,
     pub verified: bool,
 }
@@ -4715,6 +4781,128 @@ fn plan_restored_unix_mode(
     }
 }
 
+fn verify_restored_unix_owner(
+    destination_path: &Path,
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    unix_owner: Option<RestoredUnixOwner>,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) -> usize {
+    let Some(expected_owner) = unix_owner else {
+        return 0;
+    };
+
+    if !destination_supports_unix_owner() {
+        warn_unix_owner_unrepresentable(relative_path, source_platform, warnings);
+        return 0;
+    }
+
+    let actual_owner = match read_restored_unix_owner(destination_path) {
+        Ok(owner) => owner,
+        Err(source) => {
+            warn_unix_owner_field(
+                relative_path,
+                source_platform,
+                "uid",
+                format!("unix ownership could not be observed after restore: {source}"),
+                warnings,
+            );
+            warn_unix_owner_field(
+                relative_path,
+                source_platform,
+                "gid",
+                format!("unix ownership could not be observed after restore: {source}"),
+                warnings,
+            );
+            return 0;
+        }
+    };
+
+    let mut represented = 0;
+    if actual_owner.uid == expected_owner.uid {
+        represented += 1;
+    } else {
+        warn_unix_owner_field(
+            relative_path,
+            source_platform,
+            "uid",
+            format!(
+                "unix uid is not restored by this version; captured uid {} but destination uid is {}",
+                expected_owner.uid, actual_owner.uid
+            ),
+            warnings,
+        );
+    }
+
+    if actual_owner.gid == expected_owner.gid {
+        represented += 1;
+    } else {
+        warn_unix_owner_field(
+            relative_path,
+            source_platform,
+            "gid",
+            format!(
+                "unix gid is not restored by this version; captured gid {} but destination gid is {}",
+                expected_owner.gid, actual_owner.gid
+            ),
+            warnings,
+        );
+    }
+
+    represented
+}
+
+fn plan_restored_unix_owner(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    unix_owner: Option<RestoredUnixOwner>,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    if unix_owner.is_none() || destination_supports_unix_owner() {
+        return;
+    }
+
+    warn_unix_owner_unrepresentable(relative_path, source_platform, warnings);
+}
+
+fn warn_unix_owner_unrepresentable(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    warn_unix_owner_field(
+        relative_path,
+        source_platform,
+        "uid",
+        "unix uid cannot be represented on this destination platform".to_owned(),
+        warnings,
+    );
+    warn_unix_owner_field(
+        relative_path,
+        source_platform,
+        "gid",
+        "unix gid cannot be represented on this destination platform".to_owned(),
+        warnings,
+    );
+}
+
+fn warn_unix_owner_field(
+    relative_path: &Path,
+    source_platform: PlatformKind,
+    field: &'static str,
+    reason: String,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    warnings.push(RestoreMetadataWarning {
+        relative_path: relative_path.to_path_buf(),
+        namespace: "unix",
+        field,
+        source_platform,
+        destination_platform: current_platform(),
+        reason,
+    });
+}
+
 fn warn_unrestored_unix_mode_bits(
     relative_path: &Path,
     source_platform: PlatformKind,
@@ -4821,6 +5009,35 @@ const fn destination_supports_unix_mode() -> bool {
 #[cfg(not(unix))]
 const fn destination_supports_unix_mode() -> bool {
     false
+}
+
+#[cfg(unix)]
+const fn destination_supports_unix_owner() -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+const fn destination_supports_unix_owner() -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn read_restored_unix_owner(destination_path: &Path) -> io::Result<RestoredUnixOwner> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(destination_path)?;
+    Ok(RestoredUnixOwner {
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+    })
+}
+
+#[cfg(not(unix))]
+fn read_restored_unix_owner(_destination_path: &Path) -> io::Result<RestoredUnixOwner> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "unix ownership is not available on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -5468,7 +5685,7 @@ mod tests {
     }
 
     fn metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
-        if cfg!(unix) { entries * 2 } else { entries }
+        if cfg!(unix) { entries * 4 } else { entries }
     }
 
     struct ReverseListingStore<'a> {
@@ -7934,8 +8151,14 @@ mod tests {
             .await
             .expect("destination restore");
 
-        assert_eq!(restored.metadata_applied, 4);
-        assert_eq!(restored.metadata_planned, 4);
+        assert_eq!(
+            restored.metadata_applied,
+            metadata_field_count_for_file_and_directory_entries(2)
+        );
+        assert_eq!(
+            restored.metadata_planned,
+            metadata_field_count_for_file_and_directory_entries(2)
+        );
         assert_eq!(restored.metadata_warnings, Vec::new());
         assert_eq!(
             fs::metadata(destination.path().join("docs"))
@@ -8063,6 +8286,78 @@ mod tests {
                 destination_platform: current_platform(),
                 reason: "unix mode special bits 0o4000 are not restored".to_owned(),
             }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_restored_unix_owner_counts_matching_uid_and_gid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"sample").expect("write sample");
+        let owner = read_restored_unix_owner(&path).expect("read owner");
+        let mut warnings = Vec::new();
+
+        let applied = verify_restored_unix_owner(
+            &path,
+            Path::new("sample.txt"),
+            current_platform(),
+            Some(owner),
+            &mut warnings,
+        );
+
+        assert_eq!(applied, 2);
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_restored_unix_owner_warns_when_uid_or_gid_do_not_match() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"sample").expect("write sample");
+        let actual = read_restored_unix_owner(&path).expect("read owner");
+        let expected = RestoredUnixOwner {
+            uid: actual.uid.wrapping_add(1),
+            gid: actual.gid.wrapping_add(1),
+        };
+        let mut warnings = Vec::new();
+
+        let applied = verify_restored_unix_owner(
+            &path,
+            Path::new("sample.txt"),
+            current_platform(),
+            Some(expected),
+            &mut warnings,
+        );
+
+        assert_eq!(applied, 0);
+        assert_eq!(
+            warnings,
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("sample.txt"),
+                    namespace: "unix",
+                    field: "uid",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: format!(
+                        "unix uid is not restored by this version; captured uid {} but destination uid is {}",
+                        expected.uid, actual.uid
+                    ),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("sample.txt"),
+                    namespace: "unix",
+                    field: "gid",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: format!(
+                        "unix gid is not restored by this version; captured gid {} but destination gid is {}",
+                        expected.gid, actual.gid
+                    ),
+                },
+            ]
         );
     }
 
@@ -8620,6 +8915,7 @@ mod tests {
                     source_platform: PlatformKind::Linux,
                     modified: MetadataValue::Unsupported,
                     unix_mode: None,
+                    unix_owner: None,
                 },
                 RestoredFile {
                     relative_path: PathBuf::from("docs/readme.TXT"),
@@ -8627,6 +8923,7 @@ mod tests {
                     source_platform: PlatformKind::Linux,
                     modified: MetadataValue::Unsupported,
                     unix_mode: None,
+                    unix_owner: None,
                 },
             ],
             symlinks: Vec::new(),

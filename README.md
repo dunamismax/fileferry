@@ -367,8 +367,11 @@ Restore currently covers directory
 entries, regular-file contents, Unix symlinks, and modified timestamps for
 restored regular files and directories from initialized local and
 S3-compatible repositories. On Unix destinations it also restores captured
-regular-file and directory permission bits where representable; ownership,
-special mode bits, and other metadata application are not implemented yet.
+regular-file and directory permission bits where representable and verifies
+captured Unix UID/GID ownership for restored regular files and directories,
+warning when created destination ownership does not match. It does not call
+`chown`; special mode bits and other metadata application are not implemented
+yet.
 Non-dry-run restore preflights selected destination paths for observed
 case-insensitive path collisions and rejects Windows reserved-name segments on
 Windows destinations before writes; this is not a broader platform-support

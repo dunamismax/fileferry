@@ -93,7 +93,7 @@ fn file_count_under(path: &Path) -> usize {
 
 fn expected_restore_metadata_fields(entries_with_file_or_directory_metadata: usize) -> usize {
     if cfg!(unix) {
-        entries_with_file_or_directory_metadata * 2
+        entries_with_file_or_directory_metadata * 4
     } else {
         entries_with_file_or_directory_metadata
     }
