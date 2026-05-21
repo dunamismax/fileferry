@@ -418,6 +418,15 @@ Current status:
   JSON during inspection, reject future formats and unknown feature flags before
   unlock, and reject unversioned pre-v0 metadata instead of guessing a
   migration.
+- Continued with a lease-state fixture slice. Golden fixture bytes now exist
+  for one initialized repository with one encrypted `locks/<lease-id>` object.
+  Focused tests prove current code can read, authenticate, validate, and
+  idempotently recognize those bytes and reject malformed encrypted framing,
+  malformed decrypted metadata, ciphertext tamper, wrong object name/kind
+  context, metadata identity mismatches, unsupported lease-state schema and
+  format versions, repository identity mismatches, invalid expiration windows,
+  and expired leases for active use. Command-level lease enforcement is not
+  implemented yet.
 
 These slices do not freeze the rest of format v0.
 
@@ -425,7 +434,7 @@ Definition of done:
 
 - Add golden fixtures for bootstrap, key slots, key-slot removal markers,
   recovery exports if implemented, encrypted chunks, indexes, manifests,
-  commit markers, forget markers, and prune state.
+  commit markers, forget markers, prune state, and lease state.
 - Fixture tests prove current code can read the fixtures and rejects malformed
   or tampered variants with documented error classes.
 - `docs/repository-format.md` identifies which fields are compatibility
@@ -994,6 +1003,23 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with the lease-state fixture slice. Added
+  a dedicated `lease-state` HKDF purpose and encrypted object kind, core-only
+  repository lease-state request/state/read/write APIs, active-use expiration
+  validation, idempotent same-bytes writes, and CLI error-code/failure-code
+  mappings for the new core error classes. Added golden fixture bytes under
+  `tests/fixtures/repository-format/v0/lease-state/` for one initialized
+  repository with one encrypted `locks/<lease-id>` object. Added focused
+  fixture tests that unlock and read the fixture, authenticate and validate the
+  lease state, idempotently recognize the same lease, reject malformed framing
+  and decrypted metadata, reject ciphertext tamper, reject wrong object
+  name/kind context, reject metadata identity and repository mismatches, reject
+  unsupported lease-state schema and format versions, reject invalid expiration
+  windows, and reject expired leases for active use. Updated
+  `docs/repository-format.md` and `docs/security.md` to document only this
+  proven core-only slice. This does not implement command-level lease
+  enforcement or freeze all of format v0. Verified the focused test with
+  `cargo test -p fileferry-core --test repository_format_fixtures lease_state_fixture -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with the migration-detection fixture
   slice. Added a narrow `fileferry-core` repository format inspection API that
   reads bootstrap compatibility metadata without unlocking key slots and

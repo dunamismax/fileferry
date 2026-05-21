@@ -3,9 +3,10 @@
 FileFerry's repository format is original to FileFerry. Format v0 is not frozen.
 Initial compatibility fixtures exist for narrow bootstrap/key-slot and
 recovery-export, committed snapshot-data, forget/prune-state, and policy/config
-and upload-state slices, plus a narrow migration-detection slice. This document
-defines the initial shape needed for implementation work; byte-level fixtures
-become the compatibility contract only after the first intentional freeze.
+and upload-state slices, a narrow migration-detection slice, and a lease-state
+slice. This document defines the initial shape needed for implementation work;
+byte-level fixtures become the compatibility contract only after the first
+intentional freeze.
 
 ## Format Principles
 
@@ -152,6 +153,7 @@ Initial object kinds:
 - `repository-config`
 - `upload-state`
 - `prune-mark`
+- `lease-state`
 
 This binds ciphertext to its repository-format version, semantic object kind,
 and storage name. Moving a ciphertext to a different name or opening it as a
@@ -348,6 +350,23 @@ Format v0 lease rules:
 - If backend capabilities cannot support the needed lease semantics, concurrent
   mutation must fail with a stable unsupported-capability error.
 
+Current implementation status:
+
+- `fileferry-core` can write and read one encrypted lease-state object under
+  `locks/<lease-id>`.
+- The current decrypted lease-state object contains `schema_version`, `magic`,
+  `format_version`, `repository_id`, `lease_id`, `writer_id`, `command_kind`,
+  `acquired_at_unix_seconds`, `expires_at_unix_seconds`, and a keyed
+  `state_identity`.
+- Lease-state objects are encrypted and authenticated as object kind
+  `lease-state` with the exact object name. Moving ciphertext to another object
+  name or reading it as another object kind fails authentication.
+- Readers validate schema, magic, format version, repository id, lease id,
+  writer id, object-key identity, expiration window, and keyed state identity
+  before returning the object. Active-use reads reject an expired lease.
+- The current API is core-only. Command-level lease acquisition, breaking stale
+  leases, and enforcement around mutating commands are not implemented yet.
+
 ## Concurrent Backup Behavior
 
 Concurrent backups may be allowed when:
@@ -456,6 +475,8 @@ Initial golden fixtures now exist under:
   repository containing one encrypted policy/config object.
 - `tests/fixtures/repository-format/v0/upload-state/` for one initialized
   repository containing one encrypted upload-state object.
+- `tests/fixtures/repository-format/v0/lease-state/` for one initialized
+  repository containing one encrypted lease-state object.
 - `tests/fixtures/repository-format/v0/migration/` for bootstrap-only
   compatibility-gate fixtures covering current v0 detection, an unsupported
   future format version, unsupported v0 feature flags, and an unversioned
@@ -524,6 +545,11 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
   `magic`, `format_version`, `repository_id`, `writer_id`, `upload_id`,
   `created_at_unix_seconds`, `operation`, `commit_objects`,
   `forget_marker_objects`, `pending_objects`, and `state_identity`.
+- `lease-state/locks/<lease-id>`: encrypted-object `algorithm`, `nonce`, and
+  `ciphertext`, authenticated as object kind `lease-state` and the exact
+  object name; decrypted `schema_version`, `magic`, `format_version`,
+  `repository_id`, `lease_id`, `writer_id`, `command_kind`,
+  `acquired_at_unix_seconds`, `expires_at_unix_seconds`, and `state_identity`.
 - `migration/future-format-bootstrap/bootstrap`: plaintext `magic`,
   `format_version`, `repository_id`, `key_slots`, and `features`; the fixture
   proves that unknown future repository formats are detected without unlock and
@@ -588,3 +614,11 @@ malformed bootstrap JSON during inspection, reject unknown future format
 versions before unlock, reject unknown current-format feature flags before
 unlock, and reject unversioned pre-v0 bootstrap metadata as invalid rather than
 guessing a migration.
+The lease-state fixture tests prove current code can unlock the fixture,
+authenticate and validate the encrypted lease-state object, idempotently
+recognize an already-present matching lease state, reject malformed encrypted
+framing and decrypted metadata, reject lease-state ciphertext tampering, reject
+wrong object names and authenticated kinds through AEAD context binding, reject
+lease metadata identity mismatches, reject unsupported lease-state schema and
+format versions, reject repository identity mismatches, reject invalid
+expiration windows, and reject expired leases for active use.

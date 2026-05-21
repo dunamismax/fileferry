@@ -76,6 +76,7 @@ Initial subkey purposes:
 - `policy-config`
 - `upload-state`
 - `prune-mark`
+- `lease-state`
 
 The `context` must bind a subkey to the repository identity or a narrower
 operation context. Domain labels must not be reused for incompatible object
@@ -284,6 +285,17 @@ can inspect bootstrap format compatibility without unlocking key slots, rejects
 malformed bootstrap JSON during inspection, rejects future format versions and
 unknown current-format feature flags before unlock, and rejects unversioned
 pre-v0 metadata instead of guessing a migration.
+
+Current lease-state fixture coverage includes one initialized repository with
+one encrypted `locks/<lease-id>` object. Focused tests prove that current code
+authenticates and validates the fixture, rejects malformed encrypted framing and
+decrypted metadata, rejects lease-state ciphertext tampering, rejects wrong
+object names and authenticated kinds through AEAD context binding, rejects lease
+metadata identity mismatches, rejects unsupported lease-state schema and format
+versions, rejects repository identity mismatches, rejects invalid lease
+expiration windows, rejects expired leases for active use, and treats an
+already-present matching lease state as an idempotent write result. Command-level
+lease enforcement is not implemented yet.
 
 ## Key Rotation
 

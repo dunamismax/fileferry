@@ -329,6 +329,22 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("lease state {key} could not be decoded")]
+    LeaseStateDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("lease state {key} is invalid: {reason}")]
+    InvalidLeaseState {
+        key: ObjectKey,
+        reason: &'static str,
+    },
+
+    #[error("repository lease {lease_id} is expired")]
+    RepositoryLeaseExpired { lease_id: String },
+
     #[error("repository commit or forget state changed after upload state {upload_id} was marked")]
     UploadRepositoryStateChanged {
         writer_id: String,
@@ -642,12 +658,14 @@ const RECOVERY_EXPORT_ID_BYTES: usize = 32;
 const PRUNE_PLAN_ID_BYTES: usize = 32;
 const POLICY_CONFIG_ID_BYTES: usize = 32;
 const UPLOAD_STATE_ID_BYTES: usize = 32;
+const LEASE_STATE_ID_BYTES: usize = 32;
 const KEY_SLOT_PREFIX: &str = "key-slots";
 const KEY_SLOT_REMOVAL_PREFIX: &str = "key-slot-removals";
 const POLICY_CONFIG_PREFIX: &str = "objects/policy";
 const UPLOAD_STATE_PREFIX: &str = "objects/upload";
 const PRUNE_PLAN_PREFIX: &str = "objects/prune-plan";
 const PRUNE_COMPLETION_PREFIX: &str = "objects/prune-completion";
+const LEASE_STATE_PREFIX: &str = "locks";
 pub const RECOVERY_EXPORT_WARNING: &str = "Recovery exports are encrypted with the current repository passphrase. Store the export separately from the repository and protect it like a backup key. Recovery import is not implemented yet.";
 
 #[derive(Debug)]
@@ -903,6 +921,48 @@ pub enum RepositoryUploadPendingObjectKind {
     Manifest,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryLeaseStateRequest {
+    pub lease_id: String,
+    pub writer_id: String,
+    pub command_kind: RepositoryLeaseCommandKind,
+    pub acquired_at_unix_seconds: u64,
+    pub expires_at_unix_seconds: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryLeaseStateWriteResult {
+    pub repository_id: String,
+    pub lease_id: String,
+    pub lease_object: ObjectKey,
+    pub created: bool,
+    pub bytes_written: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RepositoryLeaseState {
+    pub schema_version: u16,
+    pub magic: String,
+    pub format_version: u16,
+    pub repository_id: String,
+    pub lease_id: String,
+    pub writer_id: String,
+    pub command_kind: RepositoryLeaseCommandKind,
+    pub acquired_at_unix_seconds: u64,
+    pub expires_at_unix_seconds: u64,
+    pub state_identity: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryLeaseCommandKind {
+    Backup,
+    Forget,
+    Prune,
+    KeyManagement,
+    RepositoryMaintenance,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PruneRecoveryState {
@@ -932,6 +992,7 @@ pub enum PruneObjectKind {
     Chunk,
     Policy,
     UploadState,
+    LeaseState,
     PruneState,
     Other,
 }
@@ -1454,6 +1515,13 @@ fn policy_config_id_is_valid(policy_id: &str) -> bool {
 
 fn upload_state_id_is_valid(id: &str) -> bool {
     id.len() == UPLOAD_STATE_ID_BYTES * 2 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn lease_state_id_is_valid(id: &str) -> bool {
+    id.len() == LEASE_STATE_ID_BYTES * 2
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn repository_id_is_valid(repository_id: &str) -> bool {
@@ -2474,6 +2542,136 @@ impl BackupPipeline {
         Ok(upload_state)
     }
 
+    pub async fn write_repository_lease_state(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        request: RepositoryLeaseStateRequest,
+    ) -> CoreResult<RepositoryLeaseStateWriteResult> {
+        let lease_object = lease_state_object_key(&request.lease_id)?;
+        let mut lease_state = RepositoryLeaseState {
+            schema_version: 0,
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: self.config.repository_id.clone(),
+            lease_id: request.lease_id,
+            writer_id: request.writer_id,
+            command_kind: request.command_kind,
+            acquired_at_unix_seconds: request.acquired_at_unix_seconds,
+            expires_at_unix_seconds: request.expires_at_unix_seconds,
+            state_identity: String::new(),
+        };
+        lease_state.state_identity =
+            lease_state_identity(master_key, &self.config.repository_id, &lease_state)?;
+        validate_lease_state(
+            &lease_state,
+            &lease_object,
+            &self.config.repository_id,
+            master_key,
+        )?;
+
+        if store
+            .exists(&lease_object)
+            .await
+            .map_err(|source| CoreError::Storage { source })?
+        {
+            let existing = self
+                .read_repository_lease_state(store, master_key, &lease_state.lease_id)
+                .await?;
+            if existing != lease_state {
+                return Err(CoreError::InvalidLeaseState {
+                    key: lease_object,
+                    reason: "existing lease state does not match lease id",
+                });
+            }
+            return Ok(RepositoryLeaseStateWriteResult {
+                repository_id: self.config.repository_id.clone(),
+                lease_id: lease_state.lease_id,
+                lease_object,
+                created: false,
+                bytes_written: 0,
+            });
+        }
+
+        let lease_key = self.derive_lease_state_key(master_key)?;
+        let plaintext = serde_json::to_vec(&lease_state)
+            .map_err(|source| CoreError::Serialization { source })?;
+        let encrypted = encrypt_repository_object(
+            &lease_key,
+            ObjectKind::LeaseState,
+            &lease_object,
+            &plaintext,
+        )?;
+        let bytes_written = encrypted.len() as u64;
+        let status = store
+            .put_if_absent(&lease_object, &encrypted)
+            .await
+            .map_err(|source| match source {
+                StorageError::ObjectAlreadyExists { .. } => CoreError::InvalidLeaseState {
+                    key: lease_object.clone(),
+                    reason: "lease state object already exists with different bytes",
+                },
+                source => CoreError::Storage { source },
+            })?;
+
+        Ok(RepositoryLeaseStateWriteResult {
+            repository_id: self.config.repository_id.clone(),
+            lease_id: lease_state.lease_id,
+            lease_object,
+            created: status == PutStatus::Created,
+            bytes_written: if status == PutStatus::Created {
+                bytes_written
+            } else {
+                0
+            },
+        })
+    }
+
+    pub async fn read_repository_lease_state(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        lease_id: &str,
+    ) -> CoreResult<RepositoryLeaseState> {
+        let lease_object = lease_state_object_key(lease_id)?;
+        let lease_key = self.derive_lease_state_key(master_key)?;
+        let lease_state: RepositoryLeaseState =
+            read_encrypted_json_object(store, &lease_key, ObjectKind::LeaseState, &lease_object)
+                .await
+                .map_err(|error| match error {
+                    CoreError::ObjectDecode { key, source }
+                    | CoreError::MetadataDecode { key, source } => {
+                        CoreError::LeaseStateDecode { key, source }
+                    }
+                    other => other,
+                })?;
+        validate_lease_state(
+            &lease_state,
+            &lease_object,
+            &self.config.repository_id,
+            master_key,
+        )?;
+        Ok(lease_state)
+    }
+
+    pub async fn read_active_repository_lease_state(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        lease_id: &str,
+        now_unix_seconds: u64,
+    ) -> CoreResult<RepositoryLeaseState> {
+        let lease_state = self
+            .read_repository_lease_state(store, master_key, lease_id)
+            .await?;
+        if lease_state.expires_at_unix_seconds <= now_unix_seconds {
+            return Err(CoreError::RepositoryLeaseExpired {
+                lease_id: lease_state.lease_id,
+            });
+        }
+        Ok(lease_state)
+    }
+
     pub async fn write_snapshot(
         &self,
         store: &dyn ObjectStore,
@@ -3313,6 +3511,15 @@ impl BackupPipeline {
                 KeyPurpose::UploadState,
                 self.config.repository_id.as_bytes(),
             )
+            .map_err(|source| CoreError::Encryption { source })
+    }
+
+    fn derive_lease_state_key(
+        &self,
+        master_key: &MasterKey,
+    ) -> CoreResult<fileferry_crypto::Subkey> {
+        master_key
+            .derive_subkey(KeyPurpose::LeaseState, self.config.repository_id.as_bytes())
             .map_err(|source| CoreError::Encryption { source })
     }
 
@@ -6611,6 +6818,100 @@ fn validate_upload_state_object_keys(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct LeaseStateIdentity<'a> {
+    lease_id: &'a str,
+    writer_id: &'a str,
+    command_kind: &'a RepositoryLeaseCommandKind,
+    acquired_at_unix_seconds: u64,
+    expires_at_unix_seconds: u64,
+}
+
+fn lease_state_identity(
+    master_key: &MasterKey,
+    repository_id: &str,
+    state: &RepositoryLeaseState,
+) -> CoreResult<String> {
+    let body = LeaseStateIdentity {
+        lease_id: &state.lease_id,
+        writer_id: &state.writer_id,
+        command_kind: &state.command_kind,
+        acquired_at_unix_seconds: state.acquired_at_unix_seconds,
+        expires_at_unix_seconds: state.expires_at_unix_seconds,
+    };
+    content_id_for_metadata(
+        master_key,
+        KeyPurpose::LeaseState,
+        repository_id.as_bytes(),
+        &body,
+    )
+}
+
+fn validate_lease_state(
+    state: &RepositoryLeaseState,
+    object_key: &ObjectKey,
+    repository_id: &str,
+    master_key: &MasterKey,
+) -> CoreResult<()> {
+    if state.schema_version != 0 {
+        return Err(CoreError::InvalidLeaseState {
+            key: object_key.clone(),
+            reason: "unsupported lease state schema version",
+        });
+    }
+    if state.magic != REPOSITORY_MAGIC {
+        return Err(CoreError::InvalidLeaseState {
+            key: object_key.clone(),
+            reason: "lease state magic is not recognized",
+        });
+    }
+    if state.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+        return Err(CoreError::InvalidLeaseState {
+            key: object_key.clone(),
+            reason: "unsupported lease state format version",
+        });
+    }
+    if state.repository_id != repository_id {
+        return Err(CoreError::InvalidLeaseState {
+            key: object_key.clone(),
+            reason: "lease state repository id does not match this repository",
+        });
+    }
+    if !repository_id_is_valid(&state.repository_id)
+        || !lease_state_id_is_valid(&state.lease_id)
+        || !lease_state_id_is_valid(&state.writer_id)
+        || !lease_state_id_is_valid(&state.state_identity)
+    {
+        return Err(CoreError::InvalidLeaseState {
+            key: object_key.clone(),
+            reason: "lease state id is invalid",
+        });
+    }
+    if lease_state_object_key(&state.lease_id)? != *object_key {
+        return Err(CoreError::InvalidLeaseState {
+            key: object_key.clone(),
+            reason: "lease state object key does not match lease id",
+        });
+    }
+    if state.expires_at_unix_seconds <= state.acquired_at_unix_seconds {
+        return Err(CoreError::InvalidLeaseState {
+            key: object_key.clone(),
+            reason: "lease expiration must be after acquisition time",
+        });
+    }
+    let actual = lease_state_identity(master_key, repository_id, state)?;
+    if actual != state.state_identity {
+        return Err(CoreError::MetadataIdentityMismatch {
+            kind: "lease state",
+            object_key: object_key.clone(),
+            expected: state.state_identity.clone(),
+            actual,
+        });
+    }
+
+    Ok(())
+}
+
 fn validate_retention_policy_config(
     retention: &RepositoryRetentionPolicyConfig,
 ) -> Result<(), &'static str> {
@@ -6974,6 +7275,8 @@ fn prune_object_kind(key: &ObjectKey) -> PruneObjectKind {
         PruneObjectKind::Policy
     } else if value.starts_with("objects/upload/") {
         PruneObjectKind::UploadState
+    } else if value.starts_with("locks/") {
+        PruneObjectKind::LeaseState
     } else if value.starts_with("objects/prune-") {
         PruneObjectKind::PruneState
     } else {
@@ -7005,6 +7308,11 @@ fn object_key_for_policy_config(policy_id: &str) -> CoreResult<ObjectKey> {
 
 fn upload_state_object_key(writer_id: &str, upload_id: &str) -> CoreResult<ObjectKey> {
     ObjectKey::new(format!("{UPLOAD_STATE_PREFIX}/{writer_id}/{upload_id}"))
+        .map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn lease_state_object_key(lease_id: &str) -> CoreResult<ObjectKey> {
+    ObjectKey::new(format!("{LEASE_STATE_PREFIX}/{lease_id}"))
         .map_err(|source| CoreError::ObjectKey { source })
 }
 

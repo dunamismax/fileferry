@@ -1,10 +1,10 @@
 use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, CheckRepositoryOptions, CoreError, PruneObjectKind,
     PruneRepositoryOptions, RepositoryAeadAlgorithm, RepositoryFormatCompatibility,
-    RepositoryPolicyConfigRequest, RepositoryUploadOperation, RepositoryUploadPendingObject,
-    RepositoryUploadPendingObjectKind, RepositoryUploadStateRequest, RestoreContentRequest,
-    SnapshotManifest, create_repository, inspect_repository_format, open_repository,
-    verify_repository_recovery_export,
+    RepositoryLeaseCommandKind, RepositoryLeaseStateRequest, RepositoryPolicyConfigRequest,
+    RepositoryUploadOperation, RepositoryUploadPendingObject, RepositoryUploadPendingObjectKind,
+    RepositoryUploadStateRequest, RestoreContentRequest, SnapshotManifest, create_repository,
+    inspect_repository_format, open_repository, verify_repository_recovery_export,
 };
 use fileferry_crypto::{
     AeadAlgorithm, EncryptedObject, KeyPurpose, ObjectContext, ObjectKind, decrypt_object,
@@ -70,6 +70,13 @@ const UPLOAD_STATE_PASSPHRASE: &str = "upload-state-fixture-passphrase-v0";
 const UPLOAD_WRITER_ID: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const UPLOAD_ID: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const UPLOAD_STATE_OBJECT: &str = "objects/upload/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222";
+const LEASE_STATE_REPOSITORY_ID: &str =
+    "10c715af19853fec72fde8f49904ab36abcd358967f084720d2f1722d201b46b";
+const LEASE_STATE_PASSPHRASE: &str = "lease-state-fixture-passphrase-v0";
+const LEASE_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const LEASE_WRITER_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const LEASE_STATE_OBJECT: &str =
+    "locks/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 const BOOTSTRAP: &[u8] =
     include_bytes!("../../../tests/fixtures/repository-format/v0/bootstrap-keyslot/bootstrap");
@@ -131,6 +138,11 @@ const UPLOAD_STATE_BOOTSTRAP: &[u8] =
     include_bytes!("../../../tests/fixtures/repository-format/v0/upload-state/bootstrap");
 const UPLOAD_STATE: &[u8] = include_bytes!(
     "../../../tests/fixtures/repository-format/v0/upload-state/objects/upload/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222"
+);
+const LEASE_STATE_BOOTSTRAP: &[u8] =
+    include_bytes!("../../../tests/fixtures/repository-format/v0/lease-state/bootstrap");
+const LEASE_STATE: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/lease-state/locks/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 );
 const MIGRATION_FUTURE_FORMAT_BOOTSTRAP: &[u8] = include_bytes!(
     "../../../tests/fixtures/repository-format/v0/migration/future-format-bootstrap/bootstrap"
@@ -260,6 +272,19 @@ async fn load_upload_state_fixture() -> FakeObjectStore {
     store
 }
 
+async fn load_lease_state_fixture() -> FakeObjectStore {
+    let store = FakeObjectStore::new();
+    for (key, bytes) in [
+        ("bootstrap", LEASE_STATE_BOOTSTRAP),
+        (LEASE_STATE_OBJECT, LEASE_STATE),
+    ] {
+        store
+            .overwrite_for_tests(object_key(key), bytes.to_vec())
+            .await;
+    }
+    store
+}
+
 async fn load_migration_bootstrap_fixture(bytes: &[u8]) -> FakeObjectStore {
     let store = FakeObjectStore::new();
     store
@@ -286,6 +311,11 @@ fn policy_config_pipeline() -> BackupPipeline {
 fn upload_state_pipeline() -> BackupPipeline {
     BackupPipeline::new(BackupPipelineConfig::new(UPLOAD_STATE_REPOSITORY_ID))
         .expect("upload-state pipeline")
+}
+
+fn lease_state_pipeline() -> BackupPipeline {
+    BackupPipeline::new(BackupPipelineConfig::new(LEASE_STATE_REPOSITORY_ID))
+        .expect("lease-state pipeline")
 }
 
 fn decode_fixture_encrypted_object(bytes: &[u8]) -> EncryptedObject {
@@ -503,6 +533,42 @@ fn reencrypt_upload_state_plaintext(
     let context =
         ObjectContext::new(ObjectKind::UploadState, object_name).expect("upload state context");
     let encrypted = encrypt_object(&key, &context, plaintext).expect("upload state encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_lease_state_value(
+    opened: &fileferry_core::OpenedRepository,
+    object_name: &str,
+    bytes: &[u8],
+    mutate: impl FnOnce(&mut Value),
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(KeyPurpose::LeaseState, LEASE_STATE_REPOSITORY_ID.as_bytes())
+        .expect("lease state subkey");
+    let context =
+        ObjectContext::new(ObjectKind::LeaseState, object_name).expect("lease state context");
+    let plaintext = decrypt_object(&key, &context, &decode_fixture_encrypted_object(bytes))
+        .expect("fixture lease state decrypts");
+    let mut value: Value = serde_json::from_slice(&plaintext).expect("fixture lease state json");
+    mutate(&mut value);
+    let mutated = serde_json::to_vec(&value).expect("mutated lease state json");
+    let encrypted = encrypt_object(&key, &context, &mutated).expect("mutated lease state encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_lease_state_plaintext(
+    opened: &fileferry_core::OpenedRepository,
+    object_name: &str,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(KeyPurpose::LeaseState, LEASE_STATE_REPOSITORY_ID.as_bytes())
+        .expect("lease state subkey");
+    let context =
+        ObjectContext::new(ObjectKind::LeaseState, object_name).expect("lease state context");
+    let encrypted = encrypt_object(&key, &context, plaintext).expect("lease state encrypts");
     encode_fixture_encrypted_object(encrypted)
 }
 
@@ -2104,6 +2170,286 @@ async fn upload_state_fixture_rejects_stale_repository_state_replay() {
 }
 
 #[tokio::test]
+async fn lease_state_fixture_reads_validates_and_rewrites_idempotently() {
+    let store = load_lease_state_fixture().await;
+    let opened = open_repository(&store, &secret(LEASE_STATE_PASSPHRASE))
+        .await
+        .expect("lease-state fixture opens");
+    assert_eq!(opened.repository_id, LEASE_STATE_REPOSITORY_ID);
+
+    let pipeline = lease_state_pipeline();
+    let state = pipeline
+        .read_repository_lease_state(&store, &opened.master_key, LEASE_ID)
+        .await
+        .expect("lease state reads");
+    assert_eq!(state.repository_id, LEASE_STATE_REPOSITORY_ID);
+    assert_eq!(state.lease_id, LEASE_ID);
+    assert_eq!(state.writer_id, LEASE_WRITER_ID);
+    assert_eq!(state.command_kind, RepositoryLeaseCommandKind::Prune);
+    assert_eq!(state.acquired_at_unix_seconds, 1_779_382_000);
+    assert_eq!(state.expires_at_unix_seconds, 1_779_385_600);
+
+    let active = pipeline
+        .read_active_repository_lease_state(&store, &opened.master_key, LEASE_ID, 1_779_383_000)
+        .await
+        .expect("lease is active before expiration");
+    assert_eq!(active, state);
+
+    let rewritten = pipeline
+        .write_repository_lease_state(
+            &store,
+            &opened.master_key,
+            RepositoryLeaseStateRequest {
+                lease_id: state.lease_id,
+                writer_id: state.writer_id,
+                command_kind: state.command_kind,
+                acquired_at_unix_seconds: state.acquired_at_unix_seconds,
+                expires_at_unix_seconds: state.expires_at_unix_seconds,
+            },
+        )
+        .await
+        .expect("same lease state write is idempotent");
+    assert_eq!(rewritten.lease_object.as_str(), LEASE_STATE_OBJECT);
+    assert!(!rewritten.created);
+    assert_eq!(rewritten.bytes_written, 0);
+}
+
+#[tokio::test]
+async fn lease_state_fixture_rejects_malformed_framing_and_metadata() {
+    let store = load_lease_state_fixture().await;
+    let opened = open_repository(&store, &secret(LEASE_STATE_PASSPHRASE))
+        .await
+        .expect("lease-state fixture opens");
+    let pipeline = lease_state_pipeline();
+
+    store
+        .overwrite_for_tests(object_key(LEASE_STATE_OBJECT), b"not-json".to_vec())
+        .await;
+    let framing_error = pipeline
+        .read_repository_lease_state(&store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("malformed lease state frame is rejected");
+    assert!(matches!(framing_error, CoreError::LeaseStateDecode { .. }));
+
+    store
+        .overwrite_for_tests(
+            object_key(LEASE_STATE_OBJECT),
+            reencrypt_lease_state_plaintext(
+                &opened,
+                LEASE_STATE_OBJECT,
+                br#"{"schema_version":"bad"}"#,
+            ),
+        )
+        .await;
+    let metadata_error = pipeline
+        .read_repository_lease_state(&store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("malformed decrypted lease metadata is rejected");
+    assert!(matches!(metadata_error, CoreError::LeaseStateDecode { .. }));
+}
+
+#[tokio::test]
+async fn lease_state_fixture_rejects_tampered_ciphertext() {
+    let opened_store = load_lease_state_fixture().await;
+    let opened = open_repository(&opened_store, &secret(LEASE_STATE_PASSPHRASE))
+        .await
+        .expect("lease-state fixture opens");
+    let store = load_lease_state_fixture().await;
+    store
+        .overwrite_for_tests(
+            object_key(LEASE_STATE_OBJECT),
+            tamper_fixture_ciphertext(LEASE_STATE),
+        )
+        .await;
+
+    let error = lease_state_pipeline()
+        .read_repository_lease_state(&store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("tampered lease state authentication fails");
+
+    assert!(matches!(
+        error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == LEASE_STATE_OBJECT
+    ));
+}
+
+#[tokio::test]
+async fn lease_state_fixture_rejects_wrong_authenticated_name_or_kind() {
+    let store = load_lease_state_fixture().await;
+    let opened = open_repository(&store, &secret(LEASE_STATE_PASSPHRASE))
+        .await
+        .expect("lease-state fixture opens");
+    let pipeline = lease_state_pipeline();
+
+    let wrong_lease_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let wrong_lease_object =
+        "locks/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    store
+        .overwrite_for_tests(object_key(wrong_lease_object), LEASE_STATE.to_vec())
+        .await;
+    let wrong_name_error = pipeline
+        .read_repository_lease_state(&store, &opened.master_key, wrong_lease_id)
+        .await
+        .expect_err("lease state bytes under the wrong object name fail authentication");
+    assert!(matches!(
+        wrong_name_error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == wrong_lease_object
+    ));
+
+    let lease_key = opened
+        .master_key
+        .derive_subkey(KeyPurpose::LeaseState, LEASE_STATE_REPOSITORY_ID.as_bytes())
+        .expect("lease state subkey");
+    let wrong_kind_context =
+        ObjectContext::new(ObjectKind::Index, LEASE_STATE_OBJECT).expect("wrong-kind context");
+    let wrong_kind = decrypt_object(
+        &lease_key,
+        &wrong_kind_context,
+        &decode_fixture_encrypted_object(LEASE_STATE),
+    );
+    assert!(wrong_kind.is_err());
+}
+
+#[tokio::test]
+async fn lease_state_fixture_rejects_identity_repository_and_expiration_mismatches() {
+    let store = load_lease_state_fixture().await;
+    let opened = open_repository(&store, &secret(LEASE_STATE_PASSPHRASE))
+        .await
+        .expect("lease-state fixture opens");
+
+    store
+        .overwrite_for_tests(
+            object_key(LEASE_STATE_OBJECT),
+            reencrypt_lease_state_value(&opened, LEASE_STATE_OBJECT, LEASE_STATE, |state| {
+                state["writer_id"] =
+                    json!("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+            }),
+        )
+        .await;
+    let identity_error = lease_state_pipeline()
+        .read_repository_lease_state(&store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("lease state identity mismatch is rejected");
+    assert!(matches!(
+        identity_error,
+        CoreError::MetadataIdentityMismatch {
+            kind: "lease state",
+            object_key,
+            ..
+        } if object_key.as_str() == LEASE_STATE_OBJECT
+    ));
+
+    let repository_store = load_lease_state_fixture().await;
+    repository_store
+        .overwrite_for_tests(
+            object_key(LEASE_STATE_OBJECT),
+            reencrypt_lease_state_value(&opened, LEASE_STATE_OBJECT, LEASE_STATE, |state| {
+                state["repository_id"] =
+                    json!("0000000000000000000000000000000000000000000000000000000000000000");
+            }),
+        )
+        .await;
+    let repository_error = lease_state_pipeline()
+        .read_repository_lease_state(&repository_store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("lease repository mismatch is rejected");
+    assert!(matches!(
+        repository_error,
+        CoreError::InvalidLeaseState {
+            reason: "lease state repository id does not match this repository",
+            ..
+        }
+    ));
+
+    let window_store = load_lease_state_fixture().await;
+    window_store
+        .overwrite_for_tests(
+            object_key(LEASE_STATE_OBJECT),
+            reencrypt_lease_state_value(&opened, LEASE_STATE_OBJECT, LEASE_STATE, |state| {
+                state["expires_at_unix_seconds"] = state["acquired_at_unix_seconds"].clone();
+            }),
+        )
+        .await;
+    let window_error = lease_state_pipeline()
+        .read_repository_lease_state(&window_store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("lease expiration window is validated");
+    assert!(matches!(
+        window_error,
+        CoreError::InvalidLeaseState {
+            reason: "lease expiration must be after acquisition time",
+            ..
+        }
+    ));
+
+    let expired_store = load_lease_state_fixture().await;
+    let expired_error = lease_state_pipeline()
+        .read_active_repository_lease_state(
+            &expired_store,
+            &opened.master_key,
+            LEASE_ID,
+            1_779_385_600,
+        )
+        .await
+        .expect_err("expired lease is rejected for active use");
+    assert!(matches!(
+        expired_error,
+        CoreError::RepositoryLeaseExpired { .. }
+    ));
+}
+
+#[tokio::test]
+async fn lease_state_fixture_rejects_unsupported_versions() {
+    let opened_store = load_lease_state_fixture().await;
+    let opened = open_repository(&opened_store, &secret(LEASE_STATE_PASSPHRASE))
+        .await
+        .expect("lease-state fixture opens");
+    let pipeline = lease_state_pipeline();
+
+    let schema_store = load_lease_state_fixture().await;
+    schema_store
+        .overwrite_for_tests(
+            object_key(LEASE_STATE_OBJECT),
+            reencrypt_lease_state_value(&opened, LEASE_STATE_OBJECT, LEASE_STATE, |state| {
+                state["schema_version"] = json!(999);
+            }),
+        )
+        .await;
+    let schema_error = pipeline
+        .read_repository_lease_state(&schema_store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("unsupported lease schema is rejected");
+    assert!(matches!(
+        schema_error,
+        CoreError::InvalidLeaseState {
+            reason: "unsupported lease state schema version",
+            ..
+        }
+    ));
+
+    let format_store = load_lease_state_fixture().await;
+    format_store
+        .overwrite_for_tests(
+            object_key(LEASE_STATE_OBJECT),
+            reencrypt_lease_state_value(&opened, LEASE_STATE_OBJECT, LEASE_STATE, |state| {
+                state["format_version"] = json!(999);
+            }),
+        )
+        .await;
+    let format_error = pipeline
+        .read_repository_lease_state(&format_store, &opened.master_key, LEASE_ID)
+        .await
+        .expect_err("unsupported lease format is rejected");
+    assert!(matches!(
+        format_error,
+        CoreError::InvalidLeaseState {
+            reason: "unsupported lease state format version",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 #[ignore = "fixture generation utility; run manually when intentionally updating upload-state bytes"]
 async fn regenerate_upload_state_fixture() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2168,6 +2514,58 @@ async fn regenerate_upload_state_fixture() {
             .expect("fixture upload-state bytes"),
     )
     .expect("write fixture upload-state object");
+
+    println!("repository_id={}", opened.repository_id);
+}
+
+#[tokio::test]
+#[ignore = "fixture generation utility; run manually when intentionally updating lease-state bytes"]
+async fn regenerate_lease_state_fixture() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/repository-format/v0/lease-state");
+    let store = FakeObjectStore::new();
+    let opened = create_repository(
+        &store,
+        &secret(LEASE_STATE_PASSPHRASE),
+        fileferry_crypto::KdfParams::for_tests(),
+    )
+    .await
+    .expect("create lease-state fixture repository")
+    .repository;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))
+        .expect("lease-state fixture pipeline");
+    pipeline
+        .write_repository_lease_state(
+            &store,
+            &opened.master_key,
+            RepositoryLeaseStateRequest {
+                lease_id: LEASE_ID.to_owned(),
+                writer_id: LEASE_WRITER_ID.to_owned(),
+                command_kind: RepositoryLeaseCommandKind::Prune,
+                acquired_at_unix_seconds: 1_779_382_000,
+                expires_at_unix_seconds: 1_779_385_600,
+            },
+        )
+        .await
+        .expect("write lease-state fixture");
+
+    fs::create_dir_all(root.join("locks")).expect("create lease-state fixture directories");
+    fs::write(
+        root.join("bootstrap"),
+        store
+            .get(&object_key("bootstrap"))
+            .await
+            .expect("fixture bootstrap bytes"),
+    )
+    .expect("write fixture bootstrap");
+    fs::write(
+        root.join(LEASE_STATE_OBJECT),
+        store
+            .get(&object_key(LEASE_STATE_OBJECT))
+            .await
+            .expect("fixture lease-state bytes"),
+    )
+    .expect("write fixture lease-state object");
 
     println!("repository_id={}", opened.repository_id);
 }

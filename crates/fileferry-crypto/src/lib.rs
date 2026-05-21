@@ -195,6 +195,7 @@ pub enum KeyPurpose {
     PolicyConfig,
     UploadState,
     PruneMark,
+    LeaseState,
     KeySlot,
 }
 
@@ -208,6 +209,7 @@ impl KeyPurpose {
             Self::PolicyConfig => b"policy-config",
             Self::UploadState => b"upload-state",
             Self::PruneMark => b"prune-mark",
+            Self::LeaseState => b"lease-state",
             Self::KeySlot => b"key-slot",
         }
     }
@@ -354,6 +356,7 @@ pub enum ObjectKind {
     RepositoryConfig,
     UploadState,
     PruneMark,
+    LeaseState,
 }
 
 impl ObjectKind {
@@ -366,6 +369,7 @@ impl ObjectKind {
             Self::RepositoryConfig => b"repository-config",
             Self::UploadState => b"upload-state",
             Self::PruneMark => b"prune-mark",
+            Self::LeaseState => b"lease-state",
         }
     }
 }
