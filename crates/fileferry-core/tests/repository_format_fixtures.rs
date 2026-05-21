@@ -1,9 +1,10 @@
 use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, CheckRepositoryOptions, CoreError, PruneObjectKind,
-    PruneRepositoryOptions, RepositoryAeadAlgorithm, RepositoryPolicyConfigRequest,
-    RepositoryUploadOperation, RepositoryUploadPendingObject, RepositoryUploadPendingObjectKind,
-    RepositoryUploadStateRequest, RestoreContentRequest, SnapshotManifest, create_repository,
-    open_repository, verify_repository_recovery_export,
+    PruneRepositoryOptions, RepositoryAeadAlgorithm, RepositoryFormatCompatibility,
+    RepositoryPolicyConfigRequest, RepositoryUploadOperation, RepositoryUploadPendingObject,
+    RepositoryUploadPendingObjectKind, RepositoryUploadStateRequest, RestoreContentRequest,
+    SnapshotManifest, create_repository, inspect_repository_format, open_repository,
+    verify_repository_recovery_export,
 };
 use fileferry_crypto::{
     AeadAlgorithm, EncryptedObject, KeyPurpose, ObjectContext, ObjectKind, decrypt_object,
@@ -131,6 +132,15 @@ const UPLOAD_STATE_BOOTSTRAP: &[u8] =
 const UPLOAD_STATE: &[u8] = include_bytes!(
     "../../../tests/fixtures/repository-format/v0/upload-state/objects/upload/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222"
 );
+const MIGRATION_FUTURE_FORMAT_BOOTSTRAP: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/migration/future-format-bootstrap/bootstrap"
+);
+const MIGRATION_FUTURE_FEATURE_BOOTSTRAP: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/migration/future-feature-bootstrap/bootstrap"
+);
+const MIGRATION_UNVERSIONED_BOOTSTRAP: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/migration/unversioned-bootstrap/bootstrap"
+);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FixtureEncryptedObject {
@@ -247,6 +257,14 @@ async fn load_upload_state_fixture() -> FakeObjectStore {
             .overwrite_for_tests(object_key(key), bytes.to_vec())
             .await;
     }
+    store
+}
+
+async fn load_migration_bootstrap_fixture(bytes: &[u8]) -> FakeObjectStore {
+    let store = FakeObjectStore::new();
+    store
+        .overwrite_for_tests(object_key("bootstrap"), bytes.to_vec())
+        .await;
     store
 }
 
@@ -566,6 +584,110 @@ async fn unsupported_bootstrap_fixture_version_is_rejected() {
             format_version: 999
         }
     ));
+}
+
+#[tokio::test]
+async fn migration_current_v0_fixture_is_detected_as_current() {
+    let store = load_bootstrap_and_key_slot().await;
+
+    let inspection = inspect_repository_format(&store)
+        .await
+        .expect("format inspection succeeds for v0 fixture");
+
+    assert_eq!(inspection.format_version, 0);
+    assert_eq!(inspection.latest_supported_format_version, 0);
+    assert_eq!(
+        inspection.compatibility,
+        RepositoryFormatCompatibility::Current
+    );
+    assert!(inspection.features.is_empty());
+
+    let opened = open_repository(&store, &secret(PRIMARY_PASSPHRASE))
+        .await
+        .expect("current v0 fixture still opens");
+    assert_eq!(opened.repository_id, REPOSITORY_ID);
+}
+
+#[tokio::test]
+async fn migration_future_format_fixture_is_detected_and_rejected() {
+    let store = load_migration_bootstrap_fixture(MIGRATION_FUTURE_FORMAT_BOOTSTRAP).await;
+
+    let inspection = inspect_repository_format(&store)
+        .await
+        .expect("future format bootstrap can be inspected without unlock");
+    assert_eq!(inspection.format_version, 1);
+    assert_eq!(inspection.latest_supported_format_version, 0);
+    assert_eq!(
+        inspection.compatibility,
+        RepositoryFormatCompatibility::UnsupportedFuture
+    );
+
+    let error = open_repository(&store, &secret(PRIMARY_PASSPHRASE))
+        .await
+        .expect_err("future repository format is rejected before unlock");
+    assert!(matches!(
+        error,
+        CoreError::UnsupportedRepositoryFormat { format_version: 1 }
+    ));
+}
+
+#[tokio::test]
+async fn migration_future_feature_fixture_is_detected_and_rejected() {
+    let store = load_migration_bootstrap_fixture(MIGRATION_FUTURE_FEATURE_BOOTSTRAP).await;
+
+    let inspection = inspect_repository_format(&store)
+        .await
+        .expect("future feature bootstrap can be inspected without unlock");
+    assert_eq!(inspection.format_version, 0);
+    assert_eq!(
+        inspection.compatibility,
+        RepositoryFormatCompatibility::UnsupportedFeatures
+    );
+    assert_eq!(
+        inspection.features,
+        vec!["requires-migration-v1".to_owned()]
+    );
+
+    let error = open_repository(&store, &secret(PRIMARY_PASSPHRASE))
+        .await
+        .expect_err("supported format with unknown feature flags is rejected before unlock");
+    assert!(matches!(error, CoreError::UnsupportedRepositoryFeatures));
+}
+
+#[tokio::test]
+async fn migration_unversioned_bootstrap_fixture_is_rejected_as_pre_v0() {
+    let store = load_migration_bootstrap_fixture(MIGRATION_UNVERSIONED_BOOTSTRAP).await;
+
+    let inspection_error = inspect_repository_format(&store)
+        .await
+        .expect_err("unversioned bootstrap has no migration path");
+    assert!(matches!(
+        inspection_error,
+        CoreError::InvalidRepositoryBootstrap {
+            reason: "repository format version is missing"
+        }
+    ));
+
+    let open_error = open_repository(&store, &secret(PRIMARY_PASSPHRASE))
+        .await
+        .expect_err("unversioned bootstrap is rejected through normal open");
+    assert!(matches!(
+        open_error,
+        CoreError::InvalidRepositoryBootstrap {
+            reason: "repository format version is missing"
+        }
+    ));
+}
+
+#[tokio::test]
+async fn migration_format_inspection_rejects_malformed_bootstrap_json() {
+    let store = load_migration_bootstrap_fixture(b"not-json").await;
+
+    let error = inspect_repository_format(&store)
+        .await
+        .expect_err("malformed bootstrap is rejected by format inspection");
+
+    assert!(matches!(error, CoreError::RepositoryBootstrapDecode { .. }));
 }
 
 #[tokio::test]

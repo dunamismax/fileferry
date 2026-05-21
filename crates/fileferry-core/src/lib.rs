@@ -658,6 +658,22 @@ pub struct OpenedRepository {
     pub unlocked_key_slot_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepositoryFormatCompatibility {
+    Current,
+    UnsupportedFuture,
+    UnsupportedLegacy,
+    UnsupportedFeatures,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryFormatInspection {
+    pub format_version: u16,
+    pub latest_supported_format_version: u16,
+    pub compatibility: RepositoryFormatCompatibility,
+    pub features: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct RepositoryInitResult {
     pub repository: OpenedRepository,
@@ -918,6 +934,13 @@ pub enum PruneObjectKind {
     UploadState,
     PruneState,
     Other,
+}
+
+pub async fn inspect_repository_format(
+    store: &dyn ObjectStore,
+) -> CoreResult<RepositoryFormatInspection> {
+    let bytes = read_repository_bootstrap_bytes(store).await?;
+    inspect_repository_bootstrap_bytes(&bytes)
 }
 
 pub async fn create_repository(
@@ -1447,6 +1470,13 @@ struct RepositoryBootstrap {
     features: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RepositoryBootstrapInspectionEnvelope {
+    magic: String,
+    format_version: Option<u16>,
+    features: Option<Vec<String>>,
+}
+
 impl RepositoryBootstrap {
     fn validate(&self) -> CoreResult<()> {
         if self.magic != REPOSITORY_MAGIC {
@@ -1482,15 +1512,86 @@ impl RepositoryBootstrap {
 }
 
 async fn load_repository_bootstrap(store: &dyn ObjectStore) -> CoreResult<RepositoryBootstrap> {
+    let bytes = read_repository_bootstrap_bytes(store).await?;
+    decode_repository_bootstrap(&bytes)
+}
+
+async fn read_repository_bootstrap_bytes(store: &dyn ObjectStore) -> CoreResult<Vec<u8>> {
     let key = bootstrap_object_key()?;
-    let bytes = store.get(&key).await.map_err(|source| match source {
+    store.get(&key).await.map_err(|source| match source {
         StorageError::ObjectNotFound { .. } => CoreError::RepositoryNotInitialized,
         source => CoreError::Storage { source },
-    })?;
-    let bootstrap: RepositoryBootstrap = serde_json::from_slice(&bytes)
+    })
+}
+
+fn decode_repository_bootstrap(bytes: &[u8]) -> CoreResult<RepositoryBootstrap> {
+    let inspection = inspect_repository_bootstrap_bytes(bytes)?;
+    match inspection.compatibility {
+        RepositoryFormatCompatibility::Current => {}
+        RepositoryFormatCompatibility::UnsupportedFuture
+        | RepositoryFormatCompatibility::UnsupportedLegacy => {
+            return Err(CoreError::UnsupportedRepositoryFormat {
+                format_version: inspection.format_version,
+            });
+        }
+        RepositoryFormatCompatibility::UnsupportedFeatures => {
+            return Err(CoreError::UnsupportedRepositoryFeatures);
+        }
+    }
+
+    let bootstrap: RepositoryBootstrap = serde_json::from_slice(bytes)
         .map_err(|source| CoreError::RepositoryBootstrapDecode { source })?;
     bootstrap.validate()?;
     Ok(bootstrap)
+}
+
+fn inspect_repository_bootstrap_bytes(bytes: &[u8]) -> CoreResult<RepositoryFormatInspection> {
+    let envelope: RepositoryBootstrapInspectionEnvelope = serde_json::from_slice(bytes)
+        .map_err(|source| CoreError::RepositoryBootstrapDecode { source })?;
+    if envelope.magic != REPOSITORY_MAGIC {
+        return Err(CoreError::InvalidRepositoryBootstrap {
+            reason: "repository magic is not recognized",
+        });
+    }
+    let Some(format_version) = envelope.format_version else {
+        return Err(CoreError::InvalidRepositoryBootstrap {
+            reason: "repository format version is missing",
+        });
+    };
+    let Some(features) = envelope.features else {
+        return Err(CoreError::InvalidRepositoryBootstrap {
+            reason: "repository feature list is missing",
+        });
+    };
+    let latest_supported_format_version = latest_supported_repository_format_version();
+    let compatibility =
+        repository_format_compatibility(format_version, latest_supported_format_version, &features);
+    Ok(RepositoryFormatInspection {
+        format_version,
+        latest_supported_format_version,
+        compatibility,
+        features,
+    })
+}
+
+fn repository_format_compatibility(
+    format_version: u16,
+    latest_supported_format_version: u16,
+    features: &[String],
+) -> RepositoryFormatCompatibility {
+    if format_version > latest_supported_format_version {
+        RepositoryFormatCompatibility::UnsupportedFuture
+    } else if format_version < latest_supported_format_version {
+        RepositoryFormatCompatibility::UnsupportedLegacy
+    } else if !features.is_empty() {
+        RepositoryFormatCompatibility::UnsupportedFeatures
+    } else {
+        RepositoryFormatCompatibility::Current
+    }
+}
+
+fn latest_supported_repository_format_version() -> u16 {
+    REPOSITORY_FORMAT_VERSION_V0
 }
 
 #[derive(Clone, Debug)]

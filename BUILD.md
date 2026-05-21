@@ -410,6 +410,14 @@ Current status:
   format versions, repository identity mismatches, and stale upload-state
   replay when current commit/forget marker state no longer matches the marked
   state.
+- Continued with a migration-detection fixture slice. Golden bootstrap bytes
+  now exist for a current v0 compatibility gate, an unsupported future format
+  version, unsupported v0 feature flags, and unversioned pre-v0 metadata.
+  Focused tests prove current code can inspect format compatibility without
+  unlocking key slots, open the current v0 fixture, reject malformed bootstrap
+  JSON during inspection, reject future formats and unknown feature flags before
+  unlock, and reject unversioned pre-v0 metadata instead of guessing a
+  migration.
 
 These slices do not freeze the rest of format v0.
 
@@ -422,7 +430,10 @@ Definition of done:
   or tampered variants with documented error classes.
 - `docs/repository-format.md` identifies which fields are compatibility
   contracts and which remain internal.
-- Migration detection and unsupported-version behavior are tested.
+- Migration detection and unsupported-version behavior are tested for the
+  current bootstrap compatibility gate. Full migration implementation and
+  cross-version compatibility remain open until a migration is intentionally
+  designed.
 
 Non-goals:
 
@@ -983,6 +994,22 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Continued Milestone H with the migration-detection fixture
+  slice. Added a narrow `fileferry-core` repository format inspection API that
+  reads bootstrap compatibility metadata without unlocking key slots and
+  classifies current v0, unsupported future versions, unsupported feature
+  flags, and unversioned pre-v0 metadata. Added golden bootstrap fixture bytes
+  under `tests/fixtures/repository-format/v0/migration/` for a future format
+  version, unknown v0 feature flags, and unversioned pre-v0 metadata, while the
+  current v0 path is checked against the existing bootstrap/key-slot fixture.
+  Added focused fixture tests that inspect and open the current v0 fixture,
+  reject malformed bootstrap JSON during inspection, reject future formats and
+  unknown feature flags before unlock, and reject unversioned pre-v0 metadata
+  instead of guessing a migration. Updated `docs/repository-format.md` and
+  `docs/security.md` to describe only this proven compatibility-gate slice.
+  This does not implement migrations or freeze all of format v0. Verified the
+  focused test with
+  `cargo test -p fileferry-core --test repository_format_fixtures migration_ -- --nocapture`.
 - 2026-05-21 - Continued Milestone H with the upload-state fixture slice. Added
   a narrow `fileferry-core` repository upload-state object API that writes
   encrypted/authenticated upload state under `objects/upload/<writer-id>/<upload-id>`,

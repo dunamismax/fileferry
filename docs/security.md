@@ -277,6 +277,14 @@ stale upload-state replay when current commit/forget marker state no longer
 matches the marked state, and treats an already-present matching upload state as
 an idempotent write result.
 
+Current migration-detection fixture coverage includes bootstrap-only fixtures
+for current v0, an unsupported future format version, unsupported v0 feature
+flags, and unversioned pre-v0 metadata. Focused tests prove that current code
+can inspect bootstrap format compatibility without unlocking key slots, rejects
+malformed bootstrap JSON during inspection, rejects future format versions and
+unknown current-format feature flags before unlock, and rejects unversioned
+pre-v0 metadata instead of guessing a migration.
+
 ## Key Rotation
 
 Key rotation has two different meanings:

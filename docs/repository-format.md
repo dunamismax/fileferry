@@ -3,9 +3,9 @@
 FileFerry's repository format is original to FileFerry. Format v0 is not frozen.
 Initial compatibility fixtures exist for narrow bootstrap/key-slot and
 recovery-export, committed snapshot-data, forget/prune-state, and policy/config
-and upload-state slices. This document defines the initial shape needed for
-implementation work; byte-level fixtures become the compatibility contract only
-after the first intentional freeze.
+and upload-state slices, plus a narrow migration-detection slice. This document
+defines the initial shape needed for implementation work; byte-level fixtures
+become the compatibility contract only after the first intentional freeze.
 
 ## Format Principles
 
@@ -420,6 +420,22 @@ Every repository has a detectable format version. Future migrations must:
   one-way rewrite.
 - Have tests for old fixtures before the migration is advertised.
 
+Current implementation status:
+
+- `fileferry-core` can inspect the plaintext bootstrap format version and
+  declared feature flags without unlocking repository key slots.
+- Format version `0` with no feature flags is classified as the current
+  supported repository format.
+- Unknown future format versions are classified as future-incompatible and are
+  rejected before unlock with `UnsupportedRepositoryFormat`.
+- Format version `0` with unknown feature flags is classified as
+  feature-incompatible and is rejected before unlock with
+  `UnsupportedRepositoryFeatures`.
+- Unversioned bootstrap objects are treated as invalid pre-v0/unversioned
+  repository metadata. No migration path exists for them.
+- No read-compatible, write-compatible, or one-way migration is implemented
+  yet.
+
 ## Fixture Status
 
 Initial golden fixtures now exist under:
@@ -440,10 +456,14 @@ Initial golden fixtures now exist under:
   repository containing one encrypted policy/config object.
 - `tests/fixtures/repository-format/v0/upload-state/` for one initialized
   repository containing one encrypted upload-state object.
+- `tests/fixtures/repository-format/v0/migration/` for bootstrap-only
+  compatibility-gate fixtures covering current v0 detection, an unsupported
+  future format version, unsupported v0 feature flags, and an unversioned
+  pre-v0 rejection case.
 
 These are narrow compatibility-fixture slices for format v0. They do not freeze
-all of format v0. Migration fixtures and full cross-version compatibility
-remain open Milestone H work.
+all of format v0. Migration implementation and full cross-version
+compatibility remain open Milestone H work.
 
 For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 
@@ -504,6 +524,18 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
   `magic`, `format_version`, `repository_id`, `writer_id`, `upload_id`,
   `created_at_unix_seconds`, `operation`, `commit_objects`,
   `forget_marker_objects`, `pending_objects`, and `state_identity`.
+- `migration/future-format-bootstrap/bootstrap`: plaintext `magic`,
+  `format_version`, `repository_id`, `key_slots`, and `features`; the fixture
+  proves that unknown future repository formats are detected without unlock and
+  rejected as incompatible.
+- `migration/future-feature-bootstrap/bootstrap`: plaintext `magic`,
+  `format_version`, `repository_id`, `key_slots`, and `features`; the fixture
+  proves that unknown feature flags in the current format are detected without
+  unlock and rejected as incompatible.
+- `migration/unversioned-bootstrap/bootstrap`: plaintext `magic`,
+  `repository_id`, `key_slots`, and `features`; the fixture proves that
+  unversioned pre-v0 bootstrap metadata has no implicit migration path and is
+  rejected as invalid bootstrap metadata.
 
 The fixture passphrases are test-only unlock inputs. They are not production
 secrets and do not imply recovery import. Tests prove current code can read the
@@ -550,3 +582,9 @@ upload-state metadata identity mismatches, reject unsupported upload-state
 schema and format versions, reject repository identity mismatches, and reject
 stale upload-state replay when current commit/forget marker state no longer
 matches the marked state.
+The migration fixture tests prove current code can inspect current v0
+bootstrap metadata without unlock, open the current v0 fixture, reject
+malformed bootstrap JSON during inspection, reject unknown future format
+versions before unlock, reject unknown current-format feature flags before
+unlock, and reject unversioned pre-v0 bootstrap metadata as invalid rather than
+guessing a migration.
