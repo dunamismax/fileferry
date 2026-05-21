@@ -1,18 +1,20 @@
 use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, CheckRepositoryOptions, CoreError, PruneObjectKind,
     PruneRepositoryOptions, RepositoryAeadAlgorithm, RepositoryPolicyConfigRequest,
-    RestoreContentRequest, SnapshotManifest, open_repository, verify_repository_recovery_export,
+    RepositoryUploadOperation, RepositoryUploadPendingObject, RepositoryUploadPendingObjectKind,
+    RepositoryUploadStateRequest, RestoreContentRequest, SnapshotManifest, create_repository,
+    open_repository, verify_repository_recovery_export,
 };
 use fileferry_crypto::{
     AeadAlgorithm, EncryptedObject, KeyPurpose, ObjectContext, ObjectKind, decrypt_object,
     encrypt_object,
 };
-use fileferry_storage::ObjectKey;
+use fileferry_storage::{ObjectKey, ObjectStore};
 use fileferry_testkit::FakeObjectStore;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 const REPOSITORY_ID: &str = "b65c7dfa2394e1b21ebea003397da66b721cc793b376e1edcd78d7f990954771";
 const KEY_SLOT_ID: &str = "370e4852331603403cbd038dfa1f4cc4577d2f326f94a19a218be7dc88921f50";
@@ -61,6 +63,12 @@ const POLICY_CONFIG_PASSPHRASE: &str = "policy-config-fixture-passphrase-v0";
 const POLICY_ID: &str = "382b7e84bd6ac92b93aba74dd9c2733fd97f68f479055a20383b19744622e6f8";
 const POLICY_OBJECT: &str =
     "objects/policy/38/382b7e84bd6ac92b93aba74dd9c2733fd97f68f479055a20383b19744622e6f8";
+const UPLOAD_STATE_REPOSITORY_ID: &str =
+    "c152dc99c29a879eed76014cb583b17fd993b8208ad0c8590af34d4571df5d91";
+const UPLOAD_STATE_PASSPHRASE: &str = "upload-state-fixture-passphrase-v0";
+const UPLOAD_WRITER_ID: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const UPLOAD_ID: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+const UPLOAD_STATE_OBJECT: &str = "objects/upload/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222";
 
 const BOOTSTRAP: &[u8] =
     include_bytes!("../../../tests/fixtures/repository-format/v0/bootstrap-keyslot/bootstrap");
@@ -117,6 +125,11 @@ const POLICY_CONFIG_BOOTSTRAP: &[u8] =
     include_bytes!("../../../tests/fixtures/repository-format/v0/policy-config/bootstrap");
 const POLICY_CONFIG: &[u8] = include_bytes!(
     "../../../tests/fixtures/repository-format/v0/policy-config/objects/policy/38/382b7e84bd6ac92b93aba74dd9c2733fd97f68f479055a20383b19744622e6f8"
+);
+const UPLOAD_STATE_BOOTSTRAP: &[u8] =
+    include_bytes!("../../../tests/fixtures/repository-format/v0/upload-state/bootstrap");
+const UPLOAD_STATE: &[u8] = include_bytes!(
+    "../../../tests/fixtures/repository-format/v0/upload-state/objects/upload/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222"
 );
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -224,6 +237,19 @@ async fn load_policy_config_fixture() -> FakeObjectStore {
     store
 }
 
+async fn load_upload_state_fixture() -> FakeObjectStore {
+    let store = FakeObjectStore::new();
+    for (key, bytes) in [
+        ("bootstrap", UPLOAD_STATE_BOOTSTRAP),
+        (UPLOAD_STATE_OBJECT, UPLOAD_STATE),
+    ] {
+        store
+            .overwrite_for_tests(object_key(key), bytes.to_vec())
+            .await;
+    }
+    store
+}
+
 fn snapshot_data_pipeline() -> BackupPipeline {
     BackupPipeline::new(BackupPipelineConfig::new(SNAPSHOT_DATA_REPOSITORY_ID))
         .expect("snapshot-data pipeline")
@@ -237,6 +263,11 @@ fn forget_prune_pipeline() -> BackupPipeline {
 fn policy_config_pipeline() -> BackupPipeline {
     BackupPipeline::new(BackupPipelineConfig::new(POLICY_CONFIG_REPOSITORY_ID))
         .expect("policy-config pipeline")
+}
+
+fn upload_state_pipeline() -> BackupPipeline {
+    BackupPipeline::new(BackupPipelineConfig::new(UPLOAD_STATE_REPOSITORY_ID))
+        .expect("upload-state pipeline")
 }
 
 fn decode_fixture_encrypted_object(bytes: &[u8]) -> EncryptedObject {
@@ -411,6 +442,49 @@ fn reencrypt_policy_config_plaintext(
     let context =
         ObjectContext::new(ObjectKind::PolicyConfig, object_name).expect("policy config context");
     let encrypted = encrypt_object(&key, &context, plaintext).expect("policy config encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_upload_state_value(
+    opened: &fileferry_core::OpenedRepository,
+    object_name: &str,
+    bytes: &[u8],
+    mutate: impl FnOnce(&mut Value),
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(
+            KeyPurpose::UploadState,
+            UPLOAD_STATE_REPOSITORY_ID.as_bytes(),
+        )
+        .expect("upload state subkey");
+    let context =
+        ObjectContext::new(ObjectKind::UploadState, object_name).expect("upload state context");
+    let plaintext = decrypt_object(&key, &context, &decode_fixture_encrypted_object(bytes))
+        .expect("fixture upload state decrypts");
+    let mut value: Value = serde_json::from_slice(&plaintext).expect("fixture upload state json");
+    mutate(&mut value);
+    let mutated = serde_json::to_vec(&value).expect("mutated upload state json");
+    let encrypted =
+        encrypt_object(&key, &context, &mutated).expect("mutated upload state encrypts");
+    encode_fixture_encrypted_object(encrypted)
+}
+
+fn reencrypt_upload_state_plaintext(
+    opened: &fileferry_core::OpenedRepository,
+    object_name: &str,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let key = opened
+        .master_key
+        .derive_subkey(
+            KeyPurpose::UploadState,
+            UPLOAD_STATE_REPOSITORY_ID.as_bytes(),
+        )
+        .expect("upload state subkey");
+    let context =
+        ObjectContext::new(ObjectKind::UploadState, object_name).expect("upload state context");
+    let encrypted = encrypt_object(&key, &context, plaintext).expect("upload state encrypts");
     encode_fixture_encrypted_object(encrypted)
 }
 
@@ -1597,4 +1671,381 @@ async fn policy_config_fixture_rejects_invalid_retention_shape() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn upload_state_fixture_reads_validates_and_rewrites_idempotently() {
+    let store = load_upload_state_fixture().await;
+    let opened = open_repository(&store, &secret(UPLOAD_STATE_PASSPHRASE))
+        .await
+        .expect("upload-state fixture opens");
+    assert_eq!(opened.repository_id, UPLOAD_STATE_REPOSITORY_ID);
+
+    let pipeline = upload_state_pipeline();
+    let state = pipeline
+        .read_repository_upload_state(&store, &opened.master_key, UPLOAD_WRITER_ID, UPLOAD_ID)
+        .await
+        .expect("upload state reads");
+    assert_eq!(state.repository_id, UPLOAD_STATE_REPOSITORY_ID);
+    assert_eq!(state.writer_id, UPLOAD_WRITER_ID);
+    assert_eq!(state.upload_id, UPLOAD_ID);
+    assert_eq!(state.created_at_unix_seconds, 1_779_381_000);
+    assert_eq!(state.operation, RepositoryUploadOperation::BackupSnapshot);
+    assert!(state.commit_objects.is_empty());
+    assert!(state.forget_marker_objects.is_empty());
+    assert_eq!(state.pending_objects.len(), 3);
+    assert_eq!(
+        state.pending_objects[0].kind,
+        RepositoryUploadPendingObjectKind::Chunk
+    );
+
+    let resumed = pipeline
+        .read_repository_upload_state_for_resume(
+            &store,
+            &opened.master_key,
+            UPLOAD_WRITER_ID,
+            UPLOAD_ID,
+        )
+        .await
+        .expect("upload state is current for resume");
+    assert_eq!(resumed, state);
+
+    let rewritten = pipeline
+        .write_repository_upload_state(
+            &store,
+            &opened.master_key,
+            RepositoryUploadStateRequest {
+                writer_id: state.writer_id,
+                upload_id: state.upload_id,
+                created_at_unix_seconds: state.created_at_unix_seconds,
+                operation: state.operation,
+                pending_objects: state.pending_objects,
+            },
+        )
+        .await
+        .expect("same upload state write is idempotent");
+    assert_eq!(rewritten.upload_object.as_str(), UPLOAD_STATE_OBJECT);
+    assert!(!rewritten.created);
+    assert_eq!(rewritten.bytes_written, 0);
+}
+
+#[tokio::test]
+async fn upload_state_fixture_rejects_malformed_framing_and_metadata() {
+    let store = load_upload_state_fixture().await;
+    let opened = open_repository(&store, &secret(UPLOAD_STATE_PASSPHRASE))
+        .await
+        .expect("upload-state fixture opens");
+    let pipeline = upload_state_pipeline();
+
+    store
+        .overwrite_for_tests(object_key(UPLOAD_STATE_OBJECT), b"not-json".to_vec())
+        .await;
+    let framing_error = pipeline
+        .read_repository_upload_state(&store, &opened.master_key, UPLOAD_WRITER_ID, UPLOAD_ID)
+        .await
+        .expect_err("malformed upload state frame is rejected");
+    assert!(matches!(framing_error, CoreError::UploadStateDecode { .. }));
+
+    store
+        .overwrite_for_tests(
+            object_key(UPLOAD_STATE_OBJECT),
+            reencrypt_upload_state_plaintext(
+                &opened,
+                UPLOAD_STATE_OBJECT,
+                br#"{"schema_version":"bad"}"#,
+            ),
+        )
+        .await;
+    let metadata_error = pipeline
+        .read_repository_upload_state(&store, &opened.master_key, UPLOAD_WRITER_ID, UPLOAD_ID)
+        .await
+        .expect_err("malformed decrypted upload state metadata is rejected");
+    assert!(matches!(
+        metadata_error,
+        CoreError::UploadStateDecode { .. }
+    ));
+}
+
+#[tokio::test]
+async fn upload_state_fixture_rejects_tampered_ciphertext() {
+    let opened_store = load_upload_state_fixture().await;
+    let opened = open_repository(&opened_store, &secret(UPLOAD_STATE_PASSPHRASE))
+        .await
+        .expect("upload-state fixture opens");
+    let store = load_upload_state_fixture().await;
+    store
+        .overwrite_for_tests(
+            object_key(UPLOAD_STATE_OBJECT),
+            tamper_fixture_ciphertext(UPLOAD_STATE),
+        )
+        .await;
+
+    let error = upload_state_pipeline()
+        .read_repository_upload_state(&store, &opened.master_key, UPLOAD_WRITER_ID, UPLOAD_ID)
+        .await
+        .expect_err("tampered upload state authentication fails");
+
+    assert!(matches!(
+        error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == UPLOAD_STATE_OBJECT
+    ));
+}
+
+#[tokio::test]
+async fn upload_state_fixture_rejects_wrong_authenticated_name_or_kind() {
+    let store = load_upload_state_fixture().await;
+    let opened = open_repository(&store, &secret(UPLOAD_STATE_PASSPHRASE))
+        .await
+        .expect("upload-state fixture opens");
+    let pipeline = upload_state_pipeline();
+
+    let wrong_upload_id = "3333333333333333333333333333333333333333333333333333333333333333";
+    let wrong_upload_object = "objects/upload/1111111111111111111111111111111111111111111111111111111111111111/3333333333333333333333333333333333333333333333333333333333333333";
+    store
+        .overwrite_for_tests(object_key(wrong_upload_object), UPLOAD_STATE.to_vec())
+        .await;
+    let wrong_name_error = pipeline
+        .read_repository_upload_state(
+            &store,
+            &opened.master_key,
+            UPLOAD_WRITER_ID,
+            wrong_upload_id,
+        )
+        .await
+        .expect_err("upload state bytes under the wrong object name fail authentication");
+    assert!(matches!(
+        wrong_name_error,
+        CoreError::ObjectAuthentication { key, .. } if key.as_str() == wrong_upload_object
+    ));
+
+    let upload_key = opened
+        .master_key
+        .derive_subkey(
+            KeyPurpose::UploadState,
+            UPLOAD_STATE_REPOSITORY_ID.as_bytes(),
+        )
+        .expect("upload state subkey");
+    let wrong_kind_context =
+        ObjectContext::new(ObjectKind::Index, UPLOAD_STATE_OBJECT).expect("wrong-kind context");
+    let wrong_kind = decrypt_object(
+        &upload_key,
+        &wrong_kind_context,
+        &decode_fixture_encrypted_object(UPLOAD_STATE),
+    );
+    assert!(wrong_kind.is_err());
+}
+
+#[tokio::test]
+async fn upload_state_fixture_rejects_identity_and_repository_mismatches() {
+    let store = load_upload_state_fixture().await;
+    let opened = open_repository(&store, &secret(UPLOAD_STATE_PASSPHRASE))
+        .await
+        .expect("upload-state fixture opens");
+
+    store
+        .overwrite_for_tests(
+            object_key(UPLOAD_STATE_OBJECT),
+            reencrypt_upload_state_value(&opened, UPLOAD_STATE_OBJECT, UPLOAD_STATE, |state| {
+                state["pending_objects"][0]["bytes"] = json!(999);
+            }),
+        )
+        .await;
+    let identity_error = upload_state_pipeline()
+        .read_repository_upload_state(&store, &opened.master_key, UPLOAD_WRITER_ID, UPLOAD_ID)
+        .await
+        .expect_err("upload state identity mismatch is rejected");
+    assert!(matches!(
+        identity_error,
+        CoreError::MetadataIdentityMismatch {
+            kind: "upload state",
+            object_key,
+            ..
+        } if object_key.as_str() == UPLOAD_STATE_OBJECT
+    ));
+
+    let repository_store = load_upload_state_fixture().await;
+    repository_store
+        .overwrite_for_tests(
+            object_key(UPLOAD_STATE_OBJECT),
+            reencrypt_upload_state_value(&opened, UPLOAD_STATE_OBJECT, UPLOAD_STATE, |state| {
+                state["repository_id"] =
+                    json!("0000000000000000000000000000000000000000000000000000000000000000");
+            }),
+        )
+        .await;
+    let repository_error = upload_state_pipeline()
+        .read_repository_upload_state(
+            &repository_store,
+            &opened.master_key,
+            UPLOAD_WRITER_ID,
+            UPLOAD_ID,
+        )
+        .await
+        .expect_err("upload state repository mismatch is rejected");
+    assert!(matches!(
+        repository_error,
+        CoreError::InvalidUploadState {
+            reason: "upload state repository id does not match this repository",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn upload_state_fixture_rejects_unsupported_versions() {
+    let opened_store = load_upload_state_fixture().await;
+    let opened = open_repository(&opened_store, &secret(UPLOAD_STATE_PASSPHRASE))
+        .await
+        .expect("upload-state fixture opens");
+    let pipeline = upload_state_pipeline();
+
+    let schema_store = load_upload_state_fixture().await;
+    schema_store
+        .overwrite_for_tests(
+            object_key(UPLOAD_STATE_OBJECT),
+            reencrypt_upload_state_value(&opened, UPLOAD_STATE_OBJECT, UPLOAD_STATE, |state| {
+                state["schema_version"] = json!(999);
+            }),
+        )
+        .await;
+    let schema_error = pipeline
+        .read_repository_upload_state(
+            &schema_store,
+            &opened.master_key,
+            UPLOAD_WRITER_ID,
+            UPLOAD_ID,
+        )
+        .await
+        .expect_err("unsupported upload state schema is rejected");
+    assert!(matches!(
+        schema_error,
+        CoreError::InvalidUploadState {
+            reason: "unsupported upload state schema version",
+            ..
+        }
+    ));
+
+    let format_store = load_upload_state_fixture().await;
+    format_store
+        .overwrite_for_tests(
+            object_key(UPLOAD_STATE_OBJECT),
+            reencrypt_upload_state_value(&opened, UPLOAD_STATE_OBJECT, UPLOAD_STATE, |state| {
+                state["format_version"] = json!(999);
+            }),
+        )
+        .await;
+    let format_error = pipeline
+        .read_repository_upload_state(
+            &format_store,
+            &opened.master_key,
+            UPLOAD_WRITER_ID,
+            UPLOAD_ID,
+        )
+        .await
+        .expect_err("unsupported upload state format is rejected");
+    assert!(matches!(
+        format_error,
+        CoreError::InvalidUploadState {
+            reason: "unsupported upload state format version",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn upload_state_fixture_rejects_stale_repository_state_replay() {
+    let store = load_upload_state_fixture().await;
+    let opened = open_repository(&store, &secret(UPLOAD_STATE_PASSPHRASE))
+        .await
+        .expect("upload-state fixture opens");
+    store
+        .overwrite_for_tests(
+            object_key("commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            br#"{"schema_version":0}"#.to_vec(),
+        )
+        .await;
+
+    let error = upload_state_pipeline()
+        .read_repository_upload_state_for_resume(
+            &store,
+            &opened.master_key,
+            UPLOAD_WRITER_ID,
+            UPLOAD_ID,
+        )
+        .await
+        .expect_err("stale upload state is rejected before resume");
+
+    assert!(matches!(
+        error,
+        CoreError::UploadRepositoryStateChanged { .. }
+    ));
+}
+
+#[tokio::test]
+#[ignore = "fixture generation utility; run manually when intentionally updating upload-state bytes"]
+async fn regenerate_upload_state_fixture() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/repository-format/v0/upload-state");
+    let store = FakeObjectStore::new();
+    let opened = create_repository(
+        &store,
+        &secret(UPLOAD_STATE_PASSPHRASE),
+        fileferry_crypto::KdfParams::for_tests(),
+    )
+    .await
+    .expect("create upload-state fixture repository")
+    .repository;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))
+        .expect("upload-state fixture pipeline");
+    pipeline
+        .write_repository_upload_state(
+            &store,
+            &opened.master_key,
+            RepositoryUploadStateRequest {
+                writer_id: UPLOAD_WRITER_ID.to_owned(),
+                upload_id: UPLOAD_ID.to_owned(),
+                created_at_unix_seconds: 1_779_381_000,
+                operation: RepositoryUploadOperation::BackupSnapshot,
+                pending_objects: vec![
+                    RepositoryUploadPendingObject {
+                        object_key: "objects/chunk/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                        kind: RepositoryUploadPendingObjectKind::Chunk,
+                        bytes: Some(128),
+                    },
+                    RepositoryUploadPendingObject {
+                        object_key: "objects/index/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                        kind: RepositoryUploadPendingObjectKind::Index,
+                        bytes: Some(256),
+                    },
+                    RepositoryUploadPendingObject {
+                        object_key: "objects/manifest/cc/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+                        kind: RepositoryUploadPendingObjectKind::Manifest,
+                        bytes: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("write upload-state fixture");
+
+    fs::create_dir_all(root.join("objects/upload").join(UPLOAD_WRITER_ID))
+        .expect("create upload-state fixture directories");
+    fs::write(
+        root.join("bootstrap"),
+        store
+            .get(&object_key("bootstrap"))
+            .await
+            .expect("fixture bootstrap bytes"),
+    )
+    .expect("write fixture bootstrap");
+    fs::write(
+        root.join(UPLOAD_STATE_OBJECT),
+        store
+            .get(&object_key(UPLOAD_STATE_OBJECT))
+            .await
+            .expect("fixture upload-state bytes"),
+    )
+    .expect("write fixture upload-state object");
+
+    println!("repository_id={}", opened.repository_id);
 }

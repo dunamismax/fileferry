@@ -3,9 +3,9 @@
 FileFerry's repository format is original to FileFerry. Format v0 is not frozen.
 Initial compatibility fixtures exist for narrow bootstrap/key-slot and
 recovery-export, committed snapshot-data, forget/prune-state, and policy/config
-slices. This document defines the initial shape needed for implementation work;
-byte-level fixtures become the compatibility contract only after the first
-intentional freeze.
+and upload-state slices. This document defines the initial shape needed for
+implementation work; byte-level fixtures become the compatibility contract only
+after the first intentional freeze.
 
 ## Format Principles
 
@@ -252,8 +252,8 @@ Current implementation status:
   is claimed by this fixture slice.
 - One policy/config fixture now covers the current encrypted policy object
   framing and decrypted fields listed in the fixture-status section. This does
-  not freeze future config fields, policy selection semantics, upload state, or
-  migration behavior.
+  not freeze future config fields, policy selection semantics, or migration
+  behavior.
 
 ## Commit Markers And Upload State
 
@@ -285,6 +285,25 @@ Current implementation status:
 - Commit marker contents are not trusted. Snapshot discovery validates that the
   marker key, snapshot id, and manifest object name agree, then authenticates
   and decrypts the encrypted manifest before returning snapshot metadata.
+- `fileferry-core` can write and read encrypted upload-state objects under
+  `objects/upload/<writer-id>/<upload-id>`. Writer and upload ids are random
+  32-byte lowercase hex identifiers in current fixtures and do not contain
+  source path material.
+- The current decrypted upload-state object contains `schema_version`, `magic`,
+  `format_version`, `repository_id`, `writer_id`, `upload_id`,
+  `created_at_unix_seconds`, `operation`, the commit and forget-marker object
+  sets observed when the state was marked, pending chunk/index/manifest object
+  records, and a keyed `state_identity`.
+- Upload-state objects are encrypted and authenticated as object kind
+  `upload-state` with the exact object name. Moving ciphertext to another
+  object name or reading it as another object kind fails authentication.
+- Readers validate schema, magic, format version, repository id, writer id,
+  upload id, object-key identity, pending object keys, and keyed state identity
+  before returning the object.
+- Resume reads compare the marked commit and forget-marker object sets with the
+  current repository state and reject stale or replayed upload state when those
+  sets no longer match. The current API is core-only; the backup pipeline does
+  not yet use upload-state recovery.
 
 ## Forget Markers
 
@@ -419,10 +438,12 @@ Initial golden fixtures now exist under:
   data needed to check the post-prune repository.
 - `tests/fixtures/repository-format/v0/policy-config/` for one initialized
   repository containing one encrypted policy/config object.
+- `tests/fixtures/repository-format/v0/upload-state/` for one initialized
+  repository containing one encrypted upload-state object.
 
 These are narrow compatibility-fixture slices for format v0. They do not freeze
-all of format v0. Migration fixtures, upload state, and full cross-version
-compatibility remain open Milestone H work.
+all of format v0. Migration fixtures and full cross-version compatibility
+remain open Milestone H work.
 
 For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 
@@ -477,6 +498,12 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
   `body.created_at_unix_seconds`, and retention fields `keep_last`,
   `keep_hourly`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly`,
   and `keep_tags`.
+- `upload-state/objects/upload/<writer-id>/<upload-id>`: encrypted-object
+  `algorithm`, `nonce`, and `ciphertext`, authenticated as object kind
+  `upload-state` and the exact object name; decrypted `schema_version`,
+  `magic`, `format_version`, `repository_id`, `writer_id`, `upload_id`,
+  `created_at_unix_seconds`, `operation`, `commit_objects`,
+  `forget_marker_objects`, `pending_objects`, and `state_identity`.
 
 The fixture passphrases are test-only unlock inputs. They are not production
 secrets and do not imply recovery import. Tests prove current code can read the
@@ -514,3 +541,12 @@ object names and authenticated kinds through AEAD context binding, reject policy
 metadata identity mismatches, reject unsupported policy/config schema and format
 versions, reject repository identity mismatches, and reject invalid retention
 shape.
+The upload-state fixture tests prove current code can unlock the fixture,
+authenticate and validate the encrypted upload-state object, idempotently
+recognize an already-present matching upload state, reject malformed encrypted
+framing and decrypted metadata, reject upload-state ciphertext tampering, reject
+wrong object names and authenticated kinds through AEAD context binding, reject
+upload-state metadata identity mismatches, reject unsupported upload-state
+schema and format versions, reject repository identity mismatches, and reject
+stale upload-state replay when current commit/forget marker state no longer
+matches the marked state.

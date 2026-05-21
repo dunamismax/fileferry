@@ -457,6 +457,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidPruneCompletion { .. }
         | CoreError::PolicyConfigDecode { .. }
         | CoreError::InvalidPolicyConfig { .. }
+        | CoreError::UploadStateDecode { .. }
+        | CoreError::InvalidUploadState { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::ObjectDecode { .. }
         | CoreError::ObjectAuthentication { .. }
@@ -467,7 +469,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidChunkLength { .. }
         | CoreError::MissingChunkIndexEntry { .. } => 6,
         CoreError::Encryption { .. } => 6,
-        CoreError::PruneRepositoryStateChanged { .. } => 8,
+        CoreError::PruneRepositoryStateChanged { .. }
+        | CoreError::UploadRepositoryStateChanged { .. } => 8,
         CoreError::KeySlotRemovalWouldLockOut { .. } => 4,
         CoreError::ObjectKey { .. }
         | CoreError::Serialization { .. }
@@ -1253,7 +1256,10 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::InvalidPruneCompletion { .. } => "repository_prune_completion_invalid",
         CoreError::PolicyConfigDecode { .. } => "repository_policy_config_decode_failed",
         CoreError::InvalidPolicyConfig { .. } => "repository_policy_config_invalid",
+        CoreError::UploadStateDecode { .. } => "repository_upload_state_decode_failed",
+        CoreError::InvalidUploadState { .. } => "repository_upload_state_invalid",
         CoreError::PruneRepositoryStateChanged { .. } => "repository_prune_state_changed",
+        CoreError::UploadRepositoryStateChanged { .. } => "repository_upload_state_changed",
         CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
         CoreError::RepositoryNotInitialized => "repository_not_initialized",
         CoreError::InvalidRepositoryBootstrap { .. } => "repository_bootstrap_invalid",
@@ -1442,6 +1448,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         | CoreError::InvalidPruneCompletion { key, .. }
         | CoreError::PolicyConfigDecode { key, .. }
         | CoreError::InvalidPolicyConfig { key, .. }
+        | CoreError::UploadStateDecode { key, .. }
+        | CoreError::InvalidUploadState { key, .. }
         | CoreError::RepositoryCheckMissingObject { key }
         | CoreError::RepositoryReferencedObjectMissing { key } => Some(key.as_str().to_owned()),
         CoreError::MissingChunkIndexEntry { object_key, .. }

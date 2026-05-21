@@ -316,6 +316,25 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("upload state {key} could not be decoded")]
+    UploadStateDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("upload state {key} is invalid: {reason}")]
+    InvalidUploadState {
+        key: ObjectKey,
+        reason: &'static str,
+    },
+
+    #[error("repository commit or forget state changed after upload state {upload_id} was marked")]
+    UploadRepositoryStateChanged {
+        writer_id: String,
+        upload_id: String,
+    },
+
     #[error("repository commit or forget state changed after prune plan {plan_id} was marked")]
     PruneRepositoryStateChanged { plan_id: String },
 
@@ -622,9 +641,11 @@ const KEY_SLOT_ID_BYTES: usize = 32;
 const RECOVERY_EXPORT_ID_BYTES: usize = 32;
 const PRUNE_PLAN_ID_BYTES: usize = 32;
 const POLICY_CONFIG_ID_BYTES: usize = 32;
+const UPLOAD_STATE_ID_BYTES: usize = 32;
 const KEY_SLOT_PREFIX: &str = "key-slots";
 const KEY_SLOT_REMOVAL_PREFIX: &str = "key-slot-removals";
 const POLICY_CONFIG_PREFIX: &str = "objects/policy";
+const UPLOAD_STATE_PREFIX: &str = "objects/upload";
 const PRUNE_PLAN_PREFIX: &str = "objects/prune-plan";
 const PRUNE_COMPLETION_PREFIX: &str = "objects/prune-completion";
 pub const RECOVERY_EXPORT_WARNING: &str = "Recovery exports are encrypted with the current repository passphrase. Store the export separately from the repository and protect it like a backup key. Recovery import is not implemented yet.";
@@ -808,6 +829,62 @@ pub struct RepositoryRetentionPolicyConfig {
     pub keep_monthly: Option<u32>,
     pub keep_yearly: Option<u32>,
     pub keep_tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryUploadStateRequest {
+    pub writer_id: String,
+    pub upload_id: String,
+    pub created_at_unix_seconds: u64,
+    pub operation: RepositoryUploadOperation,
+    pub pending_objects: Vec<RepositoryUploadPendingObject>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryUploadStateWriteResult {
+    pub repository_id: String,
+    pub writer_id: String,
+    pub upload_id: String,
+    pub upload_object: ObjectKey,
+    pub created: bool,
+    pub bytes_written: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RepositoryUploadState {
+    pub schema_version: u16,
+    pub magic: String,
+    pub format_version: u16,
+    pub repository_id: String,
+    pub writer_id: String,
+    pub upload_id: String,
+    pub created_at_unix_seconds: u64,
+    pub operation: RepositoryUploadOperation,
+    pub commit_objects: Vec<String>,
+    pub forget_marker_objects: Vec<String>,
+    pub pending_objects: Vec<RepositoryUploadPendingObject>,
+    pub state_identity: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryUploadOperation {
+    BackupSnapshot,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RepositoryUploadPendingObject {
+    pub object_key: String,
+    pub kind: RepositoryUploadPendingObjectKind,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryUploadPendingObjectKind {
+    Chunk,
+    Index,
+    Manifest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1350,6 +1427,10 @@ fn prune_plan_id_is_valid(plan_id: &str) -> bool {
 fn policy_config_id_is_valid(policy_id: &str) -> bool {
     policy_id.len() == POLICY_CONFIG_ID_BYTES * 2
         && policy_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn upload_state_id_is_valid(id: &str) -> bool {
+    id.len() == UPLOAD_STATE_ID_BYTES * 2 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn repository_id_is_valid(repository_id: &str) -> bool {
@@ -2134,6 +2215,162 @@ impl BackupPipeline {
             master_key,
         )?;
         Ok(policy)
+    }
+
+    pub async fn write_repository_upload_state(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        request: RepositoryUploadStateRequest,
+    ) -> CoreResult<RepositoryUploadStateWriteResult> {
+        let upload_object = upload_state_object_key(&request.writer_id, &request.upload_id)?;
+        let state = self.read_prune_repository_state(store).await?;
+        let commit_objects = state
+            .commit_objects
+            .iter()
+            .map(|key| key.as_str().to_owned())
+            .collect();
+        let forget_marker_objects = state
+            .forget_marker_objects
+            .iter()
+            .map(|key| key.as_str().to_owned())
+            .collect();
+        let mut upload_state = RepositoryUploadState {
+            schema_version: 0,
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: self.config.repository_id.clone(),
+            writer_id: request.writer_id,
+            upload_id: request.upload_id,
+            created_at_unix_seconds: request.created_at_unix_seconds,
+            operation: request.operation,
+            commit_objects,
+            forget_marker_objects,
+            pending_objects: request.pending_objects,
+            state_identity: String::new(),
+        };
+        upload_state.state_identity =
+            upload_state_identity(master_key, &self.config.repository_id, &upload_state)?;
+        validate_upload_state(
+            &upload_state,
+            &upload_object,
+            &self.config.repository_id,
+            master_key,
+        )?;
+
+        if store
+            .exists(&upload_object)
+            .await
+            .map_err(|source| CoreError::Storage { source })?
+        {
+            let existing = self
+                .read_repository_upload_state(
+                    store,
+                    master_key,
+                    &upload_state.writer_id,
+                    &upload_state.upload_id,
+                )
+                .await?;
+            if existing != upload_state {
+                return Err(CoreError::InvalidUploadState {
+                    key: upload_object,
+                    reason: "existing upload state does not match upload id",
+                });
+            }
+            return Ok(RepositoryUploadStateWriteResult {
+                repository_id: self.config.repository_id.clone(),
+                writer_id: upload_state.writer_id,
+                upload_id: upload_state.upload_id,
+                upload_object,
+                created: false,
+                bytes_written: 0,
+            });
+        }
+
+        let upload_key = self.derive_upload_state_key(master_key)?;
+        let plaintext = serde_json::to_vec(&upload_state)
+            .map_err(|source| CoreError::Serialization { source })?;
+        let encrypted = encrypt_repository_object(
+            &upload_key,
+            ObjectKind::UploadState,
+            &upload_object,
+            &plaintext,
+        )?;
+        let bytes_written = encrypted.len() as u64;
+        let status = store
+            .put_if_absent(&upload_object, &encrypted)
+            .await
+            .map_err(|source| match source {
+                StorageError::ObjectAlreadyExists { .. } => CoreError::InvalidUploadState {
+                    key: upload_object.clone(),
+                    reason: "upload state object already exists with different bytes",
+                },
+                source => CoreError::Storage { source },
+            })?;
+
+        Ok(RepositoryUploadStateWriteResult {
+            repository_id: self.config.repository_id.clone(),
+            writer_id: upload_state.writer_id,
+            upload_id: upload_state.upload_id,
+            upload_object,
+            created: status == PutStatus::Created,
+            bytes_written: if status == PutStatus::Created {
+                bytes_written
+            } else {
+                0
+            },
+        })
+    }
+
+    pub async fn read_repository_upload_state(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        writer_id: &str,
+        upload_id: &str,
+    ) -> CoreResult<RepositoryUploadState> {
+        let upload_object = upload_state_object_key(writer_id, upload_id)?;
+        let upload_key = self.derive_upload_state_key(master_key)?;
+        let upload_state: RepositoryUploadState =
+            read_encrypted_json_object(store, &upload_key, ObjectKind::UploadState, &upload_object)
+                .await
+                .map_err(|error| match error {
+                    CoreError::ObjectDecode { key, source }
+                    | CoreError::MetadataDecode { key, source } => {
+                        CoreError::UploadStateDecode { key, source }
+                    }
+                    other => other,
+                })?;
+        validate_upload_state(
+            &upload_state,
+            &upload_object,
+            &self.config.repository_id,
+            master_key,
+        )?;
+        Ok(upload_state)
+    }
+
+    pub async fn read_repository_upload_state_for_resume(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        writer_id: &str,
+        upload_id: &str,
+    ) -> CoreResult<RepositoryUploadState> {
+        let upload_state = self
+            .read_repository_upload_state(store, master_key, writer_id, upload_id)
+            .await?;
+        let current = self.read_prune_repository_state(store).await?;
+        if upload_state.commit_objects != object_key_strings(&current.commit_objects)
+            || upload_state.forget_marker_objects
+                != object_key_strings(&current.forget_marker_objects)
+        {
+            return Err(CoreError::UploadRepositoryStateChanged {
+                writer_id: upload_state.writer_id,
+                upload_id: upload_state.upload_id,
+            });
+        }
+        Ok(upload_state)
     }
 
     pub async fn write_snapshot(
@@ -2961,6 +3198,18 @@ impl BackupPipeline {
         master_key
             .derive_subkey(
                 KeyPurpose::PolicyConfig,
+                self.config.repository_id.as_bytes(),
+            )
+            .map_err(|source| CoreError::Encryption { source })
+    }
+
+    fn derive_upload_state_key(
+        &self,
+        master_key: &MasterKey,
+    ) -> CoreResult<fileferry_crypto::Subkey> {
+        master_key
+            .derive_subkey(
+                KeyPurpose::UploadState,
                 self.config.repository_id.as_bytes(),
             )
             .map_err(|source| CoreError::Encryption { source })
@@ -6148,6 +6397,119 @@ fn validate_policy_config(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct UploadStateIdentity<'a> {
+    writer_id: &'a str,
+    upload_id: &'a str,
+    created_at_unix_seconds: u64,
+    operation: &'a RepositoryUploadOperation,
+    commit_objects: &'a [String],
+    forget_marker_objects: &'a [String],
+    pending_objects: &'a [RepositoryUploadPendingObject],
+}
+
+fn upload_state_identity(
+    master_key: &MasterKey,
+    repository_id: &str,
+    state: &RepositoryUploadState,
+) -> CoreResult<String> {
+    let body = UploadStateIdentity {
+        writer_id: &state.writer_id,
+        upload_id: &state.upload_id,
+        created_at_unix_seconds: state.created_at_unix_seconds,
+        operation: &state.operation,
+        commit_objects: &state.commit_objects,
+        forget_marker_objects: &state.forget_marker_objects,
+        pending_objects: &state.pending_objects,
+    };
+    content_id_for_metadata(
+        master_key,
+        KeyPurpose::UploadState,
+        repository_id.as_bytes(),
+        &body,
+    )
+}
+
+fn validate_upload_state(
+    state: &RepositoryUploadState,
+    object_key: &ObjectKey,
+    repository_id: &str,
+    master_key: &MasterKey,
+) -> CoreResult<()> {
+    if state.schema_version != 0 {
+        return Err(CoreError::InvalidUploadState {
+            key: object_key.clone(),
+            reason: "unsupported upload state schema version",
+        });
+    }
+    if state.magic != REPOSITORY_MAGIC {
+        return Err(CoreError::InvalidUploadState {
+            key: object_key.clone(),
+            reason: "upload state magic is not recognized",
+        });
+    }
+    if state.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+        return Err(CoreError::InvalidUploadState {
+            key: object_key.clone(),
+            reason: "unsupported upload state format version",
+        });
+    }
+    if state.repository_id != repository_id {
+        return Err(CoreError::InvalidUploadState {
+            key: object_key.clone(),
+            reason: "upload state repository id does not match this repository",
+        });
+    }
+    if !repository_id_is_valid(&state.repository_id)
+        || !upload_state_id_is_valid(&state.writer_id)
+        || !upload_state_id_is_valid(&state.upload_id)
+        || !upload_state_id_is_valid(&state.state_identity)
+    {
+        return Err(CoreError::InvalidUploadState {
+            key: object_key.clone(),
+            reason: "upload state id is invalid",
+        });
+    }
+    if upload_state_object_key(&state.writer_id, &state.upload_id)? != *object_key {
+        return Err(CoreError::InvalidUploadState {
+            key: object_key.clone(),
+            reason: "upload state object key does not match writer or upload id",
+        });
+    }
+    validate_upload_state_object_keys(object_key, &state.commit_objects)?;
+    validate_upload_state_object_keys(object_key, &state.forget_marker_objects)?;
+    for object in &state.pending_objects {
+        ObjectKey::new(object.object_key.clone()).map_err(|_| CoreError::InvalidUploadState {
+            key: object_key.clone(),
+            reason: "upload state object key is invalid",
+        })?;
+    }
+    let actual = upload_state_identity(master_key, repository_id, state)?;
+    if actual != state.state_identity {
+        return Err(CoreError::MetadataIdentityMismatch {
+            kind: "upload state",
+            object_key: object_key.clone(),
+            expected: state.state_identity.clone(),
+            actual,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_upload_state_object_keys(
+    upload_state_key: &ObjectKey,
+    keys: &[String],
+) -> CoreResult<()> {
+    for key in keys {
+        ObjectKey::new(key.clone()).map_err(|_| CoreError::InvalidUploadState {
+            key: upload_state_key.clone(),
+            reason: "upload state object key is invalid",
+        })?;
+    }
+    Ok(())
+}
+
 fn validate_retention_policy_config(
     retention: &RepositoryRetentionPolicyConfig,
 ) -> Result<(), &'static str> {
@@ -6478,6 +6840,10 @@ fn object_keys_from_strings(keys: &[String]) -> CoreResult<Vec<ObjectKey>> {
         .collect()
 }
 
+fn object_key_strings(keys: &[ObjectKey]) -> Vec<String> {
+    keys.iter().map(|key| key.as_str().to_owned()).collect()
+}
+
 fn subtract_keys(keys: &[ObjectKey], remove: &BTreeSet<ObjectKey>) -> Vec<ObjectKey> {
     keys.iter()
         .filter(|key| !remove.contains(*key))
@@ -6534,6 +6900,11 @@ fn object_key_for_forget_marker(snapshot_id: &str) -> CoreResult<ObjectKey> {
 
 fn object_key_for_policy_config(policy_id: &str) -> CoreResult<ObjectKey> {
     object_key_for_id(POLICY_CONFIG_PREFIX, policy_id)
+}
+
+fn upload_state_object_key(writer_id: &str, upload_id: &str) -> CoreResult<ObjectKey> {
+    ObjectKey::new(format!("{UPLOAD_STATE_PREFIX}/{writer_id}/{upload_id}"))
+        .map_err(|source| CoreError::ObjectKey { source })
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

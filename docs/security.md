@@ -266,6 +266,17 @@ format versions, rejects repository identity mismatches, rejects invalid
 retention shape, and treats an already-present matching policy body as an
 idempotent write result.
 
+Current upload-state fixture coverage includes one initialized repository with
+one encrypted upload-state object. Focused tests prove that current code
+authenticates and validates the fixture, rejects malformed encrypted framing and
+decrypted metadata, rejects upload-state ciphertext tampering, rejects wrong
+object names and authenticated kinds through AEAD context binding, rejects
+upload-state metadata identity mismatches, rejects unsupported upload-state
+schema and format versions, rejects repository identity mismatches, rejects
+stale upload-state replay when current commit/forget marker state no longer
+matches the marked state, and treats an already-present matching upload state as
+an idempotent write result.
+
 ## Key Rotation
 
 Key rotation has two different meanings:
