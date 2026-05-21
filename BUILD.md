@@ -311,6 +311,42 @@ application.
 
 ---
 
+## Milestone G Exit Audit
+
+Milestone G was closed on 2026-05-21 for FileFerry's current pre-v1 support
+claims. The audit found no remaining concrete blocker that must be completed
+before moving to format fixtures.
+
+Exit evidence:
+
+- Current restore code applies the implemented metadata restore subset:
+  regular-file and directory modified timestamps, regular-file and directory
+  Unix permission bits where representable, and Unix ownership verification
+  without changing destination owners.
+- Current restore code emits clear human and machine-readable metadata
+  warnings for selected metadata this version does not restore, including
+  creation/birth timestamps, symlink metadata, xattrs, ACL status, file flag
+  status, resource fork status, Windows attribute status, and sparse extent
+  status.
+- `docs/platform-metadata.md`, `docs/cli-contract.md`, `README.md`, and this
+  file describe those limits without claiming metadata value restoration or
+  broader platform support that is not implemented and verified.
+- Focused tests cover the current host-observed platform facts and restore
+  warning contract: normalized relative paths, Windows reserved-name
+  detection without host support claims, observed case behavior, Unix symlink
+  capture/restore behavior, long-path metadata capture where the filesystem
+  allows it, permission-denied metadata reads where exposed, and structured
+  metadata warnings.
+
+FileFerry still does not claim any supported platform. CI currently runs the
+workspace gate on Ubuntu only, and release artifacts do not exist yet. CI,
+per-target testing, smoke-tested artifacts, and release-status updates remain
+Milestone I / release-hardening work. Do not reopen Milestone G for another
+status-only metadata group unless it is the final blocker for a support claim
+being made in the same session.
+
+---
+
 ## Active Milestones
 
 This section is the current execution queue. Agents should prefer completing
@@ -319,28 +355,9 @@ Choose the first unfinished milestone that can be completed honestly in the
 current session. If it is too large, split it into explicit sub-milestones in
 this section before coding.
 
-### Milestone G - Metadata And Platform Hardening
-
-Goal: Close the v1 metadata and platform evidence gaps without overstating
-support.
-
-Definition of done:
-
-- Implement and test the remaining v1 metadata restore behavior chosen in
-  `docs/platform-metadata.md`.
-- Add platform-specific tests for path normalization, reserved names, symlink
-  behavior, case behavior, long paths, permission errors, and metadata warning
-  output where each platform exposes the behavior.
-- CI builds and tests every platform that README or release docs call
-  supported.
-- Unsupported or partially supported metadata produces clear human and
-  machine-readable warnings.
-
-Non-goals:
-
-- Claiming platform support before CI and artifacts exist.
-- Platform-specific cleverness that weakens portable correctness.
-- GUI, TUI, daemon, scheduler, or service behavior.
+The next active milestone is Milestone H. Milestone G is closed for the current
+pre-v1 support claims; support-bar work for claimed platforms belongs in
+Milestone I.
 
 ### Milestone H - Format Fixtures And Compatibility Freeze
 
@@ -372,6 +389,8 @@ meet the v1 scope.
 Definition of done:
 
 - Run documented local and S3-compatible restore drills.
+- Add CI builds and tests for every platform that README or release docs call
+  supported.
 - Audit logs, errors, JSON, JSONL, and tests for secret leakage.
 - Add release artifacts, checksums, signatures, SBOM, and
   `cargo-auditable` metadata.
@@ -649,9 +668,13 @@ Platform work:
       and sparse extents.
 - [x] Decide v1 restore behavior for metadata that cannot be represented on
       the destination platform.
-- [ ] Add platform-specific tests for path normalization, reserved names,
-      symlinks, hard links if supported, case sensitivity, long paths, and
-      permission errors.
+- [x] Add focused tests for current host-observed path normalization facts,
+      Windows reserved-name detection without host support claims, observed
+      case behavior, Unix symlink behavior, long paths where the filesystem
+      allows them, permission errors where exposed, and metadata warning
+      output.
+- [ ] Add per-target platform tests for every platform that will be claimed
+      supported in a release.
 - [ ] Add CI for supported platforms before claiming support.
 - [ ] Add release artifacts only for platforms that pass the support bar.
 
@@ -911,6 +934,19 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-21 - Completed the Milestone G exit audit and closed Milestone G
+  without adding another status-only metadata group. The audit compared the
+  Milestone G definition of done against `docs/platform-metadata.md`, current
+  restore implementation, focused platform tests, CLI/core metadata warning
+  tests, README support language, release docs, and CI configuration. The
+  remaining broad items are support-bar work: per-target CI, per-target
+  platform tests, release artifacts, and release smoke tests. Because
+  FileFerry does not currently claim any supported platform and has no release
+  artifacts, that work belongs in Milestone I / release hardening, not in the
+  active metadata-hardening queue. Milestone H - Format Fixtures And
+  Compatibility Freeze is now the next active milestone. No Rust code changed
+  and no live S3 gates were enabled in this session. Verified with
+  `git diff --check`.
 - 2026-05-21 - Completed a Milestone G sparse extent status scaffolding and
   restore warning slice without claiming sparse extent value capture, sparse
   extent restoration, or broader platform support. New manifests now include a
