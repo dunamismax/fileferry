@@ -260,6 +260,9 @@ Portable correctness beats platform-specific cleverness in default builds.
 - Keep `README.md` focused on product, status, usage shape, architecture, and
   development.
 - Keep `BUILD.md` as the living build plan and milestone checklist.
+- Do not use `BUILD.md` as a session log or exhaustive history. Collapse
+  completed work into brief current-state bullets and keep the open v1 work
+  easy for context-limited agents to load.
 - Keep durable technical docs in `docs/` once implementation details settle.
 - Keep this file for operator rules and persistent repo instructions.
 - If a gotcha would save future work, update this file in the same session.
