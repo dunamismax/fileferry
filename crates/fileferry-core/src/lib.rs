@@ -1,5 +1,7 @@
 //! Core repository, snapshot, backup, restore, and check orchestration.
 
+#![allow(clippy::result_large_err)]
+
 use fastcdc::v2020::{
     AVERAGE_MAX, AVERAGE_MIN, FastCDC, MAXIMUM_MAX, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN,
 };
