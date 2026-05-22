@@ -75,10 +75,11 @@ Implemented and tested at the current pre-v1 level:
   with README/LICENSE, emitted with a manifest, generated with a CycloneDX SBOM,
   and built with `cargo-auditable`; the manual GitHub workflow can additionally
   sign checksum manifests with Sigstore keyless signing when run.
-- A live Backblaze B2 S3-compatible data-path drill has passed for
-  `init -> backup -> snapshots -> ls -> restore -> check` under an isolated
-  private development prefix. Later S3 retention/key/prune live gates exist but
-  are not assumed to have current provider evidence unless rerun.
+- Live Backblaze B2 S3-compatible drills passed on 2026-05-22 under an
+  isolated private development prefix for storage round-trip, CLI init,
+  `backup -> snapshots -> ls -> restore -> check`, missing-manifest failure,
+  retention/key management, and prune dry-run/sweep behavior. This is current
+  provider evidence, not a broad S3-provider support claim.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, static CSS, and `/healthz`.
 
@@ -106,7 +107,7 @@ Finish this milestone by proving the release candidate, not by polishing
 status text:
 
 - [x] Run documented local restore drills from real FileFerry snapshots.
-- [ ] Run documented S3-compatible restore drills against an isolated test
+- [x] Run documented S3-compatible restore drills against an isolated test
       prefix and record current provider evidence.
 - [ ] Add CI builds and tests for every platform that README or release docs
       call supported.
@@ -153,7 +154,7 @@ Core product:
 - [x] Exit codes, JSON, and JSONL contracts fully documented and tested for
       the implemented command surface.
 - [x] Local restore drills completed from real FileFerry snapshots.
-- [ ] S3-compatible restore drills completed against an isolated test prefix.
+- [x] S3-compatible restore drills completed against an isolated test prefix.
 
 Security and format:
 

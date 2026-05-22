@@ -3696,10 +3696,16 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
             snapshot_id,
             destination.to_str().expect("destination path"),
         ],
-        0,
+        10,
     );
     let restore: Value = serde_json::from_slice(&restore_output).expect("restore json");
     assert_eq!(restore["data"]["snapshot_id"], snapshot_id);
+    assert!(
+        restore["data"]["metadata_warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty()),
+        "restore should report the metadata warnings that drive partial-success exit code 10"
+    );
     assert_eq!(
         fs::read(destination.join("sample.txt")).expect("restored sample"),
         b"s3 sample"

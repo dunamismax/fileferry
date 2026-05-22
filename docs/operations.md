@@ -165,12 +165,16 @@ Evidence added or retained:
   cleanup. CLI unit coverage maps restore destination reserved-name and
   case-collision guardrails to stable JSON failure codes.
 
-The non-gated evidence uses local and in-memory object stores. The
-S3-compatible data path, retention/key-management path, and prune path have
-gated live tests but still need provider evidence from environments where
+The non-gated evidence uses local and in-memory object stores. Current
+Backblaze B2 S3-compatible provider evidence was observed on 2026-05-22 under
+an isolated private development prefix with
+`FILEFERRY_S3_INTEGRATION=1`, `FILEFERRY_S3_INIT_INTEGRATION=1`,
 `FILEFERRY_S3_DATA_INTEGRATION=1`,
 `FILEFERRY_S3_RETENTION_KEY_INTEGRATION=1`, and
-`FILEFERRY_S3_PRUNE_INTEGRATION=1` are configured. This does not claim
-automatic repair, cleanup of stale temporary files, provider-specific S3
-lifecycle management, platform-wide permission behavior, or release support
-on every target.
+`FILEFERRY_S3_PRUNE_INTEGRATION=1`. The passing live gates covered storage
+round-trip, CLI init, backup, snapshots, ls, restore, check, missing referenced
+manifest failure, forget, key add/remove/rotate/export-recovery, prune dry-run,
+prune sweep, durable prune state, snapshots, and unique-prefix cleanup. This
+does not claim automatic repair, cleanup of stale temporary files,
+provider-specific S3 lifecycle management, platform-wide permission behavior,
+release support on every target, or support for every S3-compatible provider.
