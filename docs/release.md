@@ -9,17 +9,19 @@ artifacts exist for that target.
 
 ## CI Evidence
 
-The normal CI workflow runs the Rust formatting, clippy, test, and build gate
-on these hosted runner targets:
+The normal CI workflow is configured to run the Rust formatting, clippy, test,
+and build gate on these hosted runner targets:
 
 - Ubuntu Linux x86_64 GNU host.
+- Ubuntu Linux ARM64 GNU host.
+- macOS Intel host.
 - macOS ARM64 host.
 - Windows x86_64 MSVC host.
 
-Those jobs are required release-candidate evidence, but they are not platform
-support by themselves. Support still requires the target-specific release
-artifact, checksum/signature/SBOM/auditable metadata, archive smoke evidence,
-and relevant platform metadata tests for the exact release candidate.
+Completed passing jobs are required release-candidate evidence, but they are
+not platform support by themselves. Support still requires the target-specific
+release artifact, checksum/signature/SBOM/auditable metadata, archive smoke
+evidence, and relevant platform metadata tests for the exact release candidate.
 
 ## Preconditions
 
@@ -159,11 +161,20 @@ tests, release artifacts, and smoke evidence for the claimed target.
 The workflow `.github/workflows/release-artifacts.yml` is manual-only. It
 builds candidate artifacts with `cargo-auditable`, generates SBOMs with
 `cargo-cyclonedx`, and can sign the checksum manifest with Sigstore keyless
-signing through GitHub OIDC. After packaging, it runs `xtask archive-smoke`
-against the generated archive and uploads the smoke evidence JSON beside the
-artifacts. A workflow run is release evidence only for the exact commit,
-target, artifacts, signatures, SBOMs, checksums, and smoke tests that it
-actually produced.
+signing through GitHub OIDC. The current native hosted matrix is:
+
+- Linux x86_64 GNU on `ubuntu-latest`.
+- Linux ARM64 GNU on `ubuntu-24.04-arm`.
+- macOS x86_64 on `macos-15-intel`.
+- macOS ARM64 on `macos-15`.
+- Windows x86_64 MSVC on `windows-latest`.
+
+The workflow verifies that `rustc -vV` reports a host triple matching the
+artifact target before packaging. After packaging, it runs `xtask
+archive-smoke` against the generated archive and uploads the smoke evidence
+JSON beside the artifacts. A workflow run is release evidence only for the
+exact commit, target, artifacts, signatures, SBOMs, checksums, and smoke tests
+that it actually produced.
 
 ## Manual Release Shape
 

@@ -335,6 +335,7 @@ fn xattr_summary(_path: &Path) -> MetadataValue<MetadataFieldSummary> {
     MetadataValue::Unsupported
 }
 
+#[cfg(unix)]
 fn reportable_xattr_name(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return true;
@@ -636,6 +637,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn filters_macos_provenance_xattr_from_reported_count() {
         assert!(!reportable_xattr_name(OsStr::new("com.apple.provenance")));
@@ -807,6 +809,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn test_xattr_name() -> &'static str {
         if cfg!(target_os = "macos") {
             "com.fileferry.test"

@@ -78,16 +78,19 @@ Implemented and tested at the current pre-v1 level:
   release-package`: host builds can be smoke-tested, checksummed, packaged
   with README/LICENSE, emitted with a manifest, generated with a CycloneDX SBOM,
   archive-smoke-tested from the packaged archive, and built with
-  `cargo-auditable`; the manual GitHub workflow can additionally sign checksum
-  manifests with Sigstore keyless signing when run.
+  `cargo-auditable`; the manual GitHub workflow covers the current native
+  hosted x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and
+  x86_64 Windows MSVC matrix and can additionally sign checksum manifests with
+  Sigstore keyless signing when run.
 - Tested local-archive install paths now exist through `scripts/install.sh` and
   `scripts/install.ps1`; `xtask release-package` copies them beside the archive,
   includes them in `SHA256SUMS`, and the installers verify archive checksums
   before writing `ferry`. PowerShell evidence is from `pwsh` on macOS and is not
   a Windows support claim.
-- CI now runs the normal Rust gate on Ubuntu Linux x86_64 GNU, macOS ARM64,
-  and Windows x86_64 MSVC hosted runners. This is host build/test evidence
-  only, not a platform support claim or complete release-artifact matrix.
+- CI is configured to run the normal Rust gate on Ubuntu Linux x86_64 GNU,
+  Ubuntu Linux ARM64 GNU, macOS Intel, macOS ARM64, and Windows x86_64 MSVC
+  hosted runners. Completed passing jobs are host build/test evidence only,
+  not platform support claims or a complete release-artifact matrix.
 - Live Backblaze B2 S3-compatible drills passed on 2026-05-22 under an
   isolated private development prefix for storage round-trip, CLI init,
   `backup -> snapshots -> ls -> restore -> check`, missing-manifest failure,

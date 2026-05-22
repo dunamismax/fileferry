@@ -19,6 +19,10 @@ jobs:
         include:
           - label: Linux x86_64 GNU host
             os: ubuntu-latest
+          - label: Linux ARM64 GNU host
+            os: ubuntu-24.04-arm
+          - label: macOS Intel host
+            os: macos-15-intel
           - label: macOS ARM64 host
             os: macos-15
           - label: Windows x86_64 MSVC host

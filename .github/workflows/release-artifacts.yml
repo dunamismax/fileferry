@@ -23,6 +23,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: macos-15
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -39,6 +43,17 @@ jobs:
 
       - name: Cache cargo state
         uses: Swatinem/rust-cache@v2
+
+      - name: Confirm native release target
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          host="$(rustc -vV | awk '/^host:/ {print $2}')"
+          if [ "${host}" != "${TARGET}" ]; then
+            printf 'release artifact target %s does not match host %s\n' "${TARGET}" "${host}" >&2
+            exit 1
+          fi
 
       - name: Install release tooling
         run: cargo install cargo-auditable cargo-cyclonedx --locked
