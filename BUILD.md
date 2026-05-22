@@ -61,6 +61,9 @@ Implemented and tested at the current pre-v1 level:
   policy/config, upload state, migration detection, lease state, and strict
   unknown-field rejection across fixture-covered current v0 JSON shapes,
   including manifest platform metadata.
+- CLI exit-code families, JSON envelopes, JSONL event ordering, and
+  stdout/stderr separation are documented and regression-tested for the
+  implemented command surface.
 - A live Backblaze B2 S3-compatible data-path drill has passed for
   `init -> backup -> snapshots -> ls -> restore -> check` under an isolated
   private development prefix. Later S3 retention/key/prune live gates exist but
@@ -98,7 +101,7 @@ status text:
       call supported.
 - [ ] Add per-target platform metadata tests before making support claims.
 - [ ] Audit logs, errors, JSON, JSONL, tests, and docs for secret leakage.
-- [ ] Audit exit codes, JSON schemas, JSONL event order, and stdout/stderr
+- [x] Audit exit codes, JSON schemas, JSONL event order, and stdout/stderr
       separation as compatibility surfaces.
 - [ ] Add release artifacts, checksums, signatures, SBOM, and
       `cargo-auditable` metadata.
@@ -133,7 +136,8 @@ Core product:
 - [x] Format v0 freeze decision completed.
 - [ ] S3-compatible retry, resume, listing-surprise, and permission-error
       evidence completed for the release candidate.
-- [ ] Exit codes, JSON, and JSONL contracts fully documented and tested.
+- [x] Exit codes, JSON, and JSONL contracts fully documented and tested for
+      the implemented command surface.
 - [ ] Restore drills completed for local and S3-compatible repositories.
 
 Security and format:

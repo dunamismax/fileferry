@@ -3599,6 +3599,63 @@ mod tests {
     }
 
     #[test]
+    fn exit_code_families_are_mapped_as_contract_surfaces() {
+        let cases = [
+            (
+                CliError::from(CoreError::InvalidBackupPipelineConfig {
+                    reason: "invalid test config",
+                }),
+                1,
+            ),
+            (CliError::from(PolicyError::EmptyPolicy), 2),
+            (CliError::from(CoreError::RepositoryNotInitialized), 3),
+            (
+                CliError::from(CoreError::KeySlotRemovalWouldLockOut {
+                    key_slot_id: "a".repeat(64),
+                }),
+                4,
+            ),
+            (
+                CliError::from(CoreError::RestoreDestinationWrite {
+                    path: PathBuf::from("/restore/sample.txt"),
+                    source: io::Error::other("write failed"),
+                }),
+                5,
+            ),
+            (
+                CliError::from(CoreError::RestoreVerificationMismatch {
+                    path: PathBuf::from("/restore/sample.txt"),
+                }),
+                6,
+            ),
+            (
+                CliError::from(CoreError::SnapshotNotFound {
+                    selection: "tag:missing".to_owned(),
+                }),
+                7,
+            ),
+            (
+                CliError::from(CoreError::PruneRepositoryStateChanged {
+                    plan_id: "plan".to_owned(),
+                }),
+                8,
+            ),
+            (
+                CliError::from(CoreError::UnsupportedRestoreFeature { feature: "xattr" }),
+                9,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                error.exit_code(),
+                expected,
+                "{error} should map to exit code {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn restore_destination_guardrail_failures_have_stable_machine_codes() {
         let reserved = CliError::from(CoreError::RestoreDestinationReservedName {
             path: PathBuf::from("/restore/CON.txt"),

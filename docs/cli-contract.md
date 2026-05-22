@@ -33,10 +33,15 @@ These exit code families are stable for the current CLI foundation:
 ```
 
 The current implementation can emit these families for the implemented command
-surface: `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `9`, and `10`.
+surface: `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, and `10`.
 Unsupported repository format versions and declared repository features are
 reported as incompatible repository failures in family `3`, not as corruption
 or tampering failures.
+
+The current code has regression coverage for the exit-code family mapping,
+JSON and JSONL envelopes, JSONL event order, and stdout/stderr separation for
+machine-output modes. Argument parsing failures from `clap` remain usage
+diagnostics on stderr and are not JSON-wrapped.
 
 ## Global Precedence
 
@@ -350,6 +355,10 @@ command_failed
 
 Long-running commands must emit at least `command_started` and either
 `command_completed` or `command_failed`.
+For successful commands, `command_started` is first and `command_completed` is
+last. For failed commands after CLI parsing, `command_started` is first and
+`command_failed` is last. Command-specific `progress` and `warning` events, if
+present, are emitted between those boundary events.
 
 Current schema:
 
@@ -366,10 +375,8 @@ Long-operation JSONL event data schemas:
 
 ```text
 command_started
-  data.request_id: string
-  data.repository_url: redacted string | null
-  data.profile: string
-  data.dry_run: boolean
+  data: null in the current implementation. Future schema versions may add
+        request metadata here; v1 consumers must not require it.
 
 progress
   data.phase: stable string
