@@ -7813,6 +7813,7 @@ mod tests {
         entries * 5
     }
 
+    #[cfg(unix)]
     fn test_xattr_name() -> &'static str {
         if cfg!(target_os = "macos") {
             "com.fileferry.test"

@@ -152,6 +152,7 @@ fn set_modified_time(path: &Path, modified: SystemTime) {
         .expect("set file modified time");
 }
 
+#[cfg(unix)]
 fn test_xattr_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "com.fileferry.test"
