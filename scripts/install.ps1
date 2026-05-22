@@ -40,6 +40,29 @@ function Resolve-RequiredPath([string]$Path, [string]$Label) {
     $resolved.ProviderPath
 }
 
+function Convert-ToTarPath([string]$Path) {
+    if (-not $IsWindows) {
+        return $Path
+    }
+
+    $normalized = $Path
+    if ($normalized.StartsWith("\\?\UNC\")) {
+        $normalized = "\\" + $normalized.Substring(8)
+    } elseif ($normalized.StartsWith("\\?\")) {
+        $normalized = $normalized.Substring(4)
+    }
+
+    $cygpath = Get-Command cygpath -ErrorAction SilentlyContinue
+    if ($cygpath) {
+        $converted = & $cygpath.Source -u $normalized 2>$null
+        if ($LASTEXITCODE -eq 0 -and $converted) {
+            return ($converted | Select-Object -First 1).Trim()
+        }
+    }
+
+    $normalized
+}
+
 function Find-ChecksumInFile([string]$Path, [string]$ArchiveName) {
     foreach ($line in Get-Content -LiteralPath $Path) {
         if ($line -match '^\s*([0-9A-Fa-f]{64})\s+(\*?)(.+?)\s*$') {
@@ -105,7 +128,7 @@ New-Item -ItemType Directory -Path $tempRoot | Out-Null
 try {
     Verify-Checksum $archivePath
 
-    & tar -xzf $archivePath -C $tempRoot
+    & tar -xzf (Convert-ToTarPath $archivePath) -C (Convert-ToTarPath $tempRoot)
     if ($LASTEXITCODE -ne 0) {
         Fail "extract archive"
     }
