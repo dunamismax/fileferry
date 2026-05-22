@@ -273,8 +273,7 @@ RestoreMetadataWarning
   namespace: metadata namespace, for example "portable", "unix", or the
              source platform namespace for platform-extension status warnings
   field: string
-  source_platform: "windows" | "macos" | "linux" | "freebsd" | "netbsd" |
-                   "openbsd" | "unix" | "unknown"
+  source_platform: "windows" | "macos" | "linux" | "unix" | "unknown"
   destination_platform: same values as source_platform
   reason: string
 
@@ -297,8 +296,7 @@ RestoreMetadataWarning
   namespace: metadata namespace, for example "portable", "unix", or the
              source platform namespace for platform-extension status warnings
   field: string
-  source_platform: "windows" | "macos" | "linux" | "freebsd" | "netbsd" |
-                   "openbsd" | "unix" | "unknown"
+  source_platform: "windows" | "macos" | "linux" | "unix" | "unknown"
   destination_platform: same values as source_platform
   reason: string
 
@@ -633,7 +631,7 @@ and does not read or restore Windows attribute values. Resource fork status
 scaffolding is present in manifests, but this version records resource fork
 status as unsupported during normal capture and does not read or restore
 resource fork values. Unix ownership changes, Unix special mode bits, ACLs,
-xattr values, resource forks, Windows attributes, BSD flags, sparse extents,
+xattr values, resource forks, Windows attributes, file flags, sparse extents,
 and other platform-specific metadata are not restored yet. Sparse extent
 status scaffolding is present in manifests, but this version records sparse
 extent status as unsupported during normal capture and does not read or

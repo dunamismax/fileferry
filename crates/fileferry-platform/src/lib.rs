@@ -50,9 +50,6 @@ pub enum PlatformKind {
     Windows,
     Macos,
     Linux,
-    Freebsd,
-    Netbsd,
-    Openbsd,
     Unix,
     #[default]
     Unknown,
@@ -197,12 +194,6 @@ pub const fn current_platform() -> PlatformKind {
         PlatformKind::Macos
     } else if cfg!(target_os = "linux") {
         PlatformKind::Linux
-    } else if cfg!(target_os = "freebsd") {
-        PlatformKind::Freebsd
-    } else if cfg!(target_os = "netbsd") {
-        PlatformKind::Netbsd
-    } else if cfg!(target_os = "openbsd") {
-        PlatformKind::Openbsd
     } else if cfg!(unix) {
         PlatformKind::Unix
     } else {
@@ -461,12 +452,6 @@ mod tests {
             PlatformKind::Macos
         } else if cfg!(target_os = "linux") {
             PlatformKind::Linux
-        } else if cfg!(target_os = "freebsd") {
-            PlatformKind::Freebsd
-        } else if cfg!(target_os = "netbsd") {
-            PlatformKind::Netbsd
-        } else if cfg!(target_os = "openbsd") {
-            PlatformKind::Openbsd
         } else if cfg!(unix) {
             PlatformKind::Unix
         } else {
@@ -548,69 +533,6 @@ mod tests {
         let metadata = capture_metadata(&path).expect("metadata");
 
         assert_common_file_metadata_contract(&metadata, PlatformKind::Macos);
-        assert_unix_metadata_contract(&metadata, 0o640);
-    }
-
-    #[cfg(target_os = "freebsd")]
-    #[test]
-    fn freebsd_target_records_freebsd_platform() {
-        let metadata = captured_sample_file_metadata();
-
-        assert_eq!(metadata.source_platform, PlatformKind::Freebsd);
-        assert!(metadata.unix.is_some());
-    }
-
-    #[cfg(target_os = "freebsd")]
-    #[test]
-    fn freebsd_observed_file_metadata_contract_records_current_scope() {
-        let (_temp, path, _) = sample_file_metadata_with_path();
-        set_mode(&path, 0o640);
-
-        let metadata = capture_metadata(&path).expect("metadata");
-
-        assert_common_file_metadata_contract(&metadata, PlatformKind::Freebsd);
-        assert_unix_metadata_contract(&metadata, 0o640);
-    }
-
-    #[cfg(target_os = "netbsd")]
-    #[test]
-    fn netbsd_target_records_netbsd_platform() {
-        let metadata = captured_sample_file_metadata();
-
-        assert_eq!(metadata.source_platform, PlatformKind::Netbsd);
-        assert!(metadata.unix.is_some());
-    }
-
-    #[cfg(target_os = "netbsd")]
-    #[test]
-    fn netbsd_observed_file_metadata_contract_records_current_scope() {
-        let (_temp, path, _) = sample_file_metadata_with_path();
-        set_mode(&path, 0o640);
-
-        let metadata = capture_metadata(&path).expect("metadata");
-
-        assert_common_file_metadata_contract(&metadata, PlatformKind::Netbsd);
-        assert_unix_metadata_contract(&metadata, 0o640);
-    }
-
-    #[cfg(target_os = "openbsd")]
-    #[test]
-    fn openbsd_target_records_openbsd_platform() {
-        let metadata = captured_sample_file_metadata();
-
-        assert_eq!(metadata.source_platform, PlatformKind::Openbsd);
-        assert!(metadata.unix.is_some());
-    }
-
-    #[cfg(target_os = "openbsd")]
-    #[test]
-    fn openbsd_observed_file_metadata_contract_records_current_scope() {
-        let (_temp, path, _) = sample_file_metadata_with_path();
-        set_mode(&path, 0o640);
-
-        let metadata = capture_metadata(&path).expect("metadata");
-
-        assert_common_file_metadata_contract(&metadata, PlatformKind::Openbsd);
         assert_unix_metadata_contract(&metadata, 0o640);
     }
 

@@ -6479,9 +6479,6 @@ fn platform_metadata_namespace(platform: PlatformKind) -> &'static str {
         PlatformKind::Windows => "windows",
         PlatformKind::Macos => "macos",
         PlatformKind::Linux => "linux",
-        PlatformKind::Freebsd => "freebsd",
-        PlatformKind::Netbsd => "netbsd",
-        PlatformKind::Openbsd => "openbsd",
         PlatformKind::Unix => "unix",
         PlatformKind::Unknown => "platform",
     }

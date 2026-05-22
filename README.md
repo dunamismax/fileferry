@@ -28,7 +28,7 @@ It is for people who want:
 - One scripting contract.
 - One encrypted repository format.
 - Boring restores.
-- First-class Windows, macOS, Linux, and BSD behavior.
+- First-class Windows, macOS, and Linux behavior.
 
 It is not a GUI, SaaS dashboard, agent service, FUSE mount, scheduler, server,
 mobile app, or compatibility layer for an existing backup repository format.
@@ -366,16 +366,10 @@ FileFerry is cross-platform first, but support is earned by CI and releases.
 Target v1 release artifacts:
 
 - Windows x86_64 MSVC.
-- Windows ARM64 MSVC.
 - macOS x86_64.
 - macOS ARM64.
 - Linux x86_64 GNU.
-- Linux x86_64 musl.
-- Linux ARM64 GNU/musl.
-- FreeBSD x86_64.
-- NetBSD x86_64 where feasible.
-
-OpenBSD is best-effort until build, test, CI, and release support are real.
+- Linux ARM64 GNU.
 
 No platform should be called supported unless CI builds it, tests the relevant
 behavior, and release artifacts exist.

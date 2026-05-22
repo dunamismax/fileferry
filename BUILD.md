@@ -229,7 +229,6 @@ FUSE mount, and compatibility with existing backup repository formats.
 
 - No platform is supported until CI, relevant tests, and release artifacts
   exist for that platform.
-- OpenBSD remains best-effort until release and CI support are real.
 - Restore applies only the implemented metadata subset. Other captured or
   future metadata must be reported as warnings, not silently claimed restored.
 - Current normal metadata capture does not restore xattr values, ACL contents,
@@ -300,11 +299,10 @@ behavior:
   fastcdc, blake3, zstd, secrecy, zeroize, and Argon2id documentation.
 - Current cryptographic guidance for AEADs, KDF parameters, nonce strategy,
   key rotation, and authenticated metadata.
-- Windows, macOS, Linux, FreeBSD, NetBSD, and OpenBSD filesystem metadata and
-  path behavior.
+- Windows, macOS, and Linux filesystem metadata and path behavior.
 - S3-compatible storage behavior, multipart uploads, retry semantics,
   consistency guarantees, and provider limits.
-- cargo-dist, signing, SBOM, `cargo-auditable`, Homebrew, Scoop, WinGet,
-  FreeBSD ports, and pkgsrc release documentation.
+- cargo-dist, signing, SBOM, `cargo-auditable`, Homebrew, Scoop, and WinGet
+  release documentation.
 
 Trust current primary docs and observed behavior over this file.

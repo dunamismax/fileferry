@@ -49,9 +49,8 @@ benchmarks, overstate platform support, or bury the lede.
 - The primary binary is named `ferry`.
 - FileFerry creates encrypted, compressed, deduplicated snapshots.
 - Local filesystem and S3-compatible object storage are the v1 backend targets.
-- Windows, macOS, Linux, FreeBSD, and NetBSD are first-class targets only after
-  CI, tests, and release artifacts exist.
-- OpenBSD is best-effort until release and CI support are real.
+- Windows, macOS, and Linux are first-class targets only after CI, tests, and
+  release artifacts exist.
 - `fileferry.app` is the public homepage.
 - FileFerry is CLI-only by design.
 - FileFerry is not a GUI, TUI, daemon, server, FUSE mount, scheduler, mobile
@@ -87,7 +86,7 @@ Default against:
 - `fileferry-crypto` owns key derivation, envelope encryption, authenticated
   object handling, redaction helpers, and secret types.
 - `fileferry-platform` owns path handling and filesystem metadata across
-  Windows, macOS, Linux, and BSD.
+  Windows, macOS, and Linux.
 - `fileferry-policy` owns retention, forget, prune, and lifecycle policy logic.
 - `fileferry-testkit` owns fake stores, corruption fixtures, platform fixtures,
   and shared integration-test helpers.
@@ -218,7 +217,6 @@ parser proves they contain no credential material.
 - A platform is supported only when CI builds it, relevant tests pass, and
   release artifacts exist.
 - Windows is not experimental.
-- BSD is not an afterthought.
 - Cross-platform behavior belongs in `fileferry-platform`, not scattered through
   command code.
 - Handle Windows reserved names, long paths, drive prefixes, alternate data
@@ -227,8 +225,6 @@ parser proves they contain no credential material.
   deliberately.
 - Handle Linux permissions, xattrs, symlinks, sparse files, and special files
   deliberately.
-- Handle FreeBSD and NetBSD metadata based on observed behavior, not Linux
-  assumptions.
 - If metadata cannot be restored on a target platform, report it clearly in
   human and machine output.
 
@@ -347,12 +343,11 @@ external behavior:
   fastcdc, blake3, zstd, secrecy, zeroize, and Argon2id documentation.
 - Current cryptographic guidance for AEADs, KDF parameters, nonce strategy,
   key rotation, and authenticated metadata.
-- Windows, macOS, Linux, FreeBSD, NetBSD, and OpenBSD filesystem metadata and
-  path behavior.
+- Windows, macOS, and Linux filesystem metadata and path behavior.
 - S3-compatible storage behavior, multipart uploads, retry semantics,
   consistency guarantees, and provider limits.
-- cargo-dist, signing, SBOM, `cargo-auditable`, Homebrew, Scoop, WinGet,
-  FreeBSD ports, and pkgsrc release documentation.
+- cargo-dist, signing, SBOM, `cargo-auditable`, Homebrew, Scoop, and WinGet
+  release documentation.
 
 Trust current primary docs and observed behavior over this file.
 

@@ -55,7 +55,7 @@ Scope:
   directory; `readlink` verified the restored symlink target; `ferry check`
   authenticated the committed manifest, chunk index, and referenced chunk.
   `stat` compared source and restored modified timestamps for the regular file
-  and the nested directory. The command transcript below uses the macOS/BSD
+  and the nested directory. The command transcript below uses the macOS
   `stat -f %m` form that was run locally.
 
 Result:

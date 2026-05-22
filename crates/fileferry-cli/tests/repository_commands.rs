@@ -125,12 +125,6 @@ fn current_platform_json_name() -> &'static str {
         "macos"
     } else if cfg!(target_os = "linux") {
         "linux"
-    } else if cfg!(target_os = "freebsd") {
-        "freebsd"
-    } else if cfg!(target_os = "netbsd") {
-        "netbsd"
-    } else if cfg!(target_os = "openbsd") {
-        "openbsd"
     } else if cfg!(unix) {
         "unix"
     } else {

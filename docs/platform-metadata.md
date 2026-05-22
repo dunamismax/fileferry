@@ -1,7 +1,7 @@
 # Platform Metadata
 
 FileFerry captures platform metadata so restores can be honest and repeatable
-across Windows, macOS, Linux, FreeBSD, and NetBSD. Metadata records are stored
+across Windows, macOS, and Linux. Metadata records are stored
 inside encrypted snapshot manifests or encrypted metadata objects; source paths,
 file names, ownership, attributes, xattrs, ACLs, and platform-specific details
 must not appear in plaintext repository objects.
@@ -36,12 +36,6 @@ Platform extensions are captured as namespaced records:
   observations.
 - `linux`: POSIX mode/ownership, file type, timestamps, xattrs, ACL capture
   status, sparse extents, and special-file identifiers when explicitly enabled.
-- `freebsd`: POSIX mode/ownership, file flags, timestamps, xattrs where
-  available, ACL capture status, sparse extents, and special-file identifiers
-  when explicitly enabled.
-- `netbsd`: POSIX mode/ownership, file flags where available, timestamps, xattrs
-  where available, ACL capture status, sparse extents, and special-file
-  identifiers when explicitly enabled.
 
 Metadata capture must distinguish three states:
 
@@ -101,7 +95,7 @@ v0 manifests that lack this field are read as `unknown`. Current restores do
 not restore symlink timestamps, symlink Unix mode/ownership, creation/birth
 time for regular files or directories, Unix ownership by changing destination
 owners, Unix special mode bits, ACLs, xattr values, resource forks, Windows
-attributes, BSD flags, sparse extents, or other platform-specific metadata
+attributes, file flags, sparse extents, or other platform-specific metadata
 yet. Selected regular-file and directory creation/birth timestamps are
 reported as structured `portable`/`created` metadata warnings because this
 version does not restore them. New manifests also record reportable xattr
@@ -170,5 +164,3 @@ documentation before coding each platform path:
 - Apple filesystem metadata, URL resource values, and file manager attribute
   documentation.
 - Linux `stat`, `statx`, xattr, ACL, and sparse-file interfaces.
-- FreeBSD `stat`, flags, xattr/extattr, ACL, and sparse-file interfaces.
-- NetBSD `stat`, flags, extended attribute, ACL, and sparse-file interfaces.
