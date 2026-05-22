@@ -40,6 +40,24 @@ function Resolve-RequiredPath([string]$Path, [string]$Label) {
     $resolved.ProviderPath
 }
 
+function Test-TarUsesPosixWindowsPaths {
+    if (-not $IsWindows) {
+        return $false
+    }
+
+    $tar = Get-Command tar -ErrorAction SilentlyContinue
+    if (-not $tar) {
+        return $false
+    }
+
+    if ($tar.Source -match '\\Git\\usr\\bin\\tar(\.exe)?$') {
+        return $true
+    }
+
+    $version = & $tar.Source --version 2>$null | Select-Object -First 1
+    $LASTEXITCODE -eq 0 -and $version -match 'GNU tar'
+}
+
 function Convert-ToTarPath([string]$Path) {
     if (-not $IsWindows) {
         return $Path
@@ -50,6 +68,10 @@ function Convert-ToTarPath([string]$Path) {
         $normalized = "\\" + $normalized.Substring(8)
     } elseif ($normalized.StartsWith("\\?\")) {
         $normalized = $normalized.Substring(4)
+    }
+
+    if (-not (Test-TarUsesPosixWindowsPaths)) {
+        return $normalized
     }
 
     $cygpath = Get-Command cygpath -ErrorAction SilentlyContinue
