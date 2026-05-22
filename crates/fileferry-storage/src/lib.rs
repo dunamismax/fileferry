@@ -105,14 +105,53 @@ impl StorageError {
     }
 
     fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Io { .. }
-                | Self::ObjectIo { .. }
-                | Self::BackendObject { .. }
-                | Self::Backend { .. }
-                | Self::Timeout { .. }
-        )
+        match self {
+            Self::Io { source, .. } | Self::ObjectIo { source, .. } => {
+                is_retryable_io_kind(source.kind())
+            }
+            Self::BackendObject { source, .. } | Self::Backend { source, .. } => {
+                is_retryable_backend_error(source)
+            }
+            Self::Timeout { .. } => true,
+            Self::InvalidObjectKey { .. }
+            | Self::ObjectAlreadyExists { .. }
+            | Self::ObjectNotFound { .. }
+            | Self::BackendConfig { .. }
+            | Self::PolicyConfig { .. } => false,
+        }
+    }
+}
+
+fn is_retryable_io_kind(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::AddrInUse
+            | io::ErrorKind::AddrNotAvailable
+            | io::ErrorKind::BrokenPipe
+    )
+}
+
+fn is_retryable_backend_error(source: &ObjectStoreError) -> bool {
+    match source {
+        ObjectStoreError::NotFound { .. }
+        | ObjectStoreError::InvalidPath { .. }
+        | ObjectStoreError::NotSupported { .. }
+        | ObjectStoreError::AlreadyExists { .. }
+        | ObjectStoreError::Precondition { .. }
+        | ObjectStoreError::NotModified { .. }
+        | ObjectStoreError::NotImplemented { .. }
+        | ObjectStoreError::PermissionDenied { .. }
+        | ObjectStoreError::Unauthenticated { .. }
+        | ObjectStoreError::UnknownConfigurationKey { .. } => false,
+        ObjectStoreError::Generic { .. } => true,
+        _ => true,
     }
 }
 
@@ -1265,6 +1304,56 @@ mod tests {
     }
 
     #[test]
+    fn s3_list_mapping_ignores_root_marker_and_sibling_prefixes() {
+        let store = S3Store {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+            root_prefix: ObjectKeyPrefix::new("fileferry/dev").expect("prefix"),
+            conditional_create: false,
+        };
+
+        assert!(
+            store
+                .local_key_from_remote(&ObjectStorePath::from("fileferry/dev"))
+                .is_none()
+        );
+        assert!(
+            store
+                .local_key_from_remote(&ObjectStorePath::from("fileferry/dev-sibling/bootstrap"))
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .local_key_from_remote(&ObjectStorePath::from("fileferry/dev/bootstrap"))
+                .expect("inside prefix")
+                .expect("valid key"),
+            key("bootstrap")
+        );
+        assert_eq!(
+            store
+                .local_key_from_remote(&ObjectStorePath::from("fileferry/dev/objects/chunk/aa"))
+                .expect("inside prefix")
+                .expect("valid key"),
+            key("objects/chunk/aa")
+        );
+    }
+
+    #[test]
+    fn s3_list_mapping_fails_closed_on_invalid_returned_keys() {
+        let store = S3Store {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+            root_prefix: ObjectKeyPrefix::new("fileferry/dev").expect("prefix"),
+            conditional_create: false,
+        };
+
+        let error = store
+            .local_key_from_remote(&ObjectStorePath::from("fileferry/dev/bad key"))
+            .expect("inside prefix")
+            .expect_err("invalid repository key");
+
+        assert!(matches!(error, StorageError::InvalidObjectKey { .. }));
+    }
+
+    #[test]
     fn storage_policy_validates_bounds() {
         assert_eq!(
             StoragePolicy::default(),
@@ -1489,6 +1578,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_store_retries_retryable_get_errors() {
+        let inner = TransientGetStore::new(2);
+        let attempts = inner.attempts.clone();
+        let store = PolicyObjectStore::from_store(
+            inner,
+            test_policy(
+                3,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                1,
+            ),
+        );
+
+        assert_eq!(
+            store
+                .get(&key("chunks/retry-get/blob"))
+                .await
+                .expect("get retry succeeds"),
+            b"bytes"
+        );
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn policy_store_retries_retryable_list_errors() {
+        let listed = key("chunks/retry-list/blob");
+        let inner = TransientListStore::new(2, listed.clone());
+        let attempts = inner.attempts.clone();
+        let store = PolicyObjectStore::from_store(
+            inner,
+            test_policy(
+                3,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                1,
+            ),
+        );
+
+        assert_eq!(
+            store
+                .list_prefix(&ObjectKeyPrefix::new("chunks").expect("prefix"))
+                .await
+                .expect("list retry succeeds"),
+            vec![listed]
+        );
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
     async fn policy_store_does_not_retry_permanent_conflicts() {
         let store = PolicyObjectStore::from_store(
             ConflictStore,
@@ -1507,6 +1647,36 @@ mod tests {
             .expect_err("permanent conflict");
 
         assert!(matches!(error, StorageError::ObjectAlreadyExists { .. }));
+    }
+
+    #[tokio::test]
+    async fn policy_store_does_not_retry_permission_denied_backend_errors() {
+        let inner = PermissionDeniedDeleteStore::default();
+        let attempts = inner.attempts.clone();
+        let store = PolicyObjectStore::from_store(
+            inner,
+            test_policy(
+                3,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                1,
+            ),
+        );
+
+        let error = store
+            .delete(&key("chunks/denied/blob"))
+            .await
+            .expect_err("permission denial is permanent");
+
+        assert!(matches!(
+            error,
+            StorageError::BackendObject {
+                source: ObjectStoreError::PermissionDenied { .. },
+                ..
+            }
+        ));
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1780,6 +1950,148 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct TransientGetStore {
+        remaining_failures: AtomicUsize,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl TransientGetStore {
+        fn new(remaining_failures: usize) -> Self {
+            Self {
+                remaining_failures: AtomicUsize::new(remaining_failures),
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl ObjectStore for TransientGetStore {
+        fn capabilities(&self) -> StorageCapabilities {
+            StorageCapabilities::in_memory_fake()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            _key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> StorageFuture<'a, PutStatus> {
+            Box::pin(async move { Ok(PutStatus::Created) })
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                if self
+                    .remaining_failures
+                    .fetch_update(
+                        AtomicOrdering::SeqCst,
+                        AtomicOrdering::SeqCst,
+                        |remaining| remaining.checked_sub(1),
+                    )
+                    .is_ok()
+                {
+                    return Err(StorageError::ObjectIo {
+                        operation: "test transient get",
+                        key: key.clone(),
+                        source: io::Error::new(io::ErrorKind::TimedOut, "temporary failure"),
+                    });
+                }
+
+                Ok(b"bytes".to_vec())
+            })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(true) })
+        }
+
+        fn delete<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct TransientListStore {
+        remaining_failures: AtomicUsize,
+        attempts: Arc<AtomicUsize>,
+        listed: ObjectKey,
+    }
+
+    impl TransientListStore {
+        fn new(remaining_failures: usize, listed: ObjectKey) -> Self {
+            Self {
+                remaining_failures: AtomicUsize::new(remaining_failures),
+                attempts: Arc::new(AtomicUsize::new(0)),
+                listed,
+            }
+        }
+    }
+
+    impl ObjectStore for TransientListStore {
+        fn capabilities(&self) -> StorageCapabilities {
+            StorageCapabilities::in_memory_fake()
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            _key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> StorageFuture<'a, PutStatus> {
+            Box::pin(async move { Ok(PutStatus::Created) })
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move { Err(StorageError::ObjectNotFound { key: key.clone() }) })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(true) })
+        }
+
+        fn delete<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                if self
+                    .remaining_failures
+                    .fetch_update(
+                        AtomicOrdering::SeqCst,
+                        AtomicOrdering::SeqCst,
+                        |remaining| remaining.checked_sub(1),
+                    )
+                    .is_ok()
+                {
+                    return Err(StorageError::Backend {
+                        backend: BackendKind::S3Compatible,
+                        operation: "test transient list",
+                        source: ObjectStoreError::Generic {
+                            store: "test",
+                            source: Box::new(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "temporary failure",
+                            )),
+                        },
+                    });
+                }
+
+                Ok(vec![self.listed.clone()])
+            })
+        }
+    }
+
+    #[derive(Debug)]
     struct ConflictStore;
 
     impl ObjectStore for ConflictStore {
@@ -1805,6 +2117,58 @@ mod tests {
 
         fn delete<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, ()> {
             Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct PermissionDeniedDeleteStore {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl ObjectStore for PermissionDeniedDeleteStore {
+        fn capabilities(&self) -> StorageCapabilities {
+            StorageCapabilities::s3_compatible(false)
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            _key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> StorageFuture<'a, PutStatus> {
+            Box::pin(async move { Ok(PutStatus::Created) })
+        }
+
+        fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move { Err(StorageError::ObjectNotFound { key: key.clone() }) })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(true) })
+        }
+
+        fn delete<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                Err(StorageError::BackendObject {
+                    backend: BackendKind::S3Compatible,
+                    operation: "test permission delete",
+                    key: key.clone(),
+                    source: ObjectStoreError::PermissionDenied {
+                        path: key.as_str().to_owned(),
+                        source: Box::new(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "permission denied",
+                        )),
+                    },
+                })
+            })
         }
 
         fn list_prefix<'a>(

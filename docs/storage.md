@@ -75,9 +75,10 @@ initial backoff, 2-second maximum backoff, and 16 concurrent operations.
 
 The policy retries transient I/O, backend, and timeout errors. It does not
 retry permanent storage-contract failures such as invalid object keys, missing
-objects, or immutable-write conflicts. Backends still report their native
-capabilities; the policy wrapper changes execution behavior, not backend
-identity.
+objects, immutable-write conflicts, permission denial, authentication failure,
+unsupported backend operations, or invalid backend paths. Backends still report
+their native capabilities; the policy wrapper changes execution behavior, not
+backend identity.
 
 ## Local Filesystem Backend
 
@@ -141,6 +142,15 @@ Current S3 capability assumptions:
 - Prefix listing is available.
 - Object tags are disabled because some S3-compatible providers reject tagging
   headers.
+
+Current storage-layer S3 evidence includes:
+
+- Retry policy tests for retryable put, read, delete, and list failures.
+- A permanent permission-denied backend failure test that verifies the policy
+  does not retry access failures.
+- Prefix-mapping tests that ignore exact root markers and sibling prefixes
+  outside the configured repository root.
+- A fail-closed test for invalid object keys returned from backend listing.
 
 The implementation has a gated live integration test. It runs only when
 `FILEFERRY_S3_INTEGRATION=1` and all required S3 environment variables are set:
@@ -221,6 +231,10 @@ runs backup, forget, prune dry-run, prune sweep, and snapshots through the
 `ferry` binary, verifies prune plan/completion objects exist, and deletes
 objects under only that unique repository prefix.
 
+The Backblaze B2 live drill on 2026-05-22 passed these S3-compatible storage
+and CLI gates under an isolated private development prefix. That is current
+Backblaze provider evidence only; it is not a broad S3 provider support claim.
+
 S3 prune deletes existing repository objects and writes small encrypted
 prune-state objects through `put_if_absent`; it does not initiate multipart
 uploads. Multipart or partial-upload cleanup remains part of the broader S3
@@ -229,13 +243,13 @@ backup/upload hardening path, not prune itself.
 ## Not Implemented Yet
 
 S3-compatible storage now has the initial object-store adapter and live
-round-trip, data-path, retention/key-management, and prune test gates.
+Backblaze round-trip, data-path, retention/key-management, and prune test
+gates.
 `ferry init`, `ferry backup`, `ferry snapshots`, `ferry ls`, `ferry restore`,
 `ferry check`, `ferry forget`, `ferry prune`, and `ferry key ...` commands use
 S3-compatible encrypted repositories through the same core repository
 pipeline as the local backend. Common retry, timeout, backoff, and
 concurrency behavior exists in the policy wrapper. Before S3 storage is
-marked complete it still needs provider evidence for the new prune gate,
-explicit provider capability checks, broader stale-or-surprising listing
-tests, partial upload behavior, multipart cleanup guidance, and provider
-evidence beyond the initial Backblaze-compatible round trip.
+marked complete it still needs explicit provider capability checks, live
+evidence for providers beyond the current Backblaze B2 path, partial upload
+behavior, and multipart cleanup guidance.
