@@ -7,6 +7,20 @@ current release-candidate evidence path until a dedicated tool such as
 The release process must not claim platform support before CI, tests, and
 artifacts exist for that target.
 
+## CI Evidence
+
+The normal CI workflow runs the Rust formatting, clippy, test, and build gate
+on these hosted runner targets:
+
+- Ubuntu Linux x86_64 GNU host.
+- macOS ARM64 host.
+- Windows x86_64 MSVC host.
+
+Those jobs are required release-candidate evidence, but they are not platform
+support by themselves. Support still requires the target-specific release
+artifact, checksum/signature/SBOM/auditable metadata, archive smoke evidence,
+and relevant platform metadata tests for the exact release candidate.
+
 ## Preconditions
 
 - The release candidate is built from a clean checkout on the intended tag.

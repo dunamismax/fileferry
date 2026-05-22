@@ -11,8 +11,18 @@ permissions:
 
 jobs:
   rust:
-    name: Rust
-    runs-on: ubuntu-latest
+    name: Rust (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x86_64 GNU host
+            os: ubuntu-latest
+          - label: macOS ARM64 host
+            os: macos-15
+          - label: Windows x86_64 MSVC host
+            os: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5

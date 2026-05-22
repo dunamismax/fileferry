@@ -30,4 +30,6 @@ tracing.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
 xattr.workspace = true

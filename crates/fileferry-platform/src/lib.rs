@@ -313,6 +313,7 @@ fn metadata_extensions(path: &Path) -> MetadataExtensions {
     }
 }
 
+#[cfg(unix)]
 fn xattr_summary(path: &Path) -> MetadataValue<MetadataFieldSummary> {
     if !xattr::SUPPORTED_PLATFORM {
         return MetadataValue::Unsupported;
@@ -327,6 +328,11 @@ fn xattr_summary(path: &Path) -> MetadataValue<MetadataFieldSummary> {
         }
         Err(_) => MetadataValue::Unsupported,
     }
+}
+
+#[cfg(not(unix))]
+fn xattr_summary(_path: &Path) -> MetadataValue<MetadataFieldSummary> {
+    MetadataValue::Unsupported
 }
 
 fn reportable_xattr_name(name: &OsStr) -> bool {
@@ -381,6 +387,105 @@ fn unix_metadata(_metadata: &fs::Metadata) -> Option<UnixMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn captured_sample_file_metadata() -> EntryMetadata {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"hello").expect("write file");
+
+        capture_metadata(&path).expect("metadata")
+    }
+
+    #[test]
+    fn current_platform_matches_compiled_target() {
+        let expected = if cfg!(windows) {
+            PlatformKind::Windows
+        } else if cfg!(target_os = "macos") {
+            PlatformKind::Macos
+        } else if cfg!(target_os = "linux") {
+            PlatformKind::Linux
+        } else if cfg!(target_os = "freebsd") {
+            PlatformKind::Freebsd
+        } else if cfg!(target_os = "netbsd") {
+            PlatformKind::Netbsd
+        } else if cfg!(target_os = "openbsd") {
+            PlatformKind::Openbsd
+        } else if cfg!(unix) {
+            PlatformKind::Unix
+        } else {
+            PlatformKind::Unknown
+        };
+
+        assert_eq!(current_platform(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captures_unix_metadata_on_unix_targets() {
+        let metadata = captured_sample_file_metadata();
+        let unix = metadata.unix.expect("unix metadata");
+
+        assert_eq!(metadata.source_platform, current_platform());
+        assert_ne!(unix.mode, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn captures_windows_metadata_without_unix_fields() {
+        let metadata = captured_sample_file_metadata();
+
+        assert_eq!(metadata.source_platform, PlatformKind::Windows);
+        assert_eq!(metadata.unix, None);
+        assert_eq!(
+            metadata.extensions.windows_attributes,
+            MetadataValue::Unsupported
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_target_records_linux_platform() {
+        let metadata = captured_sample_file_metadata();
+
+        assert_eq!(metadata.source_platform, PlatformKind::Linux);
+        assert!(metadata.unix.is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_target_records_macos_platform() {
+        let metadata = captured_sample_file_metadata();
+
+        assert_eq!(metadata.source_platform, PlatformKind::Macos);
+        assert!(metadata.unix.is_some());
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_target_records_freebsd_platform() {
+        let metadata = captured_sample_file_metadata();
+
+        assert_eq!(metadata.source_platform, PlatformKind::Freebsd);
+        assert!(metadata.unix.is_some());
+    }
+
+    #[cfg(target_os = "netbsd")]
+    #[test]
+    fn netbsd_target_records_netbsd_platform() {
+        let metadata = captured_sample_file_metadata();
+
+        assert_eq!(metadata.source_platform, PlatformKind::Netbsd);
+        assert!(metadata.unix.is_some());
+    }
+
+    #[cfg(target_os = "openbsd")]
+    #[test]
+    fn openbsd_target_records_openbsd_platform() {
+        let metadata = captured_sample_file_metadata();
+
+        assert_eq!(metadata.source_platform, PlatformKind::Openbsd);
+        assert!(metadata.unix.is_some());
+    }
 
     #[test]
     fn captures_regular_file_metadata_without_reading_contents() {
@@ -513,6 +618,7 @@ mod tests {
         assert!(error.to_string().contains("unknown field"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn captures_xattr_presence_when_filesystem_exposes_it() {
         let temp = tempfile::tempdir().expect("tempdir");

@@ -10999,6 +10999,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn restore_snapshot_to_destination_warns_for_unrestored_xattrs_when_present() {
         use fileferry_testkit::FakeObjectStore;

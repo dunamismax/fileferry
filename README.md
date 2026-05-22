@@ -373,6 +373,9 @@ OpenBSD is best-effort until build, test, CI, and release support are real.
 No platform should be called supported unless CI builds it, tests the relevant
 behavior, and release artifacts exist.
 
+Current CI host evidence covers Ubuntu Linux x86_64 GNU, macOS ARM64, and
+Windows x86_64 MSVC. This is build/test evidence only, not a support claim.
+
 ## V1 Scope
 
 V1 should include:

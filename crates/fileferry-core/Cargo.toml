@@ -22,4 +22,6 @@ zstd.workspace = true
 fileferry-testkit = { path = "../fileferry-testkit" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[target.'cfg(unix)'.dev-dependencies]
 xattr.workspace = true

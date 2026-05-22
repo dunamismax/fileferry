@@ -2106,6 +2106,7 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn restore_json_reports_unrestored_xattr_warning_for_selected_file() {
     let temp = tempfile::tempdir().expect("tempdir");

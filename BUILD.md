@@ -85,6 +85,9 @@ Implemented and tested at the current pre-v1 level:
   includes them in `SHA256SUMS`, and the installers verify archive checksums
   before writing `ferry`. PowerShell evidence is from `pwsh` on macOS and is not
   a Windows support claim.
+- CI now runs the normal Rust gate on Ubuntu Linux x86_64 GNU, macOS ARM64,
+  and Windows x86_64 MSVC hosted runners. This is host build/test evidence
+  only, not a platform support claim or complete release-artifact matrix.
 - Live Backblaze B2 S3-compatible drills passed on 2026-05-22 under an
   isolated private development prefix for storage round-trip, CLI init,
   `backup -> snapshots -> ls -> restore -> check`, missing-manifest failure,
