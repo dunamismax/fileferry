@@ -1742,7 +1742,7 @@ fn read_config(path: &Path) -> Result<FileConfig, ConfigError> {
 fn validate_repository_url(value: &str) -> Result<(), ConfigError> {
     let supported = value.starts_with("s3://")
         || value.starts_with("file://")
-        || value.starts_with('/')
+        || Path::new(value).is_absolute()
         || value.starts_with("./")
         || value.starts_with("../");
 
@@ -3595,6 +3595,13 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(lines[1]).expect("complete event")["event"],
             "command_completed"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_absolute_repository_paths_are_valid_repository_urls() {
+        validate_repository_url(r"C:\Users\runneradmin\AppData\Local\Temp\fileferry-repo")
+            .expect("Windows absolute repository path");
     }
 
     #[test]
