@@ -3559,6 +3559,18 @@ mod tests {
         }
     }
 
+    fn target_absolute_repository_path() -> String {
+        #[cfg(windows)]
+        {
+            r"C:\Users\runneradmin\backups\fileferry".to_owned()
+        }
+
+        #[cfg(not(windows))]
+        {
+            "/var/backups/fileferry".to_owned()
+        }
+    }
+
     #[test]
     fn version_human_output_is_stable() {
         let output = run(version_cli(false, false)).expect("version output");
@@ -3600,7 +3612,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_absolute_repository_paths_are_valid_repository_urls() {
-        validate_repository_url(r"C:\Users\runneradmin\AppData\Local\Temp\fileferry-repo")
+        validate_repository_url(&target_absolute_repository_path())
             .expect("Windows absolute repository path");
     }
 
@@ -3972,9 +3984,10 @@ progress = "always"
 "#,
         )
         .expect("write config");
+        let repository_url = target_absolute_repository_path();
         let globals = GlobalArgs {
             config: Some(path),
-            repo: Some("/var/backups/fileferry".to_owned()),
+            repo: Some(repository_url.clone()),
             log_level: Some("error".to_owned()),
             no_progress: true,
             ..GlobalArgs::default()
@@ -3985,7 +3998,7 @@ progress = "always"
 
         assert_eq!(
             resolved.repository_url.as_deref(),
-            Some("/var/backups/fileferry")
+            Some(repository_url.as_str())
         );
         assert_eq!(resolved.log_level, LogLevel::Error);
         assert_eq!(resolved.progress, ProgressMode::Never);
