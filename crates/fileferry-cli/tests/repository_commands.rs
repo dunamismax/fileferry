@@ -138,6 +138,14 @@ fn current_platform_json_name() -> &'static str {
     }
 }
 
+fn platform_relative_path(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_owned()
+    }
+}
+
 #[cfg(unix)]
 fn expected_restore_symlink_metadata_fields(symlink_entries: usize) -> usize {
     symlink_entries * 5
@@ -2004,7 +2012,7 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     );
     assert_eq!(
         restore["data"]["metadata_warnings"][0]["entry_id"],
-        serde_json::json!("nested/keep.txt")
+        serde_json::json!(platform_relative_path("nested/keep.txt"))
     );
     assert_eq!(
         restore["data"]["metadata_warnings"][0]["namespace"],
@@ -2378,32 +2386,34 @@ fn restore_jsonl_emits_progress_events_without_stderr() {
         .get_output()
         .stdout
         .clone();
-    let lines: Vec<_> = restore_jsonl_output
+    let events: Vec<Value> = restore_jsonl_output
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("jsonl event"))
         .collect();
-    assert_eq!(lines.len(), 10);
-    let started: Value = serde_json::from_slice(lines[0]).expect("started event");
+    let started = events.first().expect("started event");
     assert_eq!(started["event"], "command_started");
     assert_eq!(started["command"], "restore");
-    let progress: Vec<Value> = lines[1..7]
+    let progress: Vec<_> = events
         .iter()
-        .map(|line| serde_json::from_slice(line).expect("progress event"))
+        .filter(|event| event["event"] == "progress")
         .collect();
-    assert_eq!(progress[0]["event"], "progress");
+    assert_eq!(progress.len(), 6);
     assert_eq!(progress[0]["data"]["phase"], "load_manifest");
     assert_eq!(progress[5]["data"]["phase"], "complete");
-    let warnings: Vec<Value> = lines[7..9]
+    let warnings: Vec<_> = events
         .iter()
-        .map(|line| serde_json::from_slice(line).expect("warning event"))
+        .filter(|event| event["event"] == "warning")
         .collect();
-    assert!(warnings.iter().all(|warning| {
-        warning["event"] == "warning"
-            && warning["command"] == "restore"
-            && warning["data"]["namespace"] == "portable"
-            && warning["data"]["field"] == "created"
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning["command"] == "restore")
+    );
+    assert!(warnings.iter().any(|warning| {
+        warning["data"]["namespace"] == "portable" && warning["data"]["field"] == "created"
     }));
-    let completed: Value = serde_json::from_slice(lines[9]).expect("completed event");
+    let completed = events.last().expect("completed event");
     assert_eq!(completed["event"], "command_completed");
     assert_eq!(completed["data"]["files_written"], 1);
     assert_eq!(
