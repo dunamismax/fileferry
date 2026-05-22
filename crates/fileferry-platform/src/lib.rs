@@ -397,6 +397,62 @@ mod tests {
         capture_metadata(&path).expect("metadata")
     }
 
+    fn sample_file_metadata_with_path() -> (tempfile::TempDir, PathBuf, EntryMetadata) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"hello").expect("write file");
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        (temp, path, metadata)
+    }
+
+    fn assert_common_file_metadata_contract(metadata: &EntryMetadata, platform: PlatformKind) {
+        assert_eq!(metadata.kind, EntryKind::RegularFile);
+        assert_eq!(metadata.source_platform, platform);
+        assert_eq!(metadata.size_bytes, Some(5));
+        assert!(matches!(
+            metadata.modified,
+            MetadataValue::Captured(Timestamp { .. })
+        ));
+        assert!(matches!(
+            metadata.created,
+            MetadataValue::Captured(Timestamp { .. }) | MetadataValue::Unsupported
+        ));
+        assert_eq!(metadata.symlink_target, MetadataValue::Unsupported);
+        assert_eq!(metadata.extensions.acls, MetadataValue::Unsupported);
+        assert_eq!(metadata.extensions.file_flags, MetadataValue::Unsupported);
+        assert_eq!(
+            metadata.extensions.resource_forks,
+            MetadataValue::Unsupported
+        );
+        assert_eq!(
+            metadata.extensions.windows_attributes,
+            MetadataValue::Unsupported
+        );
+        assert_eq!(
+            metadata.extensions.sparse_extents,
+            MetadataValue::Unsupported
+        );
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("set mode");
+    }
+
+    #[cfg(unix)]
+    fn assert_unix_metadata_contract(metadata: &EntryMetadata, mode: u32) {
+        let unix = metadata.unix.as_ref().expect("unix metadata");
+
+        assert_eq!(unix.mode & 0o777, mode);
+        assert!(matches!(
+            metadata.extensions.xattrs,
+            MetadataValue::Captured(MetadataFieldSummary { .. }) | MetadataValue::Unsupported
+        ));
+    }
+
     #[test]
     fn current_platform_matches_compiled_target() {
         let expected = if cfg!(windows) {
@@ -443,6 +499,16 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_observed_file_metadata_contract_records_current_scope() {
+        let (_temp, _path, metadata) = sample_file_metadata_with_path();
+
+        assert_common_file_metadata_contract(&metadata, PlatformKind::Windows);
+        assert_eq!(metadata.unix, None);
+        assert_eq!(metadata.extensions.xattrs, MetadataValue::Unsupported);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_target_records_linux_platform() {
@@ -450,6 +516,18 @@ mod tests {
 
         assert_eq!(metadata.source_platform, PlatformKind::Linux);
         assert!(metadata.unix.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_observed_file_metadata_contract_records_current_scope() {
+        let (_temp, path, _) = sample_file_metadata_with_path();
+        set_mode(&path, 0o640);
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_common_file_metadata_contract(&metadata, PlatformKind::Linux);
+        assert_unix_metadata_contract(&metadata, 0o640);
     }
 
     #[cfg(target_os = "macos")]
@@ -461,6 +539,18 @@ mod tests {
         assert!(metadata.unix.is_some());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_observed_file_metadata_contract_records_current_scope() {
+        let (_temp, path, _) = sample_file_metadata_with_path();
+        set_mode(&path, 0o640);
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_common_file_metadata_contract(&metadata, PlatformKind::Macos);
+        assert_unix_metadata_contract(&metadata, 0o640);
+    }
+
     #[cfg(target_os = "freebsd")]
     #[test]
     fn freebsd_target_records_freebsd_platform() {
@@ -468,6 +558,18 @@ mod tests {
 
         assert_eq!(metadata.source_platform, PlatformKind::Freebsd);
         assert!(metadata.unix.is_some());
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_observed_file_metadata_contract_records_current_scope() {
+        let (_temp, path, _) = sample_file_metadata_with_path();
+        set_mode(&path, 0o640);
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_common_file_metadata_contract(&metadata, PlatformKind::Freebsd);
+        assert_unix_metadata_contract(&metadata, 0o640);
     }
 
     #[cfg(target_os = "netbsd")]
@@ -479,6 +581,18 @@ mod tests {
         assert!(metadata.unix.is_some());
     }
 
+    #[cfg(target_os = "netbsd")]
+    #[test]
+    fn netbsd_observed_file_metadata_contract_records_current_scope() {
+        let (_temp, path, _) = sample_file_metadata_with_path();
+        set_mode(&path, 0o640);
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_common_file_metadata_contract(&metadata, PlatformKind::Netbsd);
+        assert_unix_metadata_contract(&metadata, 0o640);
+    }
+
     #[cfg(target_os = "openbsd")]
     #[test]
     fn openbsd_target_records_openbsd_platform() {
@@ -486,6 +600,18 @@ mod tests {
 
         assert_eq!(metadata.source_platform, PlatformKind::Openbsd);
         assert!(metadata.unix.is_some());
+    }
+
+    #[cfg(target_os = "openbsd")]
+    #[test]
+    fn openbsd_observed_file_metadata_contract_records_current_scope() {
+        let (_temp, path, _) = sample_file_metadata_with_path();
+        set_mode(&path, 0o640);
+
+        let metadata = capture_metadata(&path).expect("metadata");
+
+        assert_common_file_metadata_contract(&metadata, PlatformKind::Openbsd);
+        assert_unix_metadata_contract(&metadata, 0o640);
     }
 
     #[test]
@@ -716,6 +842,8 @@ mod tests {
             metadata.symlink_target,
             MetadataValue::Captured(PathBuf::from("target.txt"))
         );
+        assert_eq!(metadata.source_platform, current_platform());
+        assert!(metadata.unix.is_some());
     }
 
     #[test]
