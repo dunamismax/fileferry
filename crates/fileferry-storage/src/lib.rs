@@ -640,7 +640,7 @@ impl fmt::Debug for S3StoreConfig {
             .debug_struct("S3StoreConfig")
             .field("bucket", &self.bucket)
             .field("region", &self.region)
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &redact_url_for_display(&self.endpoint))
             .field("access_key_id", &"[redacted]")
             .field("secret_access_key", &"[redacted]")
             .field("root_prefix", &self.root_prefix)
@@ -729,7 +729,7 @@ impl S3Store {
             .build()
             .map_err(|source| StorageError::BackendConfig {
                 backend: BackendKind::S3Compatible,
-                reason: source.to_string(),
+                reason: redact_url_for_display(&source.to_string()),
             })?;
 
         Ok(Self {
@@ -899,8 +899,53 @@ fn validate_s3_endpoint(endpoint: &str) -> StorageResult<()> {
             reason: "endpoint must be an https:// URL".to_owned(),
         });
     }
+    let endpoint_rest = &endpoint["https://".len()..];
+    let authority_end = endpoint_rest
+        .find(['/', '?', '#'])
+        .unwrap_or(endpoint_rest.len());
+    let authority = &endpoint_rest[..authority_end];
+    if authority.contains('@') {
+        return Err(StorageError::BackendConfig {
+            backend: BackendKind::S3Compatible,
+            reason: "endpoint must not contain credentials".to_owned(),
+        });
+    }
+    if endpoint_rest.contains('?') || endpoint_rest.contains('#') {
+        return Err(StorageError::BackendConfig {
+            backend: BackendKind::S3Compatible,
+            reason: "endpoint must not contain query strings or fragments".to_owned(),
+        });
+    }
 
     Ok(())
+}
+
+fn redact_url_for_display(value: &str) -> String {
+    let mut redacted = value.to_owned();
+
+    if let Some(scheme_end) = redacted.find("://") {
+        let authority_start = scheme_end + 3;
+        let authority_end = redacted[authority_start..]
+            .find(['/', '?', '#', ' ', '\n', '\r', '\t'])
+            .map(|offset| authority_start + offset)
+            .unwrap_or(redacted.len());
+        if let Some(relative_at) = redacted[authority_start..authority_end].rfind('@') {
+            let userinfo_end = authority_start + relative_at + 1;
+            redacted.replace_range(authority_start..userinfo_end, "<redacted>@");
+        }
+    }
+
+    if let Some(query_start) = redacted.find('?') {
+        redacted.truncate(query_start);
+        redacted.push_str("?<redacted>");
+    }
+
+    if let Some(fragment_start) = redacted.find('#') {
+        redacted.truncate(fragment_start);
+        redacted.push_str("#<redacted>");
+    }
+
+    redacted
 }
 
 fn map_s3_object_error(
@@ -1177,6 +1222,31 @@ mod tests {
         assert_eq!(config.bucket(), "dev-bucket");
         assert_eq!(config.region(), "us-west-001");
         assert_eq!(config.endpoint(), "https://s3.us-west-001.backblazeb2.com");
+    }
+
+    #[test]
+    fn s3_config_rejects_endpoint_secret_material() {
+        for endpoint in [
+            "https://user:secret@s3.example.com",
+            "https://s3.example.com?token=sensitive",
+            "https://s3.example.com#secret-fragment",
+        ] {
+            let error = S3StoreConfig::new(
+                "dev-bucket",
+                "us-west-001",
+                endpoint,
+                "key-id",
+                "secret",
+                ObjectKeyPrefix::new("fileferry/dev").expect("prefix"),
+            )
+            .expect_err("endpoint secret material");
+            let rendered = error.to_string();
+
+            assert!(matches!(error, StorageError::BackendConfig { .. }));
+            assert!(!rendered.contains("user:secret"));
+            assert!(!rendered.contains("token=sensitive"));
+            assert!(!rendered.contains("secret-fragment"));
+        }
     }
 
     #[test]

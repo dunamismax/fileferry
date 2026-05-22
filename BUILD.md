@@ -64,6 +64,9 @@ Implemented and tested at the current pre-v1 level:
 - CLI exit-code families, JSON envelopes, JSONL event ordering, and
   stdout/stderr separation are documented and regression-tested for the
   implemented command surface.
+- Secret-leakage canaries cover current human, JSON, JSONL, config parse, S3
+  repository URL, S3 endpoint, S3 config debug, key-management, recovery
+  export, and opt-in live-S3 integration output paths.
 - A local restore release drill now passes through the `ferry` binary for
   real local snapshots, covering full, path-scoped, and latest restores plus a
   full repository check.
@@ -103,7 +106,7 @@ status text:
 - [ ] Add CI builds and tests for every platform that README or release docs
       call supported.
 - [ ] Add per-target platform metadata tests before making support claims.
-- [ ] Audit logs, errors, JSON, JSONL, tests, and docs for secret leakage.
+- [x] Audit logs, errors, JSON, JSONL, tests, and docs for secret leakage.
 - [x] Audit exit codes, JSON schemas, JSONL event order, and stdout/stderr
       separation as compatibility surfaces.
 - [ ] Add release artifacts, checksums, signatures, SBOM, and
@@ -153,7 +156,7 @@ Security and format:
 - [x] Plaintext bootstrap fields documented.
 - [x] Key hierarchy, KDF parameters, AEAD choice, and recovery export behavior
       documented.
-- [ ] Secret-leakage audit completed for release candidate output and tests.
+- [x] Secret-leakage audit completed for release candidate output and tests.
 - [x] Format fixtures declared complete or remaining blockers documented.
 
 Platform and release:

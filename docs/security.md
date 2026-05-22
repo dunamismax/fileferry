@@ -410,6 +410,20 @@ error object:
 `object_kind`, `object_name`, and `recoverable` are the planned stable fields.
 Sensitive plaintext metadata must not be placed in any error field.
 
+## Secret Leakage Audit
+
+The current release-candidate audit covers CLI runtime output for human, JSON,
+and JSONL failure paths, plus storage debug output for S3 configuration. The
+covered canaries assert that passphrase values, S3 access key values, S3 secret
+key values, embedded URL userinfo, query strings, and fragments do not appear
+in output when repository access, config parsing, S3 URL parsing, or S3
+endpoint configuration fails.
+
+Runtime password-missing errors intentionally use generic passphrase wording
+instead of printing secret-bearing password environment variable names. The
+usage contract still documents the supported environment variable names for
+non-interactive operation.
+
 ## Implemented Evidence
 
 The `fileferry-crypto` crate currently includes focused tests for:
@@ -433,6 +447,10 @@ The `fileferry-crypto` crate currently includes focused tests for:
 - Replayed chunk-index metadata identity failures.
 - Malformed decrypted metadata failures.
 - Redacted `Debug` output for master keys.
+- Secret-leakage canaries for config parse diagnostics, password-missing
+  diagnostics, S3 repository URL rejection, S3 endpoint validation, S3 config
+  debug output, key-management passphrase failures, recovery export output, and
+  live-S3 integration output when those opt-in tests are run.
 
 The broader adversarial test matrix still needs format migration failures once
 format fixtures and migrations exist.

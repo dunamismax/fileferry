@@ -335,11 +335,11 @@ pub enum RepositoryError {
     #[error("repository URL is required; pass --repo or set FILEFERRY_REPOSITORY")]
     MissingRepository,
 
-    #[error("FILEFERRY_PASSWORD or FILEFERRY_PASSWORD_FILE is required for repository access")]
+    #[error("repository passphrase is required through the password environment or password file")]
     MissingPassword,
 
     #[error(
-        "--new-password-file, FILEFERRY_NEW_PASSWORD, or FILEFERRY_NEW_PASSWORD_FILE is required for key add"
+        "new repository passphrase is required through --new-password-file, the new-password environment, or the new-password file"
     )]
     MissingNewPassword,
 
@@ -522,33 +522,80 @@ fn storage_exit_code(error: &StorageError) -> i32 {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ConfigError {
-    #[error("config file {path} could not be read: {source}")]
     Read {
         path: Redacted,
-        #[source]
         source: io::Error,
     },
 
-    #[error("config file {path} is invalid: {source}")]
     Parse {
         path: Redacted,
-        #[source]
         source: toml::de::Error,
     },
 
-    #[error("profile {profile} was requested but is not defined in {path}")]
-    MissingProfile { profile: String, path: Redacted },
+    MissingProfile {
+        profile: String,
+        path: Redacted,
+    },
 
-    #[error("repository URL {value} is not a supported v1 target")]
-    InvalidRepositoryUrl { value: Redacted },
+    InvalidRepositoryUrl {
+        value: Redacted,
+    },
 
-    #[error("log level {value} is invalid; expected trace, debug, info, warn, or error")]
-    InvalidLogLevel { value: String },
+    InvalidLogLevel {
+        value: String,
+    },
 
-    #[error("output progress value {value} is invalid; expected auto, always, or never")]
-    InvalidProgress { value: String },
+    InvalidProgress {
+        value: String,
+    },
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(formatter, "config file {path} could not be read: {source}")
+            }
+            Self::Parse { path, source } => write!(
+                formatter,
+                "config file {path} is invalid: {}",
+                redact_diagnostic_for_display(&source.to_string())
+            ),
+            Self::MissingProfile { profile, path } => write!(
+                formatter,
+                "profile {profile} was requested but is not defined in {path}"
+            ),
+            Self::InvalidRepositoryUrl { value } => {
+                write!(
+                    formatter,
+                    "repository URL {value} is not a supported v1 target"
+                )
+            }
+            Self::InvalidLogLevel { value } => write!(
+                formatter,
+                "log level {value} is invalid; expected trace, debug, info, warn, or error"
+            ),
+            Self::InvalidProgress { value } => write!(
+                formatter,
+                "output progress value {value} is invalid; expected auto, always, or never"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+            Self::MissingProfile { .. }
+            | Self::InvalidRepositoryUrl { .. }
+            | Self::InvalidLogLevel { .. }
+            | Self::InvalidProgress { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1709,6 +1756,10 @@ pub fn redact_for_display(value: &str) -> String {
         return "s3://<redacted>".to_owned();
     }
 
+    redact_single_value_for_display(value)
+}
+
+fn redact_single_value_for_display(value: &str) -> String {
     let mut redacted = value.to_owned();
 
     if let Some(scheme_end) = redacted.find("://") {
@@ -1734,6 +1785,37 @@ pub fn redact_for_display(value: &str) -> String {
     }
 
     redacted
+}
+
+fn redact_diagnostic_for_display(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut remaining = value;
+
+    while let Some(scheme_marker) = remaining.find("://") {
+        let scheme_start = remaining[..scheme_marker]
+            .rfind(|character: char| !is_url_scheme_character(character))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        output.push_str(&remaining[..scheme_start]);
+
+        let url_end = remaining[scheme_start..]
+            .find(|character: char| {
+                character.is_whitespace()
+                    || matches!(character, '"' | '\'' | ')' | ']' | '}' | '<' | '>')
+            })
+            .map(|offset| scheme_start + offset)
+            .unwrap_or(remaining.len());
+        let token = &remaining[scheme_start..url_end];
+        output.push_str(&redact_for_display(token));
+        remaining = &remaining[url_end..];
+    }
+
+    output.push_str(remaining);
+    output
+}
+
+fn is_url_scheme_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
 }
 
 fn completion(shell: Shell) -> Result<Output, CliError> {
@@ -2474,9 +2556,11 @@ fn s3_repository_config(
     )
     .map(|config| config.with_conditional_create(!environment.disable_conditional_create))
     .map_err(|error| match error {
-        StorageError::BackendConfig { reason, .. } => RepositoryError::InvalidS3Config { reason },
+        StorageError::BackendConfig { reason, .. } => RepositoryError::InvalidS3Config {
+            reason: redact_diagnostic_for_display(&reason),
+        },
         error => RepositoryError::InvalidS3Config {
-            reason: error.to_string(),
+            reason: redact_diagnostic_for_display(&error.to_string()),
         },
     })
 }
@@ -3908,6 +3992,43 @@ progress = "always"
         let rendered = error.to_string();
 
         assert!(rendered.contains("https://<redacted>@example.com/repo?<redacted>"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("sensitive"));
+    }
+
+    #[test]
+    fn config_parse_diagnostic_redacts_embedded_secret_urls() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("fileferry.toml");
+        fs::write(
+            &path,
+            r#"
+[repository]
+url = "https://user:secret@example.com/repo?token=sensitive
+"#,
+        )
+        .expect("write config");
+        let globals = GlobalArgs {
+            config: Some(path),
+            ..GlobalArgs::default()
+        };
+
+        let error = resolve_config_with_env(&globals, Some(temp.path()), EnvConfig::default())
+            .expect_err("invalid config");
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("https://<redacted>@example.com/repo?<redacted>"));
+        assert!(!rendered.contains("user:secret"));
+        assert!(!rendered.contains("token=sensitive"));
+    }
+
+    #[test]
+    fn diagnostic_redaction_handles_embedded_s3_urls() {
+        let rendered = redact_diagnostic_for_display(
+            "failed near s3://access:secret@example.com/bucket?token=sensitive",
+        );
+
+        assert_eq!(rendered, "failed near s3://<redacted>");
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("sensitive"));
     }

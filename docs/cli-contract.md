@@ -69,6 +69,14 @@ FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE
 FILEFERRY_LOG
 ```
 
+Runtime diagnostics must not print passphrase values, S3 credential values, or
+full secret-bearing environment dumps. Usage docs may name the supported
+environment variables, but password-missing runtime errors use generic
+passphrase wording instead of printing the secret-bearing password environment
+variable names. Config parser diagnostics redact embedded URL userinfo,
+queries, and fragments before they are emitted in human, JSON, or JSONL
+failure output.
+
 When no config path is supplied by `--config` or `FILEFERRY_CONFIG`, FileFerry
 looks for `fileferry.toml` and then `.fileferry.toml` in the current working
 directory.
@@ -545,6 +553,8 @@ FileFerry object-key characters: ASCII letters, digits, `.`, `_`, `-`, and
 `=`, separated by `/`. Set `FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1` only
 for providers, such as the current Backblaze B2 development path, that reject
 create-only `PutObject` requests.
+S3 endpoint values with embedded credentials, query strings, or fragments are
+rejected before the object-store client is built.
 
 Init requires `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` for both local
 and S3-compatible repositories. Human, JSON, and JSONL init output redacts S3

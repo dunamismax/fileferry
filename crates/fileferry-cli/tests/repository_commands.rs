@@ -3496,6 +3496,31 @@ fn init_s3_requires_environment_and_redacts_repository_url() {
     assert!(secret_text.contains("s3://<redacted>"));
     assert!(!secret_text.contains("secret"));
     assert!(!secret_text.contains("sensitive"));
+
+    let endpoint_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "test-passphrase")
+        .env(
+            "FILEFERRY_S3_ENDPOINT",
+            "https://user:secret@s3.example.com?token=sensitive",
+        )
+        .env("FILEFERRY_S3_REGION", "us-west-001")
+        .env("FILEFERRY_S3_ACCESS_KEY_ID", "visible-access-key")
+        .env("FILEFERRY_S3_SECRET_ACCESS_KEY", "visible-secret-key")
+        .args(["--repo", "s3://test-bucket/team/repo", "--json", "init"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let endpoint_text = String::from_utf8(endpoint_output.clone()).expect("endpoint failure utf8");
+    let endpoint: Value = serde_json::from_slice(&endpoint_output).expect("endpoint failure json");
+    assert_eq!(endpoint["data"]["code"], "repository_s3_config_invalid");
+    assert!(endpoint_text.contains("endpoint must not contain credentials"));
+    assert!(!endpoint_text.contains("user:secret"));
+    assert!(!endpoint_text.contains("token=sensitive"));
+    assert!(!endpoint_text.contains("visible-access-key"));
+    assert!(!endpoint_text.contains("visible-secret-key"));
 }
 
 #[test]

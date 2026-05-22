@@ -146,6 +146,96 @@ fn machine_failure_envelopes_keep_streams_separated_and_ordered() {
 }
 
 #[test]
+fn secret_bearing_password_env_names_are_not_emitted_in_runtime_failures() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo_url = temp.path().join("repo").display().to_string();
+
+    let json_output = fileferry()
+        .args(["--repo", &repo_url, "--json", "init"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let json_text = String::from_utf8(json_output.clone()).expect("json utf8");
+    let json: Value = serde_json::from_slice(&json_output).expect("failure json");
+    assert_eq!(json["data"]["code"], "repository_password_missing");
+    assert!(!json_text.contains("FILEFERRY_PASSWORD"));
+    assert!(!json_text.contains("FILEFERRY_PASSWORD_FILE"));
+
+    let jsonl_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "current-passphrase-canary")
+        .args(["--repo", &repo_url, "--jsonl", "key", "add"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let jsonl_text = String::from_utf8(jsonl_output.clone()).expect("jsonl utf8");
+    let events = jsonl_events(&jsonl_output);
+    assert_eq!(events[1]["data"]["code"], "repository_new_password_missing");
+    assert!(!jsonl_text.contains("current-passphrase-canary"));
+    assert!(!jsonl_text.contains("FILEFERRY_PASSWORD"));
+    assert!(!jsonl_text.contains("FILEFERRY_NEW_PASSWORD"));
+    assert!(!jsonl_text.contains("FILEFERRY_NEW_PASSWORD_FILE"));
+
+    fileferry()
+        .args(["--repo", &repo_url, "init"])
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(
+            predicates::str::contains("repository passphrase is required")
+                .and(predicates::str::contains("FILEFERRY_PASSWORD").not()),
+        );
+}
+
+#[test]
+fn config_parse_failures_redact_secret_url_fragments_in_machine_output() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("fileferry.toml");
+    fs::write(
+        &config,
+        r#"
+[repository]
+url = "https://user:secret@example.com/repo?token=sensitive
+"#,
+    )
+    .expect("write config");
+    let config_path = config.to_str().expect("config path");
+
+    let json_output = fileferry()
+        .args(["--config", config_path, "--json", "version"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let json_text = String::from_utf8(json_output.clone()).expect("json utf8");
+    let json: Value = serde_json::from_slice(&json_output).expect("failure json");
+    assert_eq!(json["data"]["code"], "config_parse_failed");
+    assert!(json_text.contains("https://<redacted>@example.com/repo?<redacted>"));
+    assert!(!json_text.contains("user:secret"));
+    assert!(!json_text.contains("token=sensitive"));
+
+    let jsonl_output = fileferry()
+        .args(["--config", config_path, "--jsonl", "version"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let jsonl_text = String::from_utf8(jsonl_output).expect("jsonl utf8");
+    assert!(jsonl_text.contains("https://<redacted>@example.com/repo?<redacted>"));
+    assert!(!jsonl_text.contains("user:secret"));
+    assert!(!jsonl_text.contains("token=sensitive"));
+}
+
+#[test]
 fn local_repository_jsonl_event_order_matches_contract() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
