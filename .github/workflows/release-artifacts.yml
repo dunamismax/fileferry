@@ -68,6 +68,21 @@ jobs:
           fi
           cargo run -p xtask -- "${args[@]}"
 
+      - name: Smoke release archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          archives=(target/release-artifacts/fileferry-*-"${TARGET}".tar.gz)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            printf 'expected one archive for %s, found %s\n' "${TARGET}" "${#archives[@]}" >&2
+            exit 1
+          fi
+          cargo run -p xtask -- archive-smoke \
+            --archive "${archives[0]}" \
+            --installers-dir target/release-artifacts \
+            --out "target/release-artifacts/fileferry-${TARGET}.archive-smoke.json"
+
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:

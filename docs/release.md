@@ -50,7 +50,11 @@ By default this builds the host `ferry` binary, packages only the binary,
 `README.md`, and `LICENSE`, copies the Unix shell and PowerShell installer
 scripts beside the archive, writes `SHA256SUMS`, writes a release manifest,
 generates a CycloneDX SBOM for the `ferry` binary, and smoke-tests the host
-binary with `ferry version --json`.
+binary with `ferry version --json`. For host-target packages, it also verifies
+the archive entry in `SHA256SUMS`, extracts the archive, runs the packaged
+binary with `ferry version --json`, and records archive-smoke evidence in the
+release manifest. Installer smoke paths run when the relevant installer script
+and interpreter are available on the host running the task.
 
 Useful options:
 
@@ -60,11 +64,28 @@ Useful options:
 --auditable         Build with cargo-auditable metadata
 --sbom              Generate a CycloneDX JSON SBOM with cargo-cyclonedx
 --sign              Sign SHA256SUMS with cosign sign-blob
---skip-smoke        Skip the host binary smoke test
+--skip-smoke        Skip host binary and archive smoke tests
 ```
 
 `--sign` requires a configured `cosign` identity or key. Local unsigned
 artifacts are useful for dry runs, but they are not release artifacts.
+
+The retained archive smoke entrypoint is:
+
+```sh
+cargo run -p xtask -- archive-smoke \
+  --archive target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz \
+  --installers-dir target/release-artifacts \
+  --out target/release-artifacts/archive-smoke.json
+```
+
+`archive-smoke` verifies the archive against `SHA256SUMS` when it is present
+beside the archive, extracts the archive, runs the packaged binary with
+`ferry version --json`, and optionally runs available installer scripts from
+`--installers-dir` before smoke-testing the installed binary. Use
+`--checksum-file <FILE>` to point at a checksum manifest in another location.
+Use `--no-checksum` only for local diagnostics; unchecked archives are not
+release evidence.
 
 ## Installer Scripts
 
@@ -109,6 +130,9 @@ Checksum behavior:
 
 Current evidence:
 
+- `cargo test -p xtask` exercises archive smoke option parsing, checksum
+  verification, archive extraction, packaged-binary execution, and the Unix
+  installer smoke path with a fixture archive.
 - `cargo test -p xtask install` exercises Unix install, Unix dry-run, Unix
   checksum mismatch, PowerShell install, and PowerShell checksum mismatch.
 - Local macOS verification ran `pwsh --version` and executed the PowerShell
@@ -121,9 +145,11 @@ tests, release artifacts, and smoke evidence for the claimed target.
 The workflow `.github/workflows/release-artifacts.yml` is manual-only. It
 builds candidate artifacts with `cargo-auditable`, generates SBOMs with
 `cargo-cyclonedx`, and can sign the checksum manifest with Sigstore keyless
-signing through GitHub OIDC. A workflow run is release evidence only for the
-exact commit, target, artifacts, signatures, SBOMs, checksums, and smoke tests
-that it actually produced.
+signing through GitHub OIDC. After packaging, it runs `xtask archive-smoke`
+against the generated archive and uploads the smoke evidence JSON beside the
+artifacts. A workflow run is release evidence only for the exact commit,
+target, artifacts, signatures, SBOMs, checksums, and smoke tests that it
+actually produced.
 
 ## Manual Release Shape
 
@@ -143,9 +169,9 @@ Example local host build:
 
 ```sh
 cargo run -p xtask -- release-package --auditable --sbom
-tmpdir="$(mktemp -d)"
-tar -xzf target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz -C "$tmpdir"
-"$tmpdir"/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}')/ferry version --json
+cargo run -p xtask -- archive-smoke \
+  --archive target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz \
+  --installers-dir target/release-artifacts
 ```
 
 Do not publish a release from uncommitted changes. Do not publish artifacts

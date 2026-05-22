@@ -6,6 +6,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     if let Err(error) = run(env::args_os().skip(1).collect()) {
@@ -21,6 +22,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
 
     match command {
         "release-package" => release_package(ReleasePackageOptions::parse(&args[1..])?),
+        "archive-smoke" => archive_smoke_command(ArchiveSmokeOptions::parse(&args[1..])?),
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -30,7 +32,12 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: cargo run -p xtask -- release-package [--target TRIPLE] [--out-dir DIR] [--auditable] [--sbom] [--sign] [--skip-build] [--skip-smoke]".to_string()
+    [
+        "usage:",
+        "  cargo run -p xtask -- release-package [--target TRIPLE] [--out-dir DIR] [--auditable] [--sbom] [--sign] [--skip-build] [--skip-smoke]",
+        "  cargo run -p xtask -- archive-smoke --archive FILE [--checksum-file FILE] [--no-checksum] [--installers-dir DIR] [--out FILE]",
+    ]
+    .join("\n")
 }
 
 #[derive(Debug, Default)]
@@ -42,6 +49,15 @@ struct ReleasePackageOptions {
     sign: bool,
     skip_build: bool,
     skip_smoke: bool,
+}
+
+#[derive(Debug, Default)]
+struct ArchiveSmokeOptions {
+    archive: Option<PathBuf>,
+    checksum_file: Option<PathBuf>,
+    no_checksum: bool,
+    installers_dir: Option<PathBuf>,
+    out: Option<PathBuf>,
 }
 
 impl ReleasePackageOptions {
@@ -75,6 +91,52 @@ impl ReleasePackageOptions {
 
         if options.auditable && options.skip_build {
             return Err("--auditable cannot be verified when --skip-build is set".to_string());
+        }
+
+        Ok(options)
+    }
+}
+
+impl ArchiveSmokeOptions {
+    fn parse(args: &[OsString]) -> Result<Self, String> {
+        let mut options = Self::default();
+        let mut index = 0;
+
+        while index < args.len() {
+            let arg = args[index]
+                .to_str()
+                .ok_or_else(|| "arguments must be valid UTF-8".to_string())?;
+            match arg {
+                "--archive" => {
+                    index += 1;
+                    options.archive = Some(PathBuf::from(value(args, index, "--archive")?));
+                }
+                "--checksum-file" => {
+                    index += 1;
+                    options.checksum_file =
+                        Some(PathBuf::from(value(args, index, "--checksum-file")?));
+                }
+                "--no-checksum" => options.no_checksum = true,
+                "--installers-dir" => {
+                    index += 1;
+                    options.installers_dir =
+                        Some(PathBuf::from(value(args, index, "--installers-dir")?));
+                }
+                "--out" => {
+                    index += 1;
+                    options.out = Some(PathBuf::from(value(args, index, "--out")?));
+                }
+                "--help" | "-h" => return Err(usage()),
+                other => return Err(format!("unknown archive-smoke option `{other}`")),
+            }
+            index += 1;
+        }
+
+        if options.archive.is_none() {
+            return Err("--archive is required".to_string());
+        }
+        if options.no_checksum && options.checksum_file.is_some() {
+            return Err("--no-checksum cannot be combined with --checksum-file".to_string());
         }
 
         Ok(options)
@@ -156,7 +218,7 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
     };
 
     let manifest_path = out_dir.join(format!("{artifact_stem}.manifest.json"));
-    let manifest = ReleaseManifest {
+    let mut manifest = ReleaseManifest {
         schema_version: 1,
         package: "fileferry",
         binary: "ferry",
@@ -171,6 +233,7 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
         auditable_build: options.auditable,
         sbom: sbom.as_ref().map(|path| file_name(path)).transpose()?,
         smoke_test,
+        archive_smoke_test: None,
     };
     write_json(&manifest_path, &manifest)?;
 
@@ -181,6 +244,18 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
     }
     let checksums = out_dir.join("SHA256SUMS");
     write_checksums(&checksums, &checksum_inputs)?;
+
+    if !options.skip_smoke && target == host {
+        let archive_smoke = archive_smoke(ArchiveSmokeRequest {
+            archive: archive.clone(),
+            checksum_file: Some(checksums.clone()),
+            verify_checksum: true,
+            installers_dir: Some(out_dir.clone()),
+        })?;
+        manifest.archive_smoke_test = Some(archive_smoke);
+        write_json(&manifest_path, &manifest)?;
+        write_checksums(&checksums, &checksum_inputs)?;
+    }
 
     let signature_bundle = if options.sign {
         let bundle = out_dir.join("SHA256SUMS.sigstore.json");
@@ -339,6 +414,289 @@ fn smoke_test_binary(binary: &Path) -> Result<SmokeTest, String> {
     })
 }
 
+fn archive_smoke_command(options: ArchiveSmokeOptions) -> Result<(), String> {
+    let archive = options
+        .archive
+        .expect("archive presence was validated by option parsing");
+    let request = ArchiveSmokeRequest {
+        archive,
+        checksum_file: options.checksum_file,
+        verify_checksum: !options.no_checksum,
+        installers_dir: options.installers_dir,
+    };
+    let evidence = archive_smoke(request)?;
+    if let Some(out) = options.out {
+        write_json(&out, &evidence)?;
+        println!("archive smoke evidence: {}", out.display());
+    } else {
+        let json = serde_json::to_string_pretty(&evidence)
+            .map_err(|error| format!("serialize archive smoke evidence: {error}"))?;
+        println!("{json}");
+    }
+    Ok(())
+}
+
+struct ArchiveSmokeRequest {
+    archive: PathBuf,
+    checksum_file: Option<PathBuf>,
+    verify_checksum: bool,
+    installers_dir: Option<PathBuf>,
+}
+
+fn archive_smoke(request: ArchiveSmokeRequest) -> Result<ArchiveSmokeTest, String> {
+    let archive = canonical_file(&request.archive, "archive")?;
+    let checksum_file = resolve_checksum_file(&archive, request.checksum_file)?;
+    let checksum_verified = if request.verify_checksum {
+        let Some(checksum_file) = &checksum_file else {
+            return Err(format!(
+                "checksum file was not found beside {}; pass --checksum-file or --no-checksum",
+                archive.display()
+            ));
+        };
+        verify_checksum_entry(&archive, checksum_file)?;
+        true
+    } else {
+        false
+    };
+
+    let temp_root = create_temp_dir("fileferry-archive-smoke")?;
+    let result = (|| {
+        extract_archive(&archive, &temp_root)?;
+        let binary = find_extracted_binary(&temp_root)?;
+        let binary_smoke = smoke_test_binary(&binary)?;
+        let installer_smoke_tests =
+            smoke_test_installers(&archive, request.installers_dir.as_deref(), &temp_root)?;
+        Ok(ArchiveSmokeTest {
+            archive: file_name(&archive)?,
+            checksum_file: checksum_file
+                .as_ref()
+                .map(|path| file_name(path))
+                .transpose()?,
+            checksum_verified,
+            extracted_binary: binary.display().to_string(),
+            binary_smoke,
+            installer_smoke_tests,
+        })
+    })();
+    let cleanup = fs::remove_dir_all(&temp_root).map_err(|error| {
+        format!(
+            "remove archive smoke temp dir {}: {error}",
+            temp_root.display()
+        )
+    });
+    match (result, cleanup) {
+        (Ok(evidence), Ok(())) => Ok(evidence),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn canonical_file(path: &Path, label: &str) -> Result<PathBuf, String> {
+    let canonical =
+        fs::canonicalize(path).map_err(|error| format!("{label} {}: {error}", path.display()))?;
+    if !canonical.is_file() {
+        return Err(format!("{label} is not a file: {}", canonical.display()));
+    }
+    Ok(canonical)
+}
+
+fn resolve_checksum_file(
+    archive: &Path,
+    checksum_file: Option<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(path) = checksum_file {
+        return canonical_file(&path, "checksum file").map(Some);
+    }
+    let adjacent = archive
+        .parent()
+        .ok_or_else(|| format!("archive has no parent directory: {}", archive.display()))?
+        .join("SHA256SUMS");
+    if adjacent.is_file() {
+        canonical_file(&adjacent, "checksum file").map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn verify_checksum_entry(archive: &Path, checksum_file: &Path) -> Result<(), String> {
+    let archive_name = file_name(archive)?;
+    let checksums = fs::read_to_string(checksum_file)
+        .map_err(|error| format!("read checksum file {}: {error}", checksum_file.display()))?;
+    let expected = checksums
+        .lines()
+        .filter_map(parse_checksum_line)
+        .find_map(|(hash, name)| (name == archive_name).then_some(hash))
+        .ok_or_else(|| {
+            format!(
+                "no checksum entry for {archive_name} in {}",
+                checksum_file.display()
+            )
+        })?;
+    let actual = sha256_file(archive)?;
+    if actual != expected {
+        return Err(format!("checksum mismatch for {archive_name}"));
+    }
+    Ok(())
+}
+
+fn parse_checksum_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    let mut parts = trimmed.split_whitespace();
+    let hash = parts.next()?;
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let name = parts.next()?;
+    Some((
+        hash.to_ascii_lowercase(),
+        name.trim_start_matches('*').to_string(),
+    ))
+}
+
+fn extract_archive(archive: &Path, destination: &Path) -> Result<(), String> {
+    let mut command = Command::new("tar");
+    command.arg("-xzf").arg(archive).arg("-C").arg(destination);
+    run_command(&mut command, "extract release archive")
+}
+
+fn find_extracted_binary(root: &Path) -> Result<PathBuf, String> {
+    let wanted = if cfg!(windows) { "ferry.exe" } else { "ferry" };
+    let fallback = if cfg!(windows) { "ferry" } else { "ferry.exe" };
+    let mut stack = vec![root.to_path_buf()];
+    let mut fallback_match = None;
+    while let Some(path) = stack.pop() {
+        let entries =
+            fs::read_dir(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("read {} entry: {error}", path.display()))?;
+            let entry_path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("read file type for {}: {error}", entry_path.display()))?;
+            if file_type.is_dir() {
+                stack.push(entry_path);
+            } else if file_type.is_file() {
+                let name = entry_path.file_name().and_then(|name| name.to_str());
+                if name == Some(wanted) {
+                    return Ok(entry_path);
+                }
+                if name == Some(fallback) {
+                    fallback_match = Some(entry_path);
+                }
+            }
+        }
+    }
+    fallback_match.ok_or_else(|| format!("archive did not contain {wanted}"))
+}
+
+fn smoke_test_installers(
+    archive: &Path,
+    installers_dir: Option<&Path>,
+    temp_root: &Path,
+) -> Result<Vec<InstallerSmokeTest>, String> {
+    let Some(installers_dir) = installers_dir else {
+        return Ok(Vec::new());
+    };
+    let mut tests = Vec::new();
+    let shell_installer = installers_dir.join("install.sh");
+    if !cfg!(windows) && shell_installer.is_file() && command_available("sh") {
+        tests.push(smoke_test_installer(
+            "install.sh",
+            Command::new("sh")
+                .arg(&shell_installer)
+                .arg("--archive")
+                .arg(archive)
+                .arg("--install-dir")
+                .arg(temp_root.join("install-sh")),
+            &temp_root.join("install-sh"),
+        )?);
+    }
+
+    let powershell_installer = installers_dir.join("install.ps1");
+    if powershell_installer.is_file() && command_available("pwsh") {
+        tests.push(smoke_test_installer(
+            "install.ps1",
+            Command::new("pwsh")
+                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+                .arg(&powershell_installer)
+                .arg("-Archive")
+                .arg(archive)
+                .arg("-InstallDir")
+                .arg(temp_root.join("install-ps1")),
+            &temp_root.join("install-ps1"),
+        )?);
+    }
+    Ok(tests)
+}
+
+fn smoke_test_installer(
+    installer: &str,
+    command: &mut Command,
+    install_dir: &Path,
+) -> Result<InstallerSmokeTest, String> {
+    let command_display = format_command(command);
+    run_command(command, &format!("smoke test {installer}"))?;
+    let installed = installed_binary_path(install_dir)?;
+    let binary_smoke = smoke_test_binary(&installed)?;
+    Ok(InstallerSmokeTest {
+        installer: installer.to_string(),
+        command: command_display,
+        installed_binary: installed.display().to_string(),
+        binary_smoke,
+    })
+}
+
+fn installed_binary_path(install_dir: &Path) -> Result<PathBuf, String> {
+    let native = install_dir.join(if cfg!(windows) { "ferry.exe" } else { "ferry" });
+    if native.is_file() {
+        return Ok(native);
+    }
+    for fallback in ["ferry", "ferry.exe"] {
+        let path = install_dir.join(fallback);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "installer did not write a ferry binary under {}",
+        install_dir.display()
+    ))
+}
+
+fn command_available(program: &str) -> bool {
+    Command::new(program)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn create_temp_dir(prefix: &str) -> Result<PathBuf, String> {
+    let root = env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("read system time: {error}"))?
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("create temp dir {}: {error}", root.display()))?;
+    Ok(root)
+}
+
+fn format_command(command: &Command) -> String {
+    let mut parts = Vec::new();
+    parts.push(command.get_program().to_string_lossy().into_owned());
+    parts.extend(
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+    parts.join(" ")
+}
+
 fn generate_sbom(
     workspace: &Path,
     out_dir: &Path,
@@ -482,6 +840,7 @@ struct ReleaseManifest<'a> {
     auditable_build: bool,
     sbom: Option<String>,
     smoke_test: Option<SmokeTest>,
+    archive_smoke_test: Option<ArchiveSmokeTest>,
 }
 
 #[derive(Serialize)]
@@ -489,6 +848,24 @@ struct SmokeTest {
     command: String,
     exit_code: i32,
     stdout: String,
+}
+
+#[derive(Serialize)]
+struct ArchiveSmokeTest {
+    archive: String,
+    checksum_file: Option<String>,
+    checksum_verified: bool,
+    extracted_binary: String,
+    binary_smoke: SmokeTest,
+    installer_smoke_tests: Vec<InstallerSmokeTest>,
+}
+
+#[derive(Serialize)]
+struct InstallerSmokeTest {
+    installer: String,
+    command: String,
+    installed_binary: String,
+    binary_smoke: SmokeTest,
 }
 
 #[cfg(test)]
@@ -525,6 +902,62 @@ mod tests {
     }
 
     #[test]
+    fn parses_archive_smoke_options() {
+        let args = [
+            "--archive",
+            "target/release-artifacts/fileferry-0.0.0-test.tar.gz",
+            "--checksum-file",
+            "target/release-artifacts/SHA256SUMS",
+            "--installers-dir",
+            "target/release-artifacts",
+            "--out",
+            "target/release-artifacts/archive-smoke.json",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+
+        let options = ArchiveSmokeOptions::parse(&args).expect("options should parse");
+
+        assert_eq!(
+            options.archive.as_deref(),
+            Some(Path::new(
+                "target/release-artifacts/fileferry-0.0.0-test.tar.gz"
+            ))
+        );
+        assert_eq!(
+            options.checksum_file.as_deref(),
+            Some(Path::new("target/release-artifacts/SHA256SUMS"))
+        );
+        assert_eq!(
+            options.installers_dir.as_deref(),
+            Some(Path::new("target/release-artifacts"))
+        );
+        assert_eq!(
+            options.out.as_deref(),
+            Some(Path::new("target/release-artifacts/archive-smoke.json"))
+        );
+    }
+
+    #[test]
+    fn rejects_archive_smoke_checksum_conflict() {
+        let args = [
+            "--archive",
+            "fileferry.tar.gz",
+            "--checksum-file",
+            "SHA256SUMS",
+            "--no-checksum",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+
+        let error = ArchiveSmokeOptions::parse(&args).expect_err("combination should fail");
+
+        assert!(error.contains("--no-checksum cannot be combined"));
+    }
+
+    #[test]
     fn rejects_auditable_skip_build_combination() {
         let args = ["--auditable", "--skip-build"]
             .into_iter()
@@ -548,5 +981,87 @@ mod tests {
             hash,
             "e49295bbb366266f68873753efba2d2e2b5185f261b5c1baf360e0490865b02d"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn archive_smoke_extracts_archive_and_runs_installer_when_available() {
+        let root = create_temp_dir("fileferry-xtask-archive-smoke-test").expect("temp root");
+        let archive = create_test_archive(&root);
+        let checksum = sha256_file(&archive).expect("hash archive");
+        fs::write(
+            root.join("SHA256SUMS"),
+            format!(
+                "{}  {}\n",
+                checksum,
+                archive
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("archive file name")
+            ),
+        )
+        .expect("write checksum file");
+        let installers_dir = root.join("installers");
+        fs::create_dir_all(&installers_dir).expect("create installers dir");
+        fs::copy(
+            workspace_root().join("scripts/install.sh"),
+            installers_dir.join("install.sh"),
+        )
+        .expect("copy install.sh");
+
+        let evidence = archive_smoke(ArchiveSmokeRequest {
+            archive,
+            checksum_file: None,
+            verify_checksum: true,
+            installers_dir: Some(installers_dir),
+        })
+        .expect("archive smoke should pass");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+
+        assert!(evidence.checksum_verified);
+        assert!(evidence.binary_smoke.stdout.contains("\"version\""));
+        assert!(
+            evidence
+                .installer_smoke_tests
+                .iter()
+                .any(|test| test.installer == "install.sh"),
+            "install.sh smoke path should run"
+        );
+    }
+
+    #[cfg(unix)]
+    fn create_test_archive(root: &Path) -> PathBuf {
+        let package_dir = root.join("stage/fileferry-0.0.0-test-target");
+        fs::create_dir_all(&package_dir).expect("create package dir");
+        let binary = package_dir.join("ferry");
+        fs::write(
+            &binary,
+            b"#!/bin/sh\nprintf '{\"version\":\"0.0.0-test\"}\\n'\n",
+        )
+        .expect("write fake ferry");
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&binary).expect("stat binary").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions).expect("chmod binary");
+
+        let archive = root.join("fileferry-0.0.0-test-target.tar.gz");
+        let mut command = Command::new("tar");
+        command
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(root.join("stage"))
+            .arg("fileferry-0.0.0-test-target");
+        run_command(&mut command, "create test archive").expect("create test archive");
+        archive
+    }
+
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask lives under workspace root")
+            .to_path_buf()
     }
 }

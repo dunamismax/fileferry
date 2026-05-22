@@ -77,8 +77,9 @@ Implemented and tested at the current pre-v1 level:
 - Local release-artifact groundwork now exists through `xtask
   release-package`: host builds can be smoke-tested, checksummed, packaged
   with README/LICENSE, emitted with a manifest, generated with a CycloneDX SBOM,
-  and built with `cargo-auditable`; the manual GitHub workflow can additionally
-  sign checksum manifests with Sigstore keyless signing when run.
+  archive-smoke-tested from the packaged archive, and built with
+  `cargo-auditable`; the manual GitHub workflow can additionally sign checksum
+  manifests with Sigstore keyless signing when run.
 - Tested local-archive install paths now exist through `scripts/install.sh` and
   `scripts/install.ps1`; `xtask release-package` copies them beside the archive,
   includes them in `SHA256SUMS`, and the installers verify archive checksums
@@ -124,11 +125,11 @@ status text:
 - [x] Audit logs, errors, JSON, JSONL, tests, and docs for secret leakage.
 - [x] Audit exit codes, JSON schemas, JSONL event order, and stdout/stderr
       separation as compatibility surfaces.
-- [ ] Add release artifacts, checksums, signatures, SBOM, and
-      `cargo-auditable` metadata for the exact release candidate on every
-      claimed target. Local/CI groundwork exists, but release artifacts are not
-      complete until the release-candidate workflow runs and smoke evidence is
-      recorded.
+- [ ] Add release artifacts, checksums, signatures, SBOM,
+      archive-smoke evidence, and `cargo-auditable` metadata for the exact
+      release candidate on every claimed target. Local/CI groundwork exists,
+      but release artifacts are not complete until the release-candidate
+      workflow runs and smoke evidence is recorded.
 - [x] Add tested Unix shell and PowerShell install paths.
 - [ ] Run smoke tests on every claimed platform artifact.
 - [ ] Update README, docs, completions, homepage status, and release notes to

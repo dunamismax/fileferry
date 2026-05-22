@@ -252,6 +252,15 @@ sh target/release-artifacts/install.sh --archive ./fileferry.tar.gz --dry-run
 pwsh -NoLogo -NoProfile -NonInteractive -File ./install.ps1 -Archive ./fileferry.tar.gz -DryRun
 ```
 
+The current release-candidate smoke path extracts the archive and runs the
+packaged binary:
+
+```sh
+cargo run -p xtask -- archive-smoke \
+  --archive "target/release-artifacts/fileferry-0.0.0-${host}.tar.gz" \
+  --installers-dir target/release-artifacts
+```
+
 PowerShell verification has been run on macOS with `pwsh`. That proves the
 script path works there; it does not mark Windows supported.
 
