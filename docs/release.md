@@ -47,7 +47,8 @@ cargo run -p xtask -- release-package --auditable --sbom
 ```
 
 By default this builds the host `ferry` binary, packages only the binary,
-`README.md`, and `LICENSE`, writes `SHA256SUMS`, writes a release manifest,
+`README.md`, and `LICENSE`, copies the Unix shell and PowerShell installer
+scripts beside the archive, writes `SHA256SUMS`, writes a release manifest,
 generates a CycloneDX SBOM for the `ferry` binary, and smoke-tests the host
 binary with `ferry version --json`.
 
@@ -64,6 +65,58 @@ Useful options:
 
 `--sign` requires a configured `cosign` identity or key. Local unsigned
 artifacts are useful for dry runs, but they are not release artifacts.
+
+## Installer Scripts
+
+The current tested installers are:
+
+```text
+scripts/install.sh
+scripts/install.ps1
+```
+
+`xtask release-package` copies both scripts into the artifact directory and
+includes them in `SHA256SUMS`. The scripts install from a local FileFerry
+`.tar.gz` archive and are intentionally non-interactive when their archive and
+install directory are supplied.
+
+Unix shell example:
+
+```sh
+sh target/release-artifacts/install.sh \
+  --archive target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz \
+  --install-dir "$HOME/.local/bin"
+```
+
+PowerShell example:
+
+```powershell
+$hostTriple = rustc -vV | Select-String '^host: ' | ForEach-Object { $_.Line.Split(' ')[1] }
+pwsh -NoLogo -NoProfile -NonInteractive -File target/release-artifacts/install.ps1 `
+  -Archive "target/release-artifacts/fileferry-0.0.0-$hostTriple.tar.gz" `
+  -InstallDir "$HOME/.local/bin"
+```
+
+Checksum behavior:
+
+- If `SHA256SUMS` is next to the archive, the installer verifies the archive
+  entry before installing.
+- `install.sh` also accepts `--checksum-file`, `--checksum`, `--no-checksum`,
+  and `--dry-run`.
+- `install.ps1` accepts `-ChecksumFile`, `-Checksum`, `-NoChecksum`, and
+  `-DryRun`.
+- A checksum mismatch fails without writing the destination binary.
+
+Current evidence:
+
+- `cargo test -p xtask install` exercises Unix install, Unix dry-run, Unix
+  checksum mismatch, PowerShell install, and PowerShell checksum mismatch.
+- Local macOS verification ran `pwsh --version` and executed the PowerShell
+  installer with `pwsh`.
+
+PowerShell-on-macOS evidence proves installer script behavior. It is not a
+Windows platform support claim; Windows support still requires CI, platform
+tests, release artifacts, and smoke evidence for the claimed target.
 
 The workflow `.github/workflows/release-artifacts.yml` is manual-only. It
 builds candidate artifacts with `cargo-auditable`, generates SBOMs with

@@ -213,6 +213,48 @@ The homepage stack is intentionally separate from the CLI/runtime stack:
 `fileferry-web` uses `axum`, `tokio`, and Leptos SSR to serve static marketing
 content, `/assets/site.css`, and `/healthz`.
 
+## Current Install Path
+
+FileFerry does not have published v1 release artifacts yet. The current tested
+install path is for local release archives produced by `xtask release-package`.
+It is release-candidate plumbing, not a platform support claim.
+
+Build a local host archive:
+
+```sh
+cargo run -p xtask -- release-package --out-dir target/release-artifacts
+```
+
+Install from that archive with the Unix shell installer:
+
+```sh
+host="$(rustc -vV | awk '/host:/ {print $2}')"
+sh target/release-artifacts/install.sh \
+  --archive "target/release-artifacts/fileferry-0.0.0-${host}.tar.gz" \
+  --install-dir "$HOME/.local/bin"
+```
+
+Install from the same archive with the PowerShell installer:
+
+```powershell
+$hostTriple = rustc -vV | Select-String '^host: ' | ForEach-Object { $_.Line.Split(' ')[1] }
+pwsh -NoLogo -NoProfile -NonInteractive -File target/release-artifacts/install.ps1 `
+  -Archive "target/release-artifacts/fileferry-0.0.0-$hostTriple.tar.gz" `
+  -InstallDir "$HOME/.local/bin"
+```
+
+Both installers verify the archive against `SHA256SUMS` when it is present
+beside the archive. They also accept an explicit checksum file or digest and
+support dry runs:
+
+```sh
+sh target/release-artifacts/install.sh --archive ./fileferry.tar.gz --dry-run
+pwsh -NoLogo -NoProfile -NonInteractive -File ./install.ps1 -Archive ./fileferry.tar.gz -DryRun
+```
+
+PowerShell verification has been run on macOS with `pwsh`. That proves the
+script path works there; it does not mark Windows supported.
+
 ## Public Homepage
 
 Run the current homepage locally:

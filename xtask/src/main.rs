@@ -118,6 +118,7 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
     fs::create_dir_all(&out_dir)
         .map_err(|error| format!("create artifact dir {}: {error}", out_dir.display()))?;
 
+    let installers = copy_installers(&workspace, &out_dir)?;
     let artifact_stem = format!("fileferry-{version}-{target}");
     let stage_root = out_dir.join("stage");
     let stage_dir = stage_root.join(&artifact_stem);
@@ -163,6 +164,10 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
         target: &target,
         commit: &commit,
         archive: file_name(&archive)?,
+        installers: installers
+            .iter()
+            .map(|path| file_name(path))
+            .collect::<Result<Vec<_>, _>>()?,
         auditable_build: options.auditable,
         sbom: sbom.as_ref().map(|path| file_name(path)).transpose()?,
         smoke_test,
@@ -170,6 +175,7 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
     write_json(&manifest_path, &manifest)?;
 
     let mut checksum_inputs = vec![archive.clone(), manifest_path.clone()];
+    checksum_inputs.extend(installers);
     if let Some(sbom_path) = &sbom {
         checksum_inputs.push(sbom_path.clone());
     }
@@ -198,6 +204,26 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn copy_installers(workspace: &Path, out_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut installers = Vec::new();
+    for name in ["install.sh", "install.ps1"] {
+        let source = workspace.join("scripts").join(name);
+        if !source.is_file() {
+            return Err(format!("installer script is missing: {}", source.display()));
+        }
+        let destination = out_dir.join(name);
+        fs::copy(&source, &destination).map_err(|error| {
+            format!(
+                "copy installer {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        installers.push(destination);
+    }
+    Ok(installers)
 }
 
 fn build_release(target: &str, auditable: bool) -> Result<(), String> {
@@ -452,6 +478,7 @@ struct ReleaseManifest<'a> {
     target: &'a str,
     commit: &'a str,
     archive: String,
+    installers: Vec<String>,
     auditable_build: bool,
     sbom: Option<String>,
     smoke_test: Option<SmokeTest>,

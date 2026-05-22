@@ -79,6 +79,11 @@ Implemented and tested at the current pre-v1 level:
   with README/LICENSE, emitted with a manifest, generated with a CycloneDX SBOM,
   and built with `cargo-auditable`; the manual GitHub workflow can additionally
   sign checksum manifests with Sigstore keyless signing when run.
+- Tested local-archive install paths now exist through `scripts/install.sh` and
+  `scripts/install.ps1`; `xtask release-package` copies them beside the archive,
+  includes them in `SHA256SUMS`, and the installers verify archive checksums
+  before writing `ferry`. PowerShell evidence is from `pwsh` on macOS and is not
+  a Windows support claim.
 - Live Backblaze B2 S3-compatible drills passed on 2026-05-22 under an
   isolated private development prefix for storage round-trip, CLI init,
   `backup -> snapshots -> ls -> restore -> check`, missing-manifest failure,
@@ -124,7 +129,7 @@ status text:
       claimed target. Local/CI groundwork exists, but release artifacts are not
       complete until the release-candidate workflow runs and smoke evidence is
       recorded.
-- [ ] Add tested Unix shell and PowerShell install paths.
+- [x] Add tested Unix shell and PowerShell install paths.
 - [ ] Run smoke tests on every claimed platform artifact.
 - [ ] Update README, docs, completions, homepage status, and release notes to
       match the exact release candidate.
@@ -180,7 +185,7 @@ Platform and release:
 - [ ] CI, tests, and artifacts exist for every claimed supported platform.
 - [ ] Release archives, checksums, signatures, SBOM, and audit metadata exist
       for the exact release candidate.
-- [ ] Unix shell and PowerShell install paths are tested.
+- [x] Unix shell and PowerShell install paths are tested.
 
 Post-v1 or optional:
 
