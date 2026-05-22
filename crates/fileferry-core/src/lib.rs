@@ -8776,7 +8776,7 @@ mod tests {
                 if entry.relative_path.as_os_str().is_empty() {
                     ".".to_owned()
                 } else {
-                    entry.relative_path.display().to_string()
+                    path_segments(&entry.relative_path).join("/")
                 }
             })
             .collect()
@@ -10856,8 +10856,17 @@ mod tests {
         let expected_time = system_time_from_timestamp(expected).expect("expected system time");
         set_restored_modified_timestamp(&file, RestoredMetadataTarget::RegularFile, expected_time)
             .expect("set source file mtime");
-        set_restored_modified_timestamp(&docs, RestoredMetadataTarget::Directory, expected_time)
-            .expect("set source directory mtime");
+        let directory_mtime_configured = match set_restored_modified_timestamp(
+            &docs,
+            RestoredMetadataTarget::Directory,
+            expected_time,
+        ) {
+            Ok(()) => true,
+            Err(source) if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied => {
+                false
+            }
+            Err(source) => panic!("set source directory mtime: {source}"),
+        };
 
         let pipeline = small_test_pipeline();
         let store = FakeObjectStore::new();
@@ -10893,25 +10902,46 @@ mod tests {
 
         assert_eq!(
             restored.metadata_applied,
-            applied_metadata_field_count_for_file_and_directory_entries(2)
+            applied_metadata_field_count_for_file_and_directory_entries(
+                if directory_mtime_configured { 2 } else { 1 }
+            )
         );
         assert_eq!(
             restored.metadata_planned,
             planned_metadata_field_count_for_file_and_directory_entries(2)
         );
-        assert_eq!(restored.metadata_warnings.len(), 2);
+        let created_warnings = restored
+            .metadata_warnings
+            .iter()
+            .filter(|warning| warning.namespace == "portable" && warning.field == "created")
+            .count();
+        assert_eq!(created_warnings, 2);
+        if directory_mtime_configured {
+            assert_eq!(restored.metadata_warnings.len(), 2);
+        } else {
+            assert!(
+                restored.metadata_warnings.iter().any(|warning| {
+                    warning.relative_path == Path::new("docs")
+                        && warning.namespace == "portable"
+                        && warning.field == "modified"
+                }),
+                "expected directory modified timestamp warning"
+            );
+        }
         assert!(
             restored
                 .metadata_warnings
                 .iter()
-                .all(|warning| { warning.namespace == "portable" && warning.field == "created" })
+                .all(|warning| { warning.namespace == "portable" })
         );
-        assert_eq!(
-            capture_metadata(destination.path().join("docs"))
-                .expect("restored directory metadata")
-                .modified,
-            MetadataValue::Captured(expected)
-        );
+        if directory_mtime_configured {
+            assert_eq!(
+                capture_metadata(destination.path().join("docs"))
+                    .expect("restored directory metadata")
+                    .modified,
+                MetadataValue::Captured(expected)
+            );
+        }
         assert_eq!(
             capture_metadata(destination.path().join("docs/one.txt"))
                 .expect("restored file metadata")
