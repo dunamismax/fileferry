@@ -98,6 +98,18 @@ jobs:
             --installers-dir target/release-artifacts \
             --out "target/release-artifacts/fileferry-${TARGET}.archive-smoke.json"
 
+      - name: Verify release artifact evidence
+        shell: bash
+        env:
+          SIGN_ARTIFACTS: ${{ inputs.sign_artifacts }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          args=(verify-release-artifacts --dir target/release-artifacts --target "${TARGET}")
+          if [ "${SIGN_ARTIFACTS}" = "true" ]; then
+            args+=(--expect-signature)
+          fi
+          cargo run -p xtask -- "${args[@]}"
+
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:

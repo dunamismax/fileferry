@@ -78,10 +78,12 @@ Implemented and tested at the current pre-v1 level:
   release-package`: host builds can be smoke-tested, checksummed, packaged
   with README/LICENSE, emitted with a manifest, generated with a CycloneDX SBOM,
   archive-smoke-tested from the packaged archive, and built with
-  `cargo-auditable`; the manual GitHub workflow covers the current native
-  hosted x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and
-  x86_64 Windows MSVC matrix and can additionally sign checksum manifests with
-  Sigstore keyless signing when run.
+  `cargo-auditable`; `xtask verify-release-artifacts` parses and verifies the
+  per-target artifact directory evidence before upload in the manual workflow.
+  The manual GitHub workflow covers the current native hosted x86_64 Linux GNU,
+  ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC matrix
+  and can additionally sign checksum manifests with Sigstore keyless signing
+  when run.
 - Current release-candidate workflow evidence for commit
   `b5ccdc93f27afe6c888ace4566605edac690f2db` exists in GitHub run
   `26315320434`: the manual release-artifacts workflow completed package,

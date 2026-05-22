@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::OsString;
@@ -23,6 +23,9 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     match command {
         "release-package" => release_package(ReleasePackageOptions::parse(&args[1..])?),
         "archive-smoke" => archive_smoke_command(ArchiveSmokeOptions::parse(&args[1..])?),
+        "verify-release-artifacts" => {
+            verify_release_artifacts(VerifyReleaseArtifactsOptions::parse(&args[1..])?)
+        }
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -36,6 +39,7 @@ fn usage() -> String {
         "usage:",
         "  cargo run -p xtask -- release-package [--target TRIPLE] [--out-dir DIR] [--auditable] [--sbom] [--sign] [--skip-build] [--skip-smoke]",
         "  cargo run -p xtask -- archive-smoke --archive FILE [--checksum-file FILE] [--no-checksum] [--installers-dir DIR] [--out FILE]",
+        "  cargo run -p xtask -- verify-release-artifacts [--dir DIR] [--target TRIPLE] [--expect-signature]",
     ]
     .join("\n")
 }
@@ -58,6 +62,13 @@ struct ArchiveSmokeOptions {
     no_checksum: bool,
     installers_dir: Option<PathBuf>,
     out: Option<PathBuf>,
+}
+
+#[derive(Debug, Default)]
+struct VerifyReleaseArtifactsOptions {
+    dir: Option<PathBuf>,
+    target: Option<String>,
+    expect_signature: bool,
 }
 
 impl ReleasePackageOptions {
@@ -137,6 +148,35 @@ impl ArchiveSmokeOptions {
         }
         if options.no_checksum && options.checksum_file.is_some() {
             return Err("--no-checksum cannot be combined with --checksum-file".to_string());
+        }
+
+        Ok(options)
+    }
+}
+
+impl VerifyReleaseArtifactsOptions {
+    fn parse(args: &[OsString]) -> Result<Self, String> {
+        let mut options = Self::default();
+        let mut index = 0;
+
+        while index < args.len() {
+            let arg = args[index]
+                .to_str()
+                .ok_or_else(|| "arguments must be valid UTF-8".to_string())?;
+            match arg {
+                "--dir" => {
+                    index += 1;
+                    options.dir = Some(PathBuf::from(value(args, index, "--dir")?));
+                }
+                "--target" => {
+                    index += 1;
+                    options.target = Some(value(args, index, "--target")?);
+                }
+                "--expect-signature" => options.expect_signature = true,
+                "--help" | "-h" => return Err(usage()),
+                other => return Err(format!("unknown verify-release-artifacts option `{other}`")),
+            }
+            index += 1;
         }
 
         Ok(options)
@@ -432,6 +472,382 @@ fn archive_smoke_command(options: ArchiveSmokeOptions) -> Result<(), String> {
         let json = serde_json::to_string_pretty(&evidence)
             .map_err(|error| format!("serialize archive smoke evidence: {error}"))?;
         println!("{json}");
+    }
+    Ok(())
+}
+
+fn verify_release_artifacts(options: VerifyReleaseArtifactsOptions) -> Result<(), String> {
+    let workspace = env::current_dir().map_err(|error| format!("read current dir: {error}"))?;
+    let dir = options
+        .dir
+        .unwrap_or_else(|| workspace.join("target").join("release-artifacts"));
+    if !dir.is_dir() {
+        return Err(format!(
+            "artifact directory is not a directory: {}",
+            dir.display()
+        ));
+    }
+    let target = options.target.unwrap_or(host_triple()?);
+
+    let archive = find_one_artifact(&dir, &target, "target archive", |name| {
+        name.starts_with("fileferry-") && name.ends_with(&format!("-{target}.tar.gz"))
+    })?;
+    let manifest_path = find_one_artifact(&dir, &target, "release manifest JSON", |name| {
+        name.starts_with("fileferry-") && name.ends_with(&format!("-{target}.manifest.json"))
+    })?;
+    let sbom_path = find_one_artifact(&dir, &target, "CycloneDX SBOM", |name| {
+        name.starts_with("fileferry-") && name.ends_with(&format!("-{target}.cdx.json"))
+    })?;
+    let checksums_path = require_file(&dir.join("SHA256SUMS"), "checksum manifest")?;
+    let install_sh = require_file(&dir.join("install.sh"), "Unix installer")?;
+    let install_ps1 = require_file(&dir.join("install.ps1"), "PowerShell installer")?;
+
+    if options.expect_signature {
+        let signature = require_file(&dir.join("SHA256SUMS.sigstore.json"), "Sigstore bundle")?;
+        let value: serde_json::Value = read_json_file(&signature, "Sigstore bundle")?;
+        if !value.is_object() {
+            return Err(format!(
+                "Sigstore bundle {} is not a JSON object",
+                signature.display()
+            ));
+        }
+    }
+
+    let archive_name = file_name(&archive)?;
+    let sbom_name = file_name(&sbom_path)?;
+    let manifest: ReleaseManifestEvidence = read_json_file(&manifest_path, "release manifest")?;
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "release manifest {} has unsupported schema_version {}",
+            manifest_path.display(),
+            manifest.schema_version
+        ));
+    }
+    if manifest.package != "fileferry" || manifest.binary != "ferry" {
+        return Err(format!(
+            "release manifest {} is for package `{}` binary `{}`, expected fileferry/ferry",
+            manifest_path.display(),
+            manifest.package,
+            manifest.binary
+        ));
+    }
+    if manifest.target != target {
+        return Err(format!(
+            "release manifest {} targets `{}`, expected `{target}`",
+            manifest_path.display(),
+            manifest.target
+        ));
+    }
+    if manifest.archive != archive_name {
+        return Err(format!(
+            "release manifest {} references archive `{}`, expected `{archive_name}`",
+            manifest_path.display(),
+            manifest.archive
+        ));
+    }
+    if manifest.sbom.as_deref() != Some(sbom_name.as_str()) {
+        return Err(format!(
+            "release manifest {} references SBOM {:?}, expected `{sbom_name}`",
+            manifest_path.display(),
+            manifest.sbom
+        ));
+    }
+    if !manifest.auditable_build {
+        return Err(format!(
+            "release manifest {} does not record an auditable build",
+            manifest_path.display()
+        ));
+    }
+    require_manifest_installer(&manifest, "install.sh")?;
+    require_manifest_installer(&manifest, "install.ps1")?;
+    if manifest.commit.trim().is_empty() {
+        return Err(format!(
+            "release manifest {} has an empty commit",
+            manifest_path.display()
+        ));
+    }
+    if manifest.version.trim().is_empty() {
+        return Err(format!(
+            "release manifest {} has an empty version",
+            manifest_path.display()
+        ));
+    }
+    if let Some(smoke) = &manifest.smoke_test {
+        verify_smoke_test(smoke, "release manifest host smoke")?;
+    }
+    if let Some(smoke) = &manifest.archive_smoke_test {
+        verify_archive_smoke_test(smoke, &archive_name, "release manifest archive smoke")?;
+    }
+
+    let sbom: serde_json::Value = read_json_file(&sbom_path, "CycloneDX SBOM")?;
+    let bom_format = sbom
+        .get("bomFormat")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "CycloneDX SBOM {} is missing bomFormat",
+                sbom_path.display()
+            )
+        })?;
+    if bom_format != "CycloneDX" {
+        return Err(format!(
+            "CycloneDX SBOM {} has bomFormat `{bom_format}`, expected `CycloneDX`",
+            sbom_path.display()
+        ));
+    }
+
+    let archive_smoke = find_archive_smoke_for_target(&dir, &target, &archive_name)?;
+    verify_archive_smoke_test(
+        &archive_smoke.evidence,
+        &archive_name,
+        "archive-smoke evidence JSON",
+    )?;
+
+    let checksum_entries = read_checksum_entries(&checksums_path)?;
+    for path in [
+        archive.as_path(),
+        manifest_path.as_path(),
+        sbom_path.as_path(),
+        install_sh.as_path(),
+        install_ps1.as_path(),
+    ] {
+        verify_checksum_for_file(path, &checksums_path, &checksum_entries)?;
+    }
+
+    println!(
+        "verified release artifact evidence for {target} in {}",
+        dir.display()
+    );
+    Ok(())
+}
+
+fn find_one_artifact(
+    dir: &Path,
+    target: &str,
+    label: &str,
+    matches_name: impl Fn(&str) -> bool,
+) -> Result<PathBuf, String> {
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(dir)
+        .map_err(|error| format!("read artifact dir {}: {error}", dir.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read artifact dir entry: {error}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if matches_name(name) {
+            matches.push(path);
+        }
+    }
+    match matches.len() {
+        0 => Err(format!(
+            "missing {label} for target `{target}` in {}",
+            dir.display()
+        )),
+        1 => Ok(matches.remove(0)),
+        _ => {
+            matches.sort();
+            let names = matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "expected one {label} for target `{target}`, found {}: {names}",
+                matches.len()
+            ))
+        }
+    }
+}
+
+fn require_file(path: &Path, label: &str) -> Result<PathBuf, String> {
+    if path.is_file() {
+        Ok(path.to_path_buf())
+    } else {
+        Err(format!("missing {label}: {}", path.display()))
+    }
+}
+
+fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T, String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("read {label} {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse {label} {}: {error}", path.display()))
+}
+
+fn require_manifest_installer(
+    manifest: &ReleaseManifestEvidence,
+    installer: &str,
+) -> Result<(), String> {
+    if manifest
+        .installers
+        .iter()
+        .any(|candidate| candidate == installer)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "release manifest for target `{}` does not reference required installer `{installer}`",
+            manifest.target
+        ))
+    }
+}
+
+struct ArchiveSmokeEvidenceFile {
+    path: PathBuf,
+    evidence: ArchiveSmokeTest,
+}
+
+fn find_archive_smoke_for_target(
+    dir: &Path,
+    target: &str,
+    archive_name: &str,
+) -> Result<ArchiveSmokeEvidenceFile, String> {
+    let mut parsed = Vec::new();
+    for entry in fs::read_dir(dir)
+        .map_err(|error| format!("read artifact dir {}: {error}", dir.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read artifact dir entry: {error}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".archive-smoke.json") {
+            continue;
+        }
+        let evidence: ArchiveSmokeTest = read_json_file(&path, "archive-smoke evidence")?;
+        parsed.push(ArchiveSmokeEvidenceFile { path, evidence });
+    }
+
+    let mut matches = parsed
+        .into_iter()
+        .filter(|smoke| smoke.evidence.archive == archive_name)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(format!(
+            "missing archive-smoke JSON for target `{target}` archive `{archive_name}`"
+        )),
+        1 => Ok(matches.remove(0)),
+        _ => {
+            matches.sort_by(|left, right| left.path.cmp(&right.path));
+            let names = matches
+                .iter()
+                .map(|smoke| smoke.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "expected one archive-smoke JSON for target `{target}` archive `{archive_name}`, found {}: {names}",
+                matches.len()
+            ))
+        }
+    }
+}
+
+fn verify_archive_smoke_test(
+    smoke: &ArchiveSmokeTest,
+    archive_name: &str,
+    label: &str,
+) -> Result<(), String> {
+    if smoke.archive != archive_name {
+        return Err(format!(
+            "{label} references archive `{}`, expected `{archive_name}`",
+            smoke.archive
+        ));
+    }
+    if smoke.checksum_file.as_deref() != Some("SHA256SUMS") {
+        return Err(format!(
+            "{label} references checksum file {:?}, expected `SHA256SUMS`",
+            smoke.checksum_file
+        ));
+    }
+    if !smoke.checksum_verified {
+        return Err(format!("{label} did not verify SHA256SUMS"));
+    }
+    verify_smoke_test(&smoke.binary_smoke, label)?;
+    if smoke.installer_smoke_tests.is_empty() {
+        return Err(format!("{label} contains no installer smoke tests"));
+    }
+    for installer in &smoke.installer_smoke_tests {
+        if installer.installer != "install.sh" && installer.installer != "install.ps1" {
+            return Err(format!(
+                "{label} contains unexpected installer smoke test `{}`",
+                installer.installer
+            ));
+        }
+        verify_smoke_test(
+            &installer.binary_smoke,
+            &format!("{label} installer {}", installer.installer),
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_smoke_test(smoke: &SmokeTest, label: &str) -> Result<(), String> {
+    if smoke.exit_code != 0 {
+        return Err(format!(
+            "{label} exited with {}, expected 0",
+            smoke.exit_code
+        ));
+    }
+    let stdout: serde_json::Value = serde_json::from_str(&smoke.stdout)
+        .map_err(|error| format!("{label} stdout is not JSON: {error}"))?;
+    if stdout
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        return Err(format!("{label} stdout JSON is missing `version`"));
+    }
+    Ok(())
+}
+
+fn read_checksum_entries(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let checksums = fs::read_to_string(path)
+        .map_err(|error| format!("read checksum file {}: {error}", path.display()))?;
+    let mut entries = Vec::new();
+    for line in checksums.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some(entry) = parse_checksum_line(line) else {
+            return Err(format!(
+                "invalid checksum line in {}: {line:?}",
+                path.display()
+            ));
+        };
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+fn verify_checksum_for_file(
+    path: &Path,
+    checksums_path: &Path,
+    entries: &[(String, String)],
+) -> Result<(), String> {
+    let name = file_name(path)?;
+    let expected = entries
+        .iter()
+        .find_map(|(hash, candidate)| (candidate == &name).then_some(hash))
+        .ok_or_else(|| {
+            format!(
+                "missing checksum entry for `{name}` in {}",
+                checksums_path.display()
+            )
+        })?;
+    let actual = sha256_file(path)?;
+    if &actual != expected {
+        return Err(format!(
+            "checksum mismatch for `{name}` in {}",
+            checksums_path.display()
+        ));
     }
     Ok(())
 }
@@ -827,6 +1243,22 @@ fn file_name(path: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("path has no UTF-8 file name: {}", path.display()))
 }
 
+#[derive(Debug, Deserialize)]
+struct ReleaseManifestEvidence {
+    schema_version: u8,
+    package: String,
+    binary: String,
+    version: String,
+    target: String,
+    commit: String,
+    archive: String,
+    installers: Vec<String>,
+    auditable_build: bool,
+    sbom: Option<String>,
+    smoke_test: Option<SmokeTest>,
+    archive_smoke_test: Option<ArchiveSmokeTest>,
+}
+
 #[derive(Serialize)]
 struct ReleaseManifest<'a> {
     schema_version: u8,
@@ -843,14 +1275,14 @@ struct ReleaseManifest<'a> {
     archive_smoke_test: Option<ArchiveSmokeTest>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SmokeTest {
     command: String,
     exit_code: i32,
     stdout: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ArchiveSmokeTest {
     archive: String,
     checksum_file: Option<String>,
@@ -860,7 +1292,7 @@ struct ArchiveSmokeTest {
     installer_smoke_tests: Vec<InstallerSmokeTest>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct InstallerSmokeTest {
     installer: String,
     command: String,
@@ -970,6 +1402,207 @@ mod tests {
     }
 
     #[test]
+    fn parses_verify_release_artifacts_options() {
+        let args = [
+            "--dir",
+            "target/release-artifacts",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--expect-signature",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+
+        let options = VerifyReleaseArtifactsOptions::parse(&args).expect("options should parse");
+
+        assert_eq!(
+            options.dir.as_deref(),
+            Some(Path::new("target/release-artifacts"))
+        );
+        assert_eq!(options.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
+        assert!(options.expect_signature);
+    }
+
+    #[test]
+    fn verify_release_artifacts_accepts_complete_target_evidence() {
+        let root = create_temp_dir("fileferry-xtask-verify-artifacts").expect("temp root");
+        let target = "x86_64-unknown-linux-gnu";
+        let stem = format!("fileferry-0.0.0-{target}");
+        let archive_name = format!("{stem}.tar.gz");
+        let manifest_name = format!("{stem}.manifest.json");
+        let sbom_name = format!("{stem}.cdx.json");
+        let smoke_name = format!("fileferry-{target}.archive-smoke.json");
+        fs::write(root.join(&archive_name), b"archive").expect("write archive");
+        fs::write(
+            root.join(&sbom_name),
+            r#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#,
+        )
+        .expect("write sbom");
+        fs::write(root.join("install.sh"), b"#!/bin/sh\n").expect("write install.sh");
+        fs::write(root.join("install.ps1"), b"Write-Output ferry\n").expect("write install.ps1");
+        fs::write(root.join("SHA256SUMS.sigstore.json"), r#"{"bundle":true}"#)
+            .expect("write signature bundle");
+
+        let archive_smoke = test_archive_smoke(&archive_name);
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            package: "fileferry",
+            binary: "ferry",
+            version: "0.0.0",
+            target,
+            commit: "0123456789abcdef",
+            archive: archive_name.clone(),
+            installers: vec!["install.sh".to_string(), "install.ps1".to_string()],
+            auditable_build: true,
+            sbom: Some(sbom_name.clone()),
+            smoke_test: Some(test_smoke()),
+            archive_smoke_test: Some(test_archive_smoke(&archive_name)),
+        };
+        write_json(&root.join(&manifest_name), &manifest).expect("write manifest");
+        write_json(&root.join(&smoke_name), &archive_smoke).expect("write archive smoke");
+        write_checksums(
+            &root.join("SHA256SUMS"),
+            &[
+                root.join(&archive_name),
+                root.join(&manifest_name),
+                root.join(&sbom_name),
+                root.join("install.sh"),
+                root.join("install.ps1"),
+            ],
+        )
+        .expect("write checksums");
+
+        verify_release_artifacts(VerifyReleaseArtifactsOptions {
+            dir: Some(root.clone()),
+            target: Some(target.to_string()),
+            expect_signature: true,
+        })
+        .expect("complete evidence should verify");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+    }
+
+    #[test]
+    fn verify_release_artifacts_rejects_wrong_manifest_target() {
+        let root = create_temp_dir("fileferry-xtask-verify-target").expect("temp root");
+        let target = "x86_64-unknown-linux-gnu";
+        let wrong_target = "aarch64-unknown-linux-gnu";
+        let stem = format!("fileferry-0.0.0-{target}");
+        let archive_name = format!("{stem}.tar.gz");
+        let manifest_name = format!("{stem}.manifest.json");
+        let sbom_name = format!("{stem}.cdx.json");
+        fs::write(root.join(&archive_name), b"archive").expect("write archive");
+        fs::write(
+            root.join(&sbom_name),
+            r#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#,
+        )
+        .expect("write sbom");
+        fs::write(root.join("install.sh"), b"#!/bin/sh\n").expect("write install.sh");
+        fs::write(root.join("install.ps1"), b"Write-Output ferry\n").expect("write install.ps1");
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            package: "fileferry",
+            binary: "ferry",
+            version: "0.0.0",
+            target: wrong_target,
+            commit: "0123456789abcdef",
+            archive: archive_name.clone(),
+            installers: vec!["install.sh".to_string(), "install.ps1".to_string()],
+            auditable_build: true,
+            sbom: Some(sbom_name.clone()),
+            smoke_test: None,
+            archive_smoke_test: None,
+        };
+        write_json(&root.join(&manifest_name), &manifest).expect("write manifest");
+        write_json(
+            &root.join(format!("fileferry-{target}.archive-smoke.json")),
+            &test_archive_smoke(&archive_name),
+        )
+        .expect("write archive smoke");
+        write_checksums(
+            &root.join("SHA256SUMS"),
+            &[
+                root.join(&archive_name),
+                root.join(&manifest_name),
+                root.join(&sbom_name),
+                root.join("install.sh"),
+                root.join("install.ps1"),
+            ],
+        )
+        .expect("write checksums");
+
+        let error = verify_release_artifacts(VerifyReleaseArtifactsOptions {
+            dir: Some(root.clone()),
+            target: Some(target.to_string()),
+            expect_signature: false,
+        })
+        .expect_err("wrong target should fail");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(error.contains("targets `aarch64-unknown-linux-gnu`"));
+    }
+
+    #[test]
+    fn verify_release_artifacts_requires_signature_when_expected() {
+        let root = create_temp_dir("fileferry-xtask-verify-signature").expect("temp root");
+        let target = "x86_64-unknown-linux-gnu";
+        let stem = format!("fileferry-0.0.0-{target}");
+        let archive_name = format!("{stem}.tar.gz");
+        let manifest_name = format!("{stem}.manifest.json");
+        let sbom_name = format!("{stem}.cdx.json");
+        fs::write(root.join(&archive_name), b"archive").expect("write archive");
+        fs::write(
+            root.join(&sbom_name),
+            r#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#,
+        )
+        .expect("write sbom");
+        fs::write(root.join("install.sh"), b"#!/bin/sh\n").expect("write install.sh");
+        fs::write(root.join("install.ps1"), b"Write-Output ferry\n").expect("write install.ps1");
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            package: "fileferry",
+            binary: "ferry",
+            version: "0.0.0",
+            target,
+            commit: "0123456789abcdef",
+            archive: archive_name.clone(),
+            installers: vec!["install.sh".to_string(), "install.ps1".to_string()],
+            auditable_build: true,
+            sbom: Some(sbom_name.clone()),
+            smoke_test: None,
+            archive_smoke_test: None,
+        };
+        write_json(&root.join(&manifest_name), &manifest).expect("write manifest");
+        write_json(
+            &root.join(format!("fileferry-{target}.archive-smoke.json")),
+            &test_archive_smoke(&archive_name),
+        )
+        .expect("write archive smoke");
+        write_checksums(
+            &root.join("SHA256SUMS"),
+            &[
+                root.join(&archive_name),
+                root.join(&manifest_name),
+                root.join(&sbom_name),
+                root.join("install.sh"),
+                root.join("install.ps1"),
+            ],
+        )
+        .expect("write checksums");
+
+        let error = verify_release_artifacts(VerifyReleaseArtifactsOptions {
+            dir: Some(root.clone()),
+            target: Some(target.to_string()),
+            expect_signature: true,
+        })
+        .expect_err("missing signature should fail");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(error.contains("missing Sigstore bundle"));
+    }
+
+    #[test]
     fn sha256_file_hashes_file_contents() {
         let path = env::temp_dir().join(format!("fileferry-xtask-sha256-{}", std::process::id()));
         fs::write(&path, b"fileferry\n").expect("write temp file");
@@ -1056,6 +1689,30 @@ mod tests {
             .arg("fileferry-0.0.0-test-target");
         run_command(&mut command, "create test archive").expect("create test archive");
         archive
+    }
+
+    fn test_archive_smoke(archive_name: &str) -> ArchiveSmokeTest {
+        ArchiveSmokeTest {
+            archive: archive_name.to_string(),
+            checksum_file: Some("SHA256SUMS".to_string()),
+            checksum_verified: true,
+            extracted_binary: "/tmp/fileferry/ferry".to_string(),
+            binary_smoke: test_smoke(),
+            installer_smoke_tests: vec![InstallerSmokeTest {
+                installer: "install.sh".to_string(),
+                command: "sh install.sh".to_string(),
+                installed_binary: "/tmp/fileferry/bin/ferry".to_string(),
+                binary_smoke: test_smoke(),
+            }],
+        }
+    }
+
+    fn test_smoke() -> SmokeTest {
+        SmokeTest {
+            command: "ferry version --json".to_string(),
+            exit_code: 0,
+            stdout: "{\"version\":\"0.0.0\"}\n".to_string(),
+        }
     }
 
     #[cfg(unix)]

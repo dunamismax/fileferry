@@ -132,6 +132,19 @@ beside the archive, extracts the archive, runs the packaged binary with
 Use `--no-checksum` only for local diagnostics; unchecked archives are not
 release evidence.
 
+The retained artifact-directory verifier is:
+
+```sh
+cargo run -p xtask -- verify-release-artifacts \
+  --dir target/release-artifacts \
+  --target "$(rustc -vV | awk '/host:/ {print $2}')" \
+  --expect-signature
+```
+
+It parses the release manifest, CycloneDX SBOM, Sigstore bundle when expected,
+and archive-smoke evidence JSON, verifies target ownership, and checks the
+`SHA256SUMS` entries for the archive, manifest, SBOM, and installer scripts.
+
 ## Installer Scripts
 
 The current tested installers are:
