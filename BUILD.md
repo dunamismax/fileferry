@@ -82,6 +82,15 @@ Implemented and tested at the current pre-v1 level:
   hosted x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and
   x86_64 Windows MSVC matrix and can additionally sign checksum manifests with
   Sigstore keyless signing when run.
+- Current release-candidate workflow evidence for commit
+  `b5ccdc93f27afe6c888ace4566605edac690f2db` exists in GitHub run
+  `26315320434`: the manual release-artifacts workflow completed package,
+  archive-smoke, and upload steps for x86_64 Linux GNU, ARM64 Linux GNU,
+  x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC native hosted targets.
+  Uploaded artifacts were observed with per-target archives, checksums,
+  Sigstore checksum bundles, CycloneDX SBOMs, release manifests,
+  archive-smoke JSON evidence, and installer scripts. This is workflow evidence
+  only, not a published release or platform support claim.
 - Tested local-archive install paths now exist through `scripts/install.sh` and
   `scripts/install.ps1`; `xtask release-package` copies them beside the archive,
   includes them in `SHA256SUMS`, and the installers verify archive checksums
@@ -89,8 +98,10 @@ Implemented and tested at the current pre-v1 level:
   a Windows support claim.
 - CI is configured to run the normal Rust gate on Ubuntu Linux x86_64 GNU,
   Ubuntu Linux ARM64 GNU, macOS Intel, macOS ARM64, and Windows x86_64 MSVC
-  hosted runners. Completed passing jobs are host build/test evidence only,
-  not platform support claims or a complete release-artifact matrix.
+  hosted runners. Completed passing jobs are host build/test evidence only, not
+  platform support claims. Commit
+  `b5ccdc93f27afe6c888ace4566605edac690f2db` passed this workflow in GitHub run
+  `26315315837`.
 - Live Backblaze B2 S3-compatible drills passed on 2026-05-22 under an
   isolated private development prefix for storage round-trip, CLI init,
   `backup -> snapshots -> ls -> restore -> check`, missing-manifest failure,
@@ -99,8 +110,9 @@ Implemented and tested at the current pre-v1 level:
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, static CSS, and `/healthz`.
 
-Do not claim supported platforms yet. Current CI is not the full support bar,
-and release artifacts do not exist.
+Do not claim supported platforms yet. Current CI and release-artifact workflow
+evidence are not the full support bar, and published v1 release artifacts do not
+exist.
 
 ---
 
@@ -133,9 +145,10 @@ status text:
       separation as compatibility surfaces.
 - [ ] Add release artifacts, checksums, signatures, SBOM,
       archive-smoke evidence, and `cargo-auditable` metadata for the exact
-      release candidate on every claimed target. Local/CI groundwork exists,
-      but release artifacts are not complete until the release-candidate
-      workflow runs and smoke evidence is recorded.
+      release candidate on every claimed target. Candidate workflow evidence now
+      exists for the current native hosted matrix, but this remains open until
+      the release candidate, support claims, release notes, and publication
+      target set are finalized.
 - [x] Add tested Unix shell and PowerShell install paths.
 - [ ] Run smoke tests on every claimed platform artifact.
 - [ ] Update README, docs, completions, homepage status, and release notes to

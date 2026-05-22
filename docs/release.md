@@ -23,6 +23,35 @@ not platform support by themselves. Support still requires the target-specific
 release artifact, checksum/signature/SBOM/auditable metadata, archive smoke
 evidence, and relevant platform metadata tests for the exact release candidate.
 
+## Observed Candidate Evidence
+
+Current observed workflow evidence for commit
+`b5ccdc93f27afe6c888ace4566605edac690f2db`:
+
+- Normal CI passed in GitHub run
+  [26315315837](https://github.com/dunamismax/fileferry/actions/runs/26315315837)
+  on 2026-05-22 for Ubuntu Linux x86_64 GNU, Ubuntu Linux ARM64 GNU,
+  macOS Intel, macOS ARM64, and Windows x86_64 MSVC hosted runners.
+- The manual release-artifacts workflow passed in GitHub run
+  [26315320434](https://github.com/dunamismax/fileferry/actions/runs/26315320434)
+  on 2026-05-22 for x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS,
+  ARM64 macOS, and x86_64 Windows MSVC native hosted targets.
+- Each release-artifacts job completed formatting, clippy, tests, packaging,
+  archive smoke, and artifact upload steps.
+- The uploaded per-target artifact directories were observed as unexpired and
+  tied to the same head SHA. Each contained a target archive, `SHA256SUMS`,
+  `SHA256SUMS.sigstore.json`, a CycloneDX `*.cdx.json` SBOM, a release
+  manifest, an archive-smoke JSON file, `install.sh`, and `install.ps1`.
+
+This evidence is tied to that exact commit and those workflow runs. It is not a
+published v1 release, not a support claim, and not a substitute for per-target
+platform metadata tests or final release notes.
+
+The release-artifacts run also emitted GitHub workflow annotations warning that
+`actions/upload-artifact@v4` was still using Node.js 20. Verify the workflow
+again, and update the action if needed, before relying on later release
+candidates.
+
 ## Preconditions
 
 - The release candidate is built from a clean checkout on the intended tag.

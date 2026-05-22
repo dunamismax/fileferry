@@ -219,6 +219,13 @@ FileFerry does not have published v1 release artifacts yet. The current tested
 install path is for local release archives produced by `xtask release-package`.
 It is release-candidate plumbing, not a platform support claim.
 
+The manual release-artifacts workflow has produced candidate artifacts for the
+current native hosted x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS,
+ARM64 macOS, and x86_64 Windows MSVC matrix on commit
+`b5ccdc93f27afe6c888ace4566605edac690f2db`. That is workflow evidence for that
+exact commit only; it is not a published release and does not make any platform
+supported.
+
 Build a local host archive:
 
 ```sh
@@ -376,6 +383,9 @@ behavior, and release artifacts exist.
 The CI workflow is configured for host build/test jobs on Ubuntu Linux x86_64
 GNU, Ubuntu Linux ARM64 GNU, macOS Intel, macOS ARM64, and Windows x86_64
 MSVC. Completed passing jobs are build/test evidence only, not support claims.
+The manual release-artifacts workflow currently covers the native hosted
+x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64
+Windows MSVC matrix as release-candidate evidence only.
 
 ## V1 Scope
 
