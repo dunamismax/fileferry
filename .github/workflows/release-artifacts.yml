@@ -1,0 +1,76 @@
+name: Release Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      sign_artifacts:
+        description: Sign SHA256SUMS with Sigstore keyless signing
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo state
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install release tooling
+        run: cargo install cargo-auditable cargo-cyclonedx --locked
+
+      - name: Install Cosign
+        if: ${{ inputs.sign_artifacts }}
+        uses: sigstore/cosign-installer@v4.0.0
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-features --target ${{ matrix.target }}
+
+      - name: Package release artifact
+        shell: bash
+        env:
+          SIGN_ARTIFACTS: ${{ inputs.sign_artifacts }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          args=(release-package --target "${TARGET}" --out-dir target/release-artifacts --auditable --sbom)
+          if [ "${SIGN_ARTIFACTS}" = "true" ]; then
+            args+=(--sign)
+          fi
+          cargo run -p xtask -- "${args[@]}"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fileferry-${{ matrix.target }}-release-artifacts
+          path: target/release-artifacts/*
+          if-no-files-found: error

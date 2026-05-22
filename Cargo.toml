@@ -8,6 +8,7 @@ members = [
     "crates/fileferry-policy",
     "crates/fileferry-testkit",
     "crates/fileferry-web",
+    "xtask",
 ]
 resolver = "3"
 

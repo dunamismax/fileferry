@@ -70,6 +70,11 @@ Implemented and tested at the current pre-v1 level:
 - A local restore release drill now passes through the `ferry` binary for
   real local snapshots, covering full, path-scoped, and latest restores plus a
   full repository check.
+- Local release-artifact groundwork now exists through `xtask
+  release-package`: host builds can be smoke-tested, checksummed, packaged
+  with README/LICENSE, emitted with a manifest, generated with a CycloneDX SBOM,
+  and built with `cargo-auditable`; the manual GitHub workflow can additionally
+  sign checksum manifests with Sigstore keyless signing when run.
 - A live Backblaze B2 S3-compatible data-path drill has passed for
   `init -> backup -> snapshots -> ls -> restore -> check` under an isolated
   private development prefix. Later S3 retention/key/prune live gates exist but
@@ -110,7 +115,10 @@ status text:
 - [x] Audit exit codes, JSON schemas, JSONL event order, and stdout/stderr
       separation as compatibility surfaces.
 - [ ] Add release artifacts, checksums, signatures, SBOM, and
-      `cargo-auditable` metadata.
+      `cargo-auditable` metadata for the exact release candidate on every
+      claimed target. Local/CI groundwork exists, but release artifacts are not
+      complete until the release-candidate workflow runs and smoke evidence is
+      recorded.
 - [ ] Add tested Unix shell and PowerShell install paths.
 - [ ] Run smoke tests on every claimed platform artifact.
 - [ ] Update README, docs, completions, homepage status, and release notes to
@@ -165,7 +173,8 @@ Platform and release:
 - [x] Current host-observed metadata behavior and restore-warning contract
       tested.
 - [ ] CI, tests, and artifacts exist for every claimed supported platform.
-- [ ] Release archives, checksums, signatures, SBOM, and audit metadata exist.
+- [ ] Release archives, checksums, signatures, SBOM, and audit metadata exist
+      for the exact release candidate.
 - [ ] Unix shell and PowerShell install paths are tested.
 
 Post-v1 or optional:
