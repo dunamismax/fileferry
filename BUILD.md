@@ -64,6 +64,9 @@ Implemented and tested at the current pre-v1 level:
 - CLI exit-code families, JSON envelopes, JSONL event ordering, and
   stdout/stderr separation are documented and regression-tested for the
   implemented command surface.
+- A local restore release drill now passes through the `ferry` binary for
+  real local snapshots, covering full, path-scoped, and latest restores plus a
+  full repository check.
 - A live Backblaze B2 S3-compatible data-path drill has passed for
   `init -> backup -> snapshots -> ls -> restore -> check` under an isolated
   private development prefix. Later S3 retention/key/prune live gates exist but
@@ -94,7 +97,7 @@ meet the v1 scope.
 Finish this milestone by proving the release candidate, not by polishing
 status text:
 
-- [ ] Run documented local restore drills from real FileFerry snapshots.
+- [x] Run documented local restore drills from real FileFerry snapshots.
 - [ ] Run documented S3-compatible restore drills against an isolated test
       prefix and record current provider evidence.
 - [ ] Add CI builds and tests for every platform that README or release docs
@@ -138,7 +141,8 @@ Core product:
       evidence completed for the release candidate.
 - [x] Exit codes, JSON, and JSONL contracts fully documented and tested for
       the implemented command surface.
-- [ ] Restore drills completed for local and S3-compatible repositories.
+- [x] Local restore drills completed from real FileFerry snapshots.
+- [ ] S3-compatible restore drills completed against an isolated test prefix.
 
 Security and format:
 

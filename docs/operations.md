@@ -4,6 +4,42 @@ Operational notes for behavior that has been exercised through the `ferry`
 binary. Keep this document evidence-led: record only drills that were actually
 run, and keep backend scope explicit.
 
+## Local Restore Release Drill - 2026-05-22
+
+Scope:
+
+- Backend: local filesystem repository in a temporary directory.
+- Evidence command:
+  `cargo test -p fileferry-cli --test local_restore_drills`.
+- Commands exercised through the `ferry` binary: `init`, two `backup`
+  snapshots, full `restore`, path-scoped `restore`, `restore --latest`, and
+  full `check`.
+- Snapshot selection: `--tag release-drill`, explicit `--snapshot`, and
+  `--latest`.
+- Restored entry kinds: directories, regular files, and Unix symlinks on Unix
+  hosts.
+- Verification: restored file bytes were compared against the original source
+  bytes, a restored regular-file modified timestamp was compared against the
+  source timestamp, the empty nested directory was verified, the Unix symlink
+  target was verified on Unix hosts, path-scoped restore was checked not to
+  write unselected files, `--latest` was checked to select the newest snapshot,
+  and `ferry check` authenticated committed metadata and chunk objects.
+
+Observed result on this host:
+
+- Test result: passed.
+- Full restore wrote and verified two regular files.
+- Full restore wrote the empty nested directory tree.
+- Full restore wrote one Unix symlink on this Unix host.
+- Path-scoped restore selected and verified one regular file without writing
+  the unselected blob.
+- Latest restore selected the second committed snapshot.
+- Full repository check completed with no check errors or warnings.
+
+This is local-backend release evidence only. It does not claim
+S3-compatible restore coverage, release artifact coverage, or platform support
+outside the host that ran the drill.
+
 ## Local Restore And Check Drill - 2026-05-18
 
 Scope:
