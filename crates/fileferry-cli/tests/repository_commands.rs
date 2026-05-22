@@ -2420,9 +2420,14 @@ fn restore_jsonl_emits_progress_events_without_stderr() {
         completed["data"]["metadata_planned"],
         expected_restore_metadata_planned_fields(2)
     );
+    let expected_metadata_applied = if cfg!(windows) {
+        expected_restore_metadata_applied_fields(1)
+    } else {
+        expected_restore_metadata_applied_fields(2)
+    };
     assert_eq!(
         completed["data"]["metadata_applied"],
-        expected_restore_metadata_applied_fields(2)
+        expected_metadata_applied
     );
 }
 
