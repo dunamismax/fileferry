@@ -512,7 +512,9 @@ fn storage_exit_code(error: &StorageError) -> i32 {
     match error {
         StorageError::ObjectNotFound { .. } => 3,
         StorageError::InvalidObjectKey { .. } | StorageError::PolicyConfig { .. } => 1,
-        StorageError::BackendConfig { .. } => 9,
+        StorageError::BackendConfig { .. }
+        | StorageError::UnsupportedCapability { .. }
+        | StorageError::CapabilityProbe { .. } => 9,
         StorageError::Io { .. }
         | StorageError::ObjectIo { .. }
         | StorageError::BackendObject { .. }
@@ -1370,6 +1372,8 @@ fn storage_failure_code(error: &StorageError) -> &'static str {
         StorageError::Backend { .. } => "storage_backend_failed",
         StorageError::Timeout { .. } => "storage_timeout",
         StorageError::PolicyConfig { .. } => "storage_policy_config_invalid",
+        StorageError::UnsupportedCapability { .. } => "storage_capability_unsupported",
+        StorageError::CapabilityProbe { .. } => "storage_capability_probe_failed",
     }
 }
 

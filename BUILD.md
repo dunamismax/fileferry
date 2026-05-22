@@ -67,9 +67,10 @@ Implemented and tested at the current pre-v1 level:
 - Secret-leakage canaries cover current human, JSON, JSONL, config parse, S3
   repository URL, S3 endpoint, S3 config debug, key-management, recovery
   export, and opt-in live-S3 integration output paths.
-- S3-compatible hardening evidence covers storage-policy retry for retryable
-  write/read/delete/list failures, non-retry permission denial, configured
-  prefix listing surprises, prune resume, and missing-candidate handling.
+- S3-compatible hardening evidence covers the required storage capability
+  probe, storage-policy retry for retryable write/read/delete/list failures,
+  non-retry permission denial, configured prefix listing surprises, prune
+  resume, and missing-candidate handling.
 - A local restore release drill now passes through the `ferry` binary for
   real local snapshots, covering full, path-scoped, and latest restores plus a
   full repository check.
@@ -152,8 +153,8 @@ Core product:
 - [x] Stable config profiles and environment variables.
 - [x] Shell completion generation.
 - [x] Format v0 freeze decision completed.
-- [x] S3-compatible retry, resume, listing-surprise, and permission-error
-      evidence completed for the release candidate.
+- [x] S3-compatible capability-probe, retry, resume, listing-surprise, and
+      permission-error evidence completed for the release candidate.
 - [x] Exit codes, JSON, and JSONL contracts fully documented and tested for
       the implemented command surface.
 - [x] Local restore drills completed from real FileFerry snapshots.

@@ -141,8 +141,10 @@ Observed behavior:
 Evidence added or retained:
 
 - `fileferry-storage` tests: local put/get/list/delete, idempotent immutable
-  writes, conflicting immutable writes with temporary-object cleanup, and
-  stale temporary object listing behavior.
+  writes, conflicting immutable writes with temporary-object cleanup, stale
+  temporary object listing behavior, and the repository capability probe for
+  required idempotent-delete/prefix-listing capabilities plus probe-object
+  cleanup.
 - `fileferry-core` tests: missing or tampered chunks, malformed or replayed
   metadata, malformed commits, manifest/index mismatches, invalid manifests,
   permission-denied source reads, immutable bootstrap write conflicts, local
@@ -172,9 +174,10 @@ an isolated private development prefix with
 `FILEFERRY_S3_DATA_INTEGRATION=1`,
 `FILEFERRY_S3_RETENTION_KEY_INTEGRATION=1`, and
 `FILEFERRY_S3_PRUNE_INTEGRATION=1`. The passing live gates covered storage
-round-trip, CLI init, backup, snapshots, ls, restore, check, missing referenced
-manifest failure, forget, key add/remove/rotate/export-recovery, prune dry-run,
-prune sweep, durable prune state, snapshots, and unique-prefix cleanup. This
-does not claim automatic repair, cleanup of stale temporary files,
-provider-specific S3 lifecycle management, platform-wide permission behavior,
-release support on every target, or support for every S3-compatible provider.
+capability probe, storage round-trip, CLI init, backup, snapshots, ls, restore,
+check, missing referenced manifest failure, forget,
+key add/remove/rotate/export-recovery, prune dry-run, prune sweep, durable
+prune state, snapshots, and unique-prefix cleanup. This does not claim
+automatic repair, cleanup of stale temporary files, provider-specific S3
+lifecycle management, platform-wide permission behavior, release support on
+every target, or support for every S3-compatible provider.

@@ -60,6 +60,15 @@ The model intentionally separates capability reporting from command output.
 CLI code can later map capability failures into stable diagnostics and exit
 codes.
 
+`verify_repository_storage_capabilities` is the current destructive capability
+probe for a candidate repository store. It first rejects stores that do not
+report idempotent delete and prefix listing, then writes a unique object under
+the repository-internal `capability-probe/` prefix, reads the exact bytes back,
+verifies prefix listing returns that object, deletes it twice, and verifies it
+is no longer visible. The probe deletes only its generated object key. It is
+evidence for the exact store configuration being tested, not a broad provider
+support claim.
+
 ## Reliability Policy
 
 `PolicyObjectStore` wraps any `ObjectStore` with the common operational policy
@@ -145,6 +154,9 @@ Current S3 capability assumptions:
 
 Current storage-layer S3 evidence includes:
 
+- A reusable repository capability probe that rejects missing idempotent-delete
+  or prefix-listing capabilities before writing, then verifies write, immediate
+  read, prefix listing, idempotent delete, and cleanup for the tested store.
 - Retry policy tests for retryable put, read, delete, and list failures.
 - A permanent permission-denied backend failure test that verifies the policy
   does not retry access failures.
@@ -166,6 +178,9 @@ export FILEFERRY_S3_TEST_PREFIX=fileferry/dev
 
 cargo test -p fileferry-storage s3_store_round_trip_when_integration_env_is_enabled
 ```
+
+That gated test runs the capability probe before the round trip and uses a
+unique suffix under `FILEFERRY_S3_TEST_PREFIX`.
 
 For Backblaze B2, the S3 endpoint has the form
 `https://s3.<region>.backblazeb2.com`, and the region is the second component
@@ -249,7 +264,8 @@ gates.
 `ferry check`, `ferry forget`, `ferry prune`, and `ferry key ...` commands use
 S3-compatible encrypted repositories through the same core repository
 pipeline as the local backend. Common retry, timeout, backoff, and
-concurrency behavior exists in the policy wrapper. Before S3 storage is
-marked complete it still needs explicit provider capability checks, live
-evidence for providers beyond the current Backblaze B2 path, partial upload
-behavior, and multipart cleanup guidance.
+concurrency behavior exists in the policy wrapper, and a basic destructive
+capability probe now exists for exact store configurations. Before broader S3
+provider support is claimed, FileFerry still needs live evidence for providers
+beyond the current Backblaze B2 path, partial upload behavior, and multipart
+cleanup guidance.

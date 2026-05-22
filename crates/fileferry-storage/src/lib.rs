@@ -85,6 +85,20 @@ pub enum StorageError {
 
     #[error("storage policy configuration failed: {reason}")]
     PolicyConfig { reason: &'static str },
+
+    #[error("{backend:?} backend lacks required capability {capability}: {reason}")]
+    UnsupportedCapability {
+        backend: BackendKind,
+        capability: &'static str,
+        reason: &'static str,
+    },
+
+    #[error("{backend:?} backend capability probe failed during {operation}: {reason}")]
+    CapabilityProbe {
+        backend: BackendKind,
+        operation: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl StorageError {
@@ -117,7 +131,9 @@ impl StorageError {
             | Self::ObjectAlreadyExists { .. }
             | Self::ObjectNotFound { .. }
             | Self::BackendConfig { .. }
-            | Self::PolicyConfig { .. } => false,
+            | Self::PolicyConfig { .. }
+            | Self::UnsupportedCapability { .. }
+            | Self::CapabilityProbe { .. } => false,
         }
     }
 }
@@ -242,6 +258,118 @@ pub trait ObjectStore: Send + Sync {
     fn delete<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, ()>;
 
     fn list_prefix<'a>(&'a self, prefix: &'a ObjectKeyPrefix) -> StorageFuture<'a, Vec<ObjectKey>>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageCapabilityProbe {
+    pub capabilities: StorageCapabilities,
+    pub probe_key: ObjectKey,
+}
+
+pub async fn verify_repository_storage_capabilities(
+    store: &dyn ObjectStore,
+) -> StorageResult<StorageCapabilityProbe> {
+    let capabilities = store.capabilities();
+    require_repository_capabilities(&capabilities)?;
+
+    let prefix = ObjectKeyPrefix::new("capability-probe")?;
+    let key = capability_probe_key()?;
+    let bytes = format!("fileferry capability probe: {}\n", key.as_str()).into_bytes();
+
+    match run_repository_capability_probe(store, &capabilities, &prefix, &key, &bytes).await {
+        Ok(()) => Ok(StorageCapabilityProbe {
+            capabilities,
+            probe_key: key,
+        }),
+        Err(error) => {
+            let _ = store.delete(&key).await;
+            Err(error)
+        }
+    }
+}
+
+fn require_repository_capabilities(capabilities: &StorageCapabilities) -> StorageResult<()> {
+    if capabilities.delete != DeleteCapability::Idempotent {
+        return Err(StorageError::UnsupportedCapability {
+            backend: capabilities.backend,
+            capability: "idempotent delete",
+            reason: "repository prune and cleanup require missing-object deletes to succeed",
+        });
+    }
+
+    if capabilities.listing != ListingCapability::Prefix {
+        return Err(StorageError::UnsupportedCapability {
+            backend: capabilities.backend,
+            capability: "prefix listing",
+            reason: "repository discovery and check require prefix-scoped object listing",
+        });
+    }
+
+    Ok(())
+}
+
+async fn run_repository_capability_probe(
+    store: &dyn ObjectStore,
+    capabilities: &StorageCapabilities,
+    prefix: &ObjectKeyPrefix,
+    key: &ObjectKey,
+    bytes: &[u8],
+) -> StorageResult<()> {
+    if store.exists(key).await? {
+        return Err(StorageError::CapabilityProbe {
+            backend: capabilities.backend,
+            operation: "preflight stat",
+            reason: "unique probe object already exists",
+        });
+    }
+
+    match store.put_if_absent(key, bytes).await? {
+        PutStatus::Created => {}
+        PutStatus::AlreadyPresent => {
+            return Err(StorageError::CapabilityProbe {
+                backend: capabilities.backend,
+                operation: "probe write",
+                reason: "unique probe object was unexpectedly already present",
+            });
+        }
+    }
+
+    let read = store.get(key).await?;
+    if read != bytes {
+        return Err(StorageError::CapabilityProbe {
+            backend: capabilities.backend,
+            operation: "probe read",
+            reason: "read-after-write returned different bytes",
+        });
+    }
+
+    let listed = store.list_prefix(prefix).await?;
+    if !listed.iter().any(|listed_key| listed_key == key) {
+        return Err(StorageError::CapabilityProbe {
+            backend: capabilities.backend,
+            operation: "probe list",
+            reason: "prefix listing did not return the written probe object",
+        });
+    }
+
+    store.delete(key).await?;
+    store.delete(key).await?;
+    if store.exists(key).await? {
+        return Err(StorageError::CapabilityProbe {
+            backend: capabilities.backend,
+            operation: "probe delete",
+            reason: "probe object was still visible after idempotent delete",
+        });
+    }
+
+    Ok(())
+}
+
+fn capability_probe_key() -> StorageResult<ObjectKey> {
+    static NEXT_PROBE_ID: AtomicU64 = AtomicU64::new(0);
+
+    let id = NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    ObjectKey::new(format!("capability-probe/{}-{id}", std::process::id()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1464,6 +1592,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_capability_probe_exercises_local_store_and_cleans_up() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = LocalStore::new(temp.path());
+
+        let report = verify_repository_storage_capabilities(&store)
+            .await
+            .expect("capability probe");
+
+        assert_eq!(report.capabilities, StorageCapabilities::local_filesystem());
+        assert!(
+            !store
+                .exists(&report.probe_key)
+                .await
+                .expect("probe object removed")
+        );
+        assert_eq!(
+            store
+                .list_prefix(&ObjectKeyPrefix::new("capability-probe").expect("prefix"))
+                .await
+                .expect("list probe prefix"),
+            Vec::<ObjectKey>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_capability_probe_rejects_missing_required_capabilities_before_writing() {
+        let store = MissingDeleteCapabilityStore::default();
+        let attempts = store.put_attempts.clone();
+
+        let error = verify_repository_storage_capabilities(&store)
+            .await
+            .expect_err("unsupported delete capability");
+
+        assert!(matches!(
+            error,
+            StorageError::UnsupportedCapability {
+                backend: BackendKind::S3Compatible,
+                capability: "idempotent delete",
+                ..
+            }
+        ));
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn local_store_put_if_absent_is_idempotent_for_same_bytes() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = LocalStore::new(temp.path());
@@ -1733,9 +1906,18 @@ mod tests {
         let first = key("chunks/aa/blob");
         let second = key("indexes/current");
 
+        let report = verify_repository_storage_capabilities(&store)
+            .await
+            .expect("s3 capability probe");
         assert_eq!(
-            store.capabilities(),
+            report.capabilities,
             StorageCapabilities::s3_compatible(false)
+        );
+        assert!(
+            !store
+                .exists(&report.probe_key)
+                .await
+                .expect("s3 capability probe cleanup")
         );
         assert!(!store.exists(&first).await.expect("exists before put"));
         assert_eq!(
@@ -2109,6 +2291,54 @@ mod tests {
 
         fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
             Box::pin(async move { Err(StorageError::ObjectNotFound { key: key.clone() }) })
+        }
+
+        fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+            Box::pin(async move { Ok(false) })
+        }
+
+        fn delete<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn list_prefix<'a>(
+            &'a self,
+            _prefix: &'a ObjectKeyPrefix,
+        ) -> StorageFuture<'a, Vec<ObjectKey>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MissingDeleteCapabilityStore {
+        put_attempts: Arc<AtomicUsize>,
+    }
+
+    impl ObjectStore for MissingDeleteCapabilityStore {
+        fn capabilities(&self) -> StorageCapabilities {
+            StorageCapabilities {
+                backend: BackendKind::S3Compatible,
+                conditional_create: true,
+                atomic_visibility: true,
+                strong_read_after_write: true,
+                delete: DeleteCapability::Unsupported,
+                listing: ListingCapability::Prefix,
+            }
+        }
+
+        fn put_if_absent<'a>(
+            &'a self,
+            _key: &'a ObjectKey,
+            _bytes: &'a [u8],
+        ) -> StorageFuture<'a, PutStatus> {
+            Box::pin(async move {
+                self.put_attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(PutStatus::Created)
+            })
+        }
+
+        fn get<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+            Box::pin(async move { Ok(Vec::new()) })
         }
 
         fn exists<'a>(&'a self, _key: &'a ObjectKey) -> StorageFuture<'a, bool> {
