@@ -51,13 +51,16 @@ Implemented and tested at the current pre-v1 level:
   removal are not implemented.
 - Encrypted command leases for mutation paths currently covered by backup,
   forget, prune, and key-management commands.
-- Format v0 security and repository-format docs, current crypto primitives,
-  local/S3 storage abstraction, retry/timeout/concurrency policy wrapper,
-  tested retention parser, fake object store, and platform metadata scaffolding.
+- Frozen format v0 compatibility contract for documented current object
+  families, format v0 security and repository-format docs, current crypto
+  primitives, local/S3 storage abstraction, retry/timeout/concurrency policy
+  wrapper, tested retention parser, fake object store, and platform metadata
+  scaffolding.
 - Golden repository-format fixture slices for bootstrap/key slots/removal
   markers, recovery export, committed snapshot data, forget/prune state,
   policy/config, upload state, migration detection, lease state, and strict
-  unknown-field rejection across fixture-covered current v0 JSON shapes.
+  unknown-field rejection across fixture-covered current v0 JSON shapes,
+  including manifest platform metadata.
 - A live Backblaze B2 S3-compatible data-path drill has passed for
   `init -> backup -> snapshots -> ls -> restore -> check` under an isolated
   private development prefix. Later S3 retention/key/prune live gates exist but
@@ -74,40 +77,11 @@ and release artifacts do not exist.
 
 ### Milestone H - Format Fixtures And Compatibility Freeze
 
-Goal: freeze repository format `0` only after fixture coverage, documented
-compatibility fields, and unsupported-version behavior are explicit.
-
-Current state:
-
-- Fixture slices exist for the major current v0 object families listed in
-  `Current Baseline`.
-- Fixture tests prove current readers can authenticate and validate those
-  bytes and reject representative malformed, tampered, replayed, unsupported,
-  and wrong-context variants.
-- Strict deserialization now rejects unknown fields in fixture-covered current
-  v0 repository JSON shapes.
-- The broader format is not frozen merely because fixture slices exist.
-
-Finish this milestone by doing the smallest honest freeze audit:
-
-- [ ] Compare `docs/repository-format.md`, the fixture directory, and current
-      read/write code to identify any v0 object family or plaintext field that
-      still lacks fixture coverage or compatibility classification.
-- [ ] Either add the missing fixture/docs coverage or explicitly mark the
-      shape as internal/pre-freeze with a reason.
-- [ ] Add or update a test that makes unsupported future format versions and
-      unknown current-v0 feature flags fail before repository unlock.
-- [ ] Update `docs/repository-format.md` so frozen fields, internal fields,
-      plaintext reasons, migration detection, and non-goals are clear.
-- [ ] Decide and document whether format `0` is frozen. If not frozen, list
-      the exact remaining blockers in this section.
-
-Non-goals:
-
-- Compatibility with restic, rustic, Borg, Kopia, rclone, or any other backup
-  format.
-- Implementing format migrations before a migration is intentionally designed.
-- Adding new storage providers or broad repair behavior.
+Status: complete at the current pre-v1 level. Format v0's compatibility
+contract is frozen for the object families and fields listed in
+`docs/repository-format.md`; future fields, new object families, and migration
+behavior require an explicit new format version or documented feature gate with
+fixtures.
 
 ### Milestone I - V1 Release Hardening
 
@@ -156,7 +130,7 @@ Core product:
 - [x] Key add/remove/rotate/export-recovery paths.
 - [x] Stable config profiles and environment variables.
 - [x] Shell completion generation.
-- [ ] Format v0 freeze decision completed.
+- [x] Format v0 freeze decision completed.
 - [ ] S3-compatible retry, resume, listing-surprise, and permission-error
       evidence completed for the release candidate.
 - [ ] Exit codes, JSON, and JSONL contracts fully documented and tested.
@@ -172,7 +146,7 @@ Security and format:
 - [x] Key hierarchy, KDF parameters, AEAD choice, and recovery export behavior
       documented.
 - [ ] Secret-leakage audit completed for release candidate output and tests.
-- [ ] Format fixtures declared complete or remaining blockers documented.
+- [x] Format fixtures declared complete or remaining blockers documented.
 
 Platform and release:
 

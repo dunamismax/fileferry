@@ -74,12 +74,14 @@ pub struct PathFacts {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Timestamp {
     pub seconds: i64,
     pub nanoseconds: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntryMetadata {
     pub kind: EntryKind,
     #[serde(default)]
@@ -94,6 +96,7 @@ pub struct EntryMetadata {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnixMetadata {
     pub mode: u32,
     pub uid: u32,
@@ -101,6 +104,7 @@ pub struct UnixMetadata {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetadataExtensions {
     #[serde(default)]
     pub xattrs: MetadataValue<MetadataFieldSummary>,
@@ -130,6 +134,7 @@ impl Default for MetadataExtensions {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetadataFieldSummary {
     pub count: usize,
 }
@@ -480,6 +485,32 @@ mod tests {
             metadata.extensions.sparse_extents,
             MetadataValue::Unsupported
         );
+    }
+
+    #[test]
+    fn rejects_unknown_metadata_fields_in_closed_v0_shape() {
+        let error = serde_json::from_str::<EntryMetadata>(
+            r#"{
+                "kind": "regular_file",
+                "source_platform": "linux",
+                "size_bytes": 5,
+                "modified": { "captured": { "seconds": 1, "nanoseconds": 0 } },
+                "created": "unsupported",
+                "symlink_target": "unsupported",
+                "unix": null,
+                "extensions": {
+                    "xattrs": {
+                        "captured": {
+                            "count": 2,
+                            "unexpected_contract_field": true
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect_err("unknown metadata summary fields are rejected");
+
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]

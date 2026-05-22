@@ -89,6 +89,13 @@ plus selected sparse extent status fields when sparse extents were observed or
 sparse extent capture was denied in constructed or future manifests. It can
 surface denied, unsupported, invalid, unrepresentable, or
 not-yet-restored metadata warnings without writing destination entries.
+
+The format v0 metadata structures embedded in snapshot manifests are closed
+schemas. Older manifests may omit documented fields that have serde defaults,
+such as `source_platform` and extension statuses, but unknown metadata,
+extension, timestamp, Unix metadata, or summary fields are repository metadata
+decode failures.
+
 Captured entry metadata records the source platform for new manifests; older
 v0 manifests that lack this field are read as `unknown`. Current restores do
 not restore symlink timestamps, symlink Unix mode/ownership, creation/birth

@@ -1,9 +1,10 @@
 # Security Design
 
-FileFerry is pre-v1 and the repository format is not frozen. This document
-records the security decisions that format v0 implementation work must follow.
-Changing these decisions requires updating this document, repository-format
-fixtures when they exist, and the focused crypto tests.
+FileFerry is pre-v1. The format v0 compatibility contract is frozen for the
+object families and fields documented in `docs/repository-format.md`. This
+document records the security decisions that format v0 implementation work
+must follow. Changing these decisions requires updating this document,
+repository-format fixtures, and the focused crypto tests.
 
 ## Goals
 
@@ -331,10 +332,13 @@ Other command-level lease enforcement is not implemented yet.
 
 Current fixture-covered repository JSON schemas are strict for the current v0
 objects they cover. Focused tests prove that unknown fields in plaintext
-objects, encrypted-object frames, and decrypted repository metadata are rejected
-as decode failures before validation or use. The bootstrap inspection gate is
-the exception: it intentionally reads only the small compatibility envelope
-needed to classify future formats or feature flags before unlock.
+objects, encrypted-object frames, decrypted repository metadata, and embedded
+manifest platform metadata are rejected as decode failures before validation or
+use. The bootstrap inspection gate is the exception: it intentionally reads
+only the small compatibility envelope needed to classify future formats or
+feature flags before unlock. Focused migration tests use a bootstrap-only store
+to prove unsupported future format versions and unknown current-v0 feature
+flags fail before key-slot lookup or passphrase unlock.
 
 ## Key Rotation
 

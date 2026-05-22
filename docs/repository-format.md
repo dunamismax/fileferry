@@ -1,12 +1,14 @@
 # Repository Format
 
-FileFerry's repository format is original to FileFerry. Format v0 is not frozen.
-Initial compatibility fixtures exist for narrow bootstrap/key-slot and
-recovery-export, committed snapshot-data, forget/prune-state, and policy/config
-and upload-state slices, a narrow migration-detection slice, and a lease-state
-slice. This document defines the initial shape needed for implementation work;
-byte-level fixtures become the compatibility contract only after the first
-intentional freeze.
+FileFerry's repository format is original to FileFerry. Format v0's
+compatibility contract is frozen for the object families and fields listed in
+this document as of 2026-05-22. The freeze covers the current bootstrap/key-slot
+and recovery-export objects, committed snapshot data, forget/prune state,
+policy/config objects, upload state, lease state, migration detection gates,
+object names, plaintext fields, encrypted-object framing, and AEAD
+authentication context. Future fields, new object families, and migration
+behavior require an explicit new format version or a documented feature gate
+with fixtures.
 
 ## Format Principles
 
@@ -49,8 +51,8 @@ visible from object storage listing.
 
 Current implementation status:
 
-- `ferry init` writes a plaintext `bootstrap` JSON object for local
-  filesystem repositories.
+- `ferry init` writes a plaintext `bootstrap` JSON object for local filesystem
+  and S3-compatible repositories.
 - The bootstrap object contains `magic`, `format_version`, a random
   32-byte repository id encoded as lowercase hex, key-slot KDF parameters,
   key-slot salt, key-slot AEAD nonce, encrypted master-key bytes, and an empty
@@ -148,7 +150,7 @@ data is:
 || object_name
 ```
 
-Initial object kinds:
+Format v0 object kinds:
 
 - `chunk`
 - `snapshot-manifest`
@@ -163,27 +165,31 @@ This binds ciphertext to its repository-format version, semantic object kind,
 and storage name. Moving a ciphertext to a different name or opening it as a
 different kind must fail authentication.
 
+`repository-config` is a reserved v0 object kind for future encrypted
+repository-local configuration. Current v0 code does not write or read a
+repository-config object family, and no repository-config object layout is part
+of the frozen v0 compatibility surface.
+
 ## Snapshot Manifest
 
 Snapshot manifests are encrypted metadata objects. They describe a point-in-time
 backup after source walking, chunking, compression, encryption, and index writes
 have completed.
 
-Required manifest fields before format freeze:
+Frozen v0 manifest fields:
 
 - Manifest schema version.
 - Snapshot id.
-- Parent snapshot ids, if used.
 - Creation timestamp.
-- Source roots represented as encrypted path records.
-- Tags and host/profile metadata, encrypted.
-- File, directory, symlink, and special-file records.
+- Source root, absolute source path, and snapshot-relative path records,
+  encrypted at rest inside the manifest.
+- Tags, encrypted at rest inside the manifest.
+- File, directory, symlink, and other-entry records.
 - Chunk references for regular file content.
 - Platform metadata records or references, including the captured source
   platform for new manifests. Older v0 manifests without a source-platform
   field are treated as `unknown` by current readers.
 - Index ids required to restore the snapshot.
-- Backup command summary fields that are safe after encryption.
 
 Manifest records must not store plaintext paths, tags, usernames, hostnames, or
 directory shape. Restore code must authenticate and parse the manifest before
@@ -201,16 +207,16 @@ must be a directory. Violations are treated as integrity failures.
 Chunk indexes are encrypted metadata objects that map chunk identities to object
 locations and integrity data.
 
-Required index fields before format freeze:
+Frozen v0 index fields:
 
 - Index schema version.
 - Index id.
 - Chunk id or keyed content id.
 - Encrypted chunk object name.
-- Plain compressed/encrypted length only if justified as operational metadata.
+- Plaintext, compressed, and stored lengths, encrypted at rest inside the
+  index.
 - Compression algorithm id.
 - AEAD algorithm id.
-- Optional pack membership if pack files are introduced later.
 
 Indexes are sensitive because they reveal deduplication and backup shape. They
 remain encrypted and authenticated.
@@ -224,10 +230,9 @@ Current implementation status:
   include source paths, tags, hostnames, or profile names.
 - Current index readers reject unsupported decrypted index schema versions and
   metadata identity mismatches before check or restore uses the index.
-- One committed snapshot-data fixture now covers the current encrypted index
-  object framing and decrypted index fields listed in the fixture-status
-  section. This does not freeze future pack membership or policy/config object
-  formats.
+- One committed snapshot-data fixture covers the current encrypted index object
+  framing and decrypted index fields listed in the fixture-status section.
+  Future pack membership requires a new schema/format decision and fixtures.
 
 ## Policy And Config Objects
 
@@ -256,10 +261,10 @@ Current implementation status:
 - A repeated write of the same policy body is recognized as an idempotent
   already-present result. The current API is core-only; no CLI policy command
   is claimed by this fixture slice.
-- One policy/config fixture now covers the current encrypted policy object
-  framing and decrypted fields listed in the fixture-status section. This does
-  not freeze future config fields, policy selection semantics, or migration
-  behavior.
+- One policy/config fixture covers the current encrypted policy object framing
+  and decrypted fields listed in the fixture-status section. Future config
+  fields, policy selection semantics, or migration behavior require a new
+  schema/format decision and fixtures.
 
 ## Commit Markers And Upload State
 
@@ -487,7 +492,7 @@ Current implementation status:
 
 ## Fixture Status
 
-Initial golden fixtures now exist under:
+Golden fixtures exist under:
 
 - `tests/fixtures/repository-format/v0/bootstrap-keyslot/` for the bootstrap
   object, one external key-slot object, and one key-slot removal marker.
@@ -512,9 +517,10 @@ Initial golden fixtures now exist under:
   future format version, unsupported v0 feature flags, and an unversioned
   pre-v0 rejection case.
 
-These are narrow compatibility-fixture slices for format v0. They do not freeze
-all of format v0. Migration implementation and full cross-version
-compatibility remain open Milestone H work.
+These fixtures are the format v0 compatibility contract for the object families
+they cover. They do not implement migrations or promise cross-version
+read/write compatibility beyond detecting unsupported bootstrap versions and
+feature flags before unlock.
 
 For fixture-covered current v0 objects, the listed compatibility-facing fields
 below are closed schemas: current readers reject unknown JSON fields in the
@@ -525,13 +531,16 @@ gate intentionally remains narrower and looser: it reads only `magic`,
 classified before unlock. If inspection classifies bytes as the current
 supported format, the full bootstrap decode uses the strict current-v0 schema.
 
-Fields not listed below remain internal or pre-freeze. This includes future
+Fields not listed below are not part of frozen format v0. This includes future
 manifest body additions, future index packing fields, policy selection
 semantics, upload recovery semantics, lease breaking/repair semantics, prune
 abandonment/expiration semantics, and migration behavior beyond the bootstrap
-compatibility gate. Platform metadata extension fields remain governed by
-`docs/platform-metadata.md`; the fixture-covered manifest only freezes the
-metadata fields present in that fixture.
+compatibility gate. Adding one of those fields to repositories that current v0
+readers must open requires a new schema/format decision, a compatibility plan,
+and fixtures. Platform metadata extension fields are governed by
+`docs/platform-metadata.md`; the fixture-covered manifest freezes the metadata
+fields present in that fixture and rejects unknown metadata, extension, and
+metadata-summary fields.
 
 For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
 
@@ -689,9 +698,9 @@ writing snapshot objects.
 Current compatibility-contract strictness tests prove that fixture-covered
 current v0 objects reject unknown fields in bootstrap bytes, external key-slot
 objects, nested key-slot KDF parameters, key-slot removal markers, recovery
-exports, encrypted-object frames, decrypted manifests, chunk-index entries,
-commit markers, forget markers, prune plans, prune completions, policy/config
-retention bodies, upload pending-object records, and lease-state objects. These
-tests do not freeze unimplemented future fields; adding a field now requires an
-intentional schema change, fixture update, and migration or compatibility
-decision.
+exports, encrypted-object frames, decrypted manifests, manifest entry metadata,
+platform metadata extension summaries, chunk-index entries, commit markers,
+forget markers, prune plans, prune completions, policy/config retention bodies,
+upload pending-object records, and lease-state objects. These tests freeze the
+listed v0 compatibility surface; adding a field now requires an intentional
+schema change, fixture update, and migration or compatibility decision.

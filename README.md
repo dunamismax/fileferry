@@ -416,8 +416,12 @@ objects, remove the original bootstrap slot, remove unselected slots, or
 recover lost keys. `ferry key export-recovery` writes a standalone encrypted
 recovery package to a destination file that must not already exist; it does
 not implement recovery import, export raw master-key material, rekey, rewrite
-repository objects, or recover lost passphrases. Broader metadata application is not implemented yet. The
-repository format is still not frozen.
+repository objects, or recover lost passphrases. Broader metadata application
+is not implemented yet. The format v0 compatibility contract is frozen for the
+object families and fields documented in
+[`docs/repository-format.md`](docs/repository-format.md); future fields, new
+object families, and migration behavior require an explicit new format version
+or documented feature gate with fixtures.
 
 The normal local gate is:
 

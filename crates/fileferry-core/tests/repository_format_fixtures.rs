@@ -10,7 +10,9 @@ use fileferry_crypto::{
     AeadAlgorithm, EncryptedObject, KeyPurpose, ObjectContext, ObjectKind, decrypt_object,
     encrypt_object,
 };
-use fileferry_storage::{ObjectKey, ObjectStore};
+use fileferry_storage::{
+    ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, StorageCapabilities, StorageFuture,
+};
 use fileferry_testkit::FakeObjectStore;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -159,6 +161,66 @@ struct FixtureEncryptedObject {
     algorithm: RepositoryAeadAlgorithm,
     nonce: [u8; fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN],
     ciphertext: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct BootstrapGateStore {
+    bootstrap: Vec<u8>,
+}
+
+impl BootstrapGateStore {
+    fn new(bootstrap: &[u8]) -> Self {
+        Self {
+            bootstrap: bootstrap.to_vec(),
+        }
+    }
+}
+
+impl ObjectStore for BootstrapGateStore {
+    fn capabilities(&self) -> StorageCapabilities {
+        StorageCapabilities::in_memory_fake()
+    }
+
+    fn put_if_absent<'a>(
+        &'a self,
+        key: &'a ObjectKey,
+        _bytes: &'a [u8],
+    ) -> StorageFuture<'a, PutStatus> {
+        Box::pin(async move {
+            panic!("unsupported format gate attempted to write object {key}");
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, Vec<u8>> {
+        Box::pin(async move {
+            if key.as_str() == "bootstrap" {
+                Ok(self.bootstrap.clone())
+            } else {
+                panic!("unsupported format gate attempted to read object {key}");
+            }
+        })
+    }
+
+    fn exists<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, bool> {
+        Box::pin(async move {
+            panic!("unsupported format gate attempted to stat object {key}");
+        })
+    }
+
+    fn delete<'a>(&'a self, key: &'a ObjectKey) -> StorageFuture<'a, ()> {
+        Box::pin(async move {
+            panic!("unsupported format gate attempted to delete object {key}");
+        })
+    }
+
+    fn list_prefix<'a>(&'a self, prefix: &'a ObjectKeyPrefix) -> StorageFuture<'a, Vec<ObjectKey>> {
+        Box::pin(async move {
+            panic!(
+                "unsupported format gate attempted to list prefix {}",
+                prefix.as_str()
+            );
+        })
+    }
 }
 
 fn object_key(value: &str) -> ObjectKey {
@@ -769,6 +831,33 @@ async fn migration_future_feature_fixture_is_detected_and_rejected() {
 }
 
 #[tokio::test]
+async fn migration_unsupported_bootstrap_gates_fail_before_key_slot_reads() {
+    let future_format_store = BootstrapGateStore::new(MIGRATION_FUTURE_FORMAT_BOOTSTRAP);
+    let future_format_error = open_repository(
+        &future_format_store,
+        &secret("passphrase-not-used-before-format-gate"),
+    )
+    .await
+    .expect_err("future format is rejected before key-slot lookup");
+    assert!(matches!(
+        future_format_error,
+        CoreError::UnsupportedRepositoryFormat { format_version: 1 }
+    ));
+
+    let future_feature_store = BootstrapGateStore::new(MIGRATION_FUTURE_FEATURE_BOOTSTRAP);
+    let future_feature_error = open_repository(
+        &future_feature_store,
+        &secret("passphrase-not-used-before-feature-gate"),
+    )
+    .await
+    .expect_err("future feature is rejected before key-slot lookup");
+    assert!(matches!(
+        future_feature_error,
+        CoreError::UnsupportedRepositoryFeatures
+    ));
+}
+
+#[tokio::test]
 async fn migration_unversioned_bootstrap_fixture_is_rejected_as_pre_v0() {
     let store = load_migration_bootstrap_fixture(MIGRATION_UNVERSIONED_BOOTSTRAP).await;
 
@@ -1158,6 +1247,58 @@ async fn snapshot_data_fixture_rejects_unknown_contract_fields() {
         .await
         .expect_err("unknown decrypted manifest fields are rejected");
     assert!(matches!(manifest_error, CoreError::MetadataDecode { .. }));
+
+    let metadata_store = load_snapshot_data_fixture().await;
+    metadata_store
+        .overwrite_for_tests(
+            object_key(MANIFEST_OBJECT),
+            reencrypt_snapshot_manifest_value(&opened, |manifest| {
+                manifest["body"]["entries"][0]["metadata"]["unexpected_contract_field"] =
+                    json!(true);
+            }),
+        )
+        .await;
+    let metadata_error = pipeline
+        .read_snapshot_manifest(&metadata_store, &opened.master_key, SNAPSHOT_ID)
+        .await
+        .expect_err("unknown entry metadata fields are rejected");
+    assert!(matches!(metadata_error, CoreError::MetadataDecode { .. }));
+
+    let extension_store = load_snapshot_data_fixture().await;
+    extension_store
+        .overwrite_for_tests(
+            object_key(MANIFEST_OBJECT),
+            reencrypt_snapshot_manifest_value(&opened, |manifest| {
+                manifest["body"]["entries"][0]["metadata"]["extensions"]
+                    ["unexpected_contract_field"] = json!(true);
+            }),
+        )
+        .await;
+    let extension_error = pipeline
+        .read_snapshot_manifest(&extension_store, &opened.master_key, SNAPSHOT_ID)
+        .await
+        .expect_err("unknown metadata extension fields are rejected");
+    assert!(matches!(extension_error, CoreError::MetadataDecode { .. }));
+
+    let summary_store = load_snapshot_data_fixture().await;
+    summary_store
+        .overwrite_for_tests(
+            object_key(MANIFEST_OBJECT),
+            reencrypt_snapshot_manifest_value(&opened, |manifest| {
+                manifest["body"]["entries"][0]["metadata"]["extensions"]["xattrs"] = json!({
+                    "captured": {
+                        "count": 1,
+                        "unexpected_contract_field": true
+                    }
+                });
+            }),
+        )
+        .await;
+    let summary_error = pipeline
+        .read_snapshot_manifest(&summary_store, &opened.master_key, SNAPSHOT_ID)
+        .await
+        .expect_err("unknown metadata summary fields are rejected");
+    assert!(matches!(summary_error, CoreError::MetadataDecode { .. }));
 
     let index_store = load_snapshot_data_fixture().await;
     index_store
