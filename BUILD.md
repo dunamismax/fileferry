@@ -84,16 +84,18 @@ Implemented and tested at the current pre-v1 level:
   ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC matrix
   and can additionally sign checksum manifests with Sigstore keyless signing
   when run.
-- Current signed release-candidate workflow evidence for commit
-  `29e59cd6fe6ba2c355694c735acda3788d9fcb2f` exists in GitHub run
-  `26318709139`: the manual release-artifacts workflow completed package,
-  archive-smoke, verifier, and upload steps for x86_64 Linux GNU, ARM64 Linux
-  GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC native hosted
-  targets on 2026-05-23. Uploaded artifacts were downloaded under `target/`
-  and locally re-verified with `xtask verify-release-artifacts
-  --expect-signature` for all five target directories. Each target directory
-  contained the archive, checksums, Sigstore checksum bundle, CycloneDX SBOM,
-  release manifest, archive-smoke JSON evidence, and installer scripts. This is
+- Current signed `1.0.0-rc.1` release-candidate workflow evidence for commit
+  `c8c82913eb923bed6b070f0961e56815132bb5ba` exists in GitHub run
+  `26319862678`: the manual release-artifacts workflow completed package,
+  archive-smoke, verifier, signing, and upload steps for x86_64 Linux GNU,
+  ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC native
+  hosted targets on 2026-05-23. Uploaded artifacts were downloaded under
+  `target/release-candidate-evidence-26319862678/` and locally re-verified
+  with `xtask verify-release-artifacts --expect-signature` for all five target
+  directories. Each target directory contained the archive, checksums, Sigstore
+  checksum bundle, CycloneDX SBOM, release manifest, archive-smoke JSON
+  evidence, and installer scripts. Every manifest recorded version
+  `1.0.0-rc.1` and commit `c8c82913eb923bed6b070f0961e56815132bb5ba`. This is
   workflow evidence only, not a published release or platform support claim.
 - Tested local-archive install paths now exist through `scripts/install.sh` and
   `scripts/install.ps1`; `xtask release-package` copies them beside the archive,
@@ -104,8 +106,8 @@ Implemented and tested at the current pre-v1 level:
   Ubuntu Linux ARM64 GNU, macOS Intel, macOS ARM64, and Windows x86_64 MSVC
   hosted runners. Completed passing jobs are host build/test evidence only, not
   platform support claims. Commit
-  `29e59cd6fe6ba2c355694c735acda3788d9fcb2f` passed this workflow in GitHub run
-  `26318164223` on 2026-05-23.
+  `c8c82913eb923bed6b070f0961e56815132bb5ba` passed this workflow in GitHub run
+  `26319699007` on 2026-05-23.
 - Per-target platform metadata tests exist for the documented current metadata
   scope in `fileferry-platform`: Linux and macOS cfg-gated tests assert source
   platform, Unix metadata, timestamps, xattr status, and unsupported extension
@@ -154,16 +156,14 @@ status text:
 - [x] Audit logs, errors, JSON, JSONL, tests, and docs for secret leakage.
 - [x] Audit exit codes, JSON schemas, JSONL event order, and stdout/stderr
       separation as compatibility surfaces.
-- [ ] Add release artifacts, checksums, signatures, SBOM,
+- [x] Add release artifacts, checksums, signatures, SBOM,
       archive-smoke evidence, and `cargo-auditable` metadata for the exact
-      release candidate on every claimed target. Candidate workflow evidence now
-      exists for the current native hosted matrix, but this remains open until
-      the release candidate, support claims, release notes, and publication
-      target set are finalized.
+      `1.0.0-rc.1` candidate on the intended target matrix.
 - [x] Add tested Unix shell and PowerShell install paths.
-- [ ] Run smoke tests on every claimed platform artifact.
-- [ ] Update README, docs, completions, homepage status, and release notes to
-      match the exact release candidate.
+- [x] Run smoke tests on every intended target artifact in the manual
+      release-artifacts workflow.
+- [x] Update README, release docs, and release notes to match the exact
+      `1.0.0-rc.1` release candidate.
 
 Non-goals:
 
@@ -217,8 +217,8 @@ Platform and release:
       metadata scope on Linux, macOS, and Windows through cfg-gated
       `fileferry-platform` tests in the hosted CI matrix.
 - [ ] CI, tests, and artifacts exist for every claimed supported platform.
-- [ ] Release archives, checksums, signatures, SBOM, and audit metadata exist
-      for the exact release candidate.
+- [x] Release archives, checksums, signatures, SBOM, and audit metadata exist
+      for the exact `1.0.0-rc.1` release candidate.
 - [x] Unix shell and PowerShell install paths are tested.
 
 Post-v1 or optional:

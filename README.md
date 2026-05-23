@@ -219,10 +219,14 @@ FileFerry does not have published v1 release artifacts yet. The current tested
 install path is for local release archives produced by `xtask release-package`.
 It is release-candidate plumbing, not a platform support claim.
 
-The intended v1 release-candidate artifact scope is x86_64 Linux GNU, ARM64
-Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC. Candidate
-workflow evidence is tied to an exact commit and GitHub run; it is not a
-published release and does not make any platform supported.
+The `1.0.0-rc.1` release-candidate artifact scope is x86_64 Linux GNU, ARM64
+Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC. Current signed
+candidate workflow evidence exists for commit
+`c8c82913eb923bed6b070f0961e56815132bb5ba`: CI passed in GitHub run
+`26319699007`, and release artifacts passed with signing enabled in GitHub run
+`26319862678`. The downloaded artifacts were locally re-verified under
+`target/release-candidate-evidence-26319862678/`. This is not a published
+release and does not make any platform supported.
 
 Build a local host archive:
 

@@ -23,18 +23,18 @@ not platform support by themselves. Support still requires the target-specific
 release artifact, checksum/signature/SBOM/auditable metadata, archive smoke
 evidence, and relevant platform metadata tests for the exact release candidate.
 
-## Previous Candidate Evidence
+## Observed 1.0.0-rc.1 Candidate Evidence
 
-Previous observed workflow evidence for commit
-`29e59cd6fe6ba2c355694c735acda3788d9fcb2f`:
+Current observed workflow evidence for commit
+`c8c82913eb923bed6b070f0961e56815132bb5ba`:
 
 - Normal CI passed in GitHub run
-  [26318164223](https://github.com/dunamismax/fileferry/actions/runs/26318164223)
+  [26319699007](https://github.com/dunamismax/fileferry/actions/runs/26319699007)
   on 2026-05-23 for Ubuntu Linux x86_64 GNU, Ubuntu Linux ARM64 GNU,
   macOS Intel, macOS ARM64, and Windows x86_64 MSVC hosted runners.
 - The manual release-artifacts workflow passed with signing enabled in GitHub
   run
-  [26318709139](https://github.com/dunamismax/fileferry/actions/runs/26318709139)
+  [26319862678](https://github.com/dunamismax/fileferry/actions/runs/26319862678)
   on 2026-05-23 for x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS,
   ARM64 macOS, and x86_64 Windows MSVC native hosted targets.
 - Each release-artifacts job completed formatting, clippy, tests, packaging,
@@ -44,14 +44,15 @@ Previous observed workflow evidence for commit
   `SHA256SUMS.sigstore.json`, a CycloneDX `*.cdx.json` SBOM, a release
   manifest, an archive-smoke JSON file, `install.sh`, and `install.ps1`.
 - The uploaded artifacts were downloaded under
-  `target/release-candidate-evidence-26318709139/` and locally re-verified on
+  `target/release-candidate-evidence-26319862678/` and locally re-verified on
   2026-05-23 with `cargo run -p xtask -- verify-release-artifacts --dir
   <artifact-dir> --target <target> --expect-signature` for all five intended
   targets.
+- Each manifest recorded version `1.0.0-rc.1` and commit
+  `c8c82913eb923bed6b070f0961e56815132bb5ba`.
 
-This evidence is tied to that exact commit and those workflow runs. It is
-historical evidence only, not the `1.0.0-rc.1` release candidate, not a
-published v1 release, and not a support claim.
+This evidence is tied to that exact commit and those workflow runs. It is not a
+published v1 release and not a support claim.
 
 Release-runner drift was rechecked on 2026-05-23 against current GitHub
 sources. The release workflow now uses `actions/upload-artifact@v7`, the latest
@@ -279,9 +280,9 @@ Release notes must be written for users and operators. They should include:
 
 Release notes must not include AI attribution or unsupported platform claims.
 
-### 1.0.0-rc.1 Draft Candidate Notes
+### 1.0.0-rc.1 Candidate Notes
 
-Draft notes for the current `1.0.0-rc.1` candidate:
+Notes for commit `c8c82913eb923bed6b070f0961e56815132bb5ba`:
 
 - FileFerry remains unpublished. These notes describe a release candidate only;
   no v1 tag or published release exists yet.
@@ -297,6 +298,12 @@ Draft notes for the current `1.0.0-rc.1` candidate:
 - Intended artifact scope is `x86_64-unknown-linux-gnu`,
   `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`,
   `aarch64-apple-darwin`, and `x86_64-pc-windows-msvc`.
-- The candidate is not a support claim. Platform support remains blocked until
-  the exact `1.0.0-rc.1` commit has passing CI, signed artifacts, archive smoke
-  evidence, local verifier evidence, and an explicit publication decision.
+- CI passed in GitHub run `26319699007`. Signed artifacts, checksums, SBOMs,
+  cargo-auditable metadata, archive-smoke evidence, and installer scripts were
+  produced in GitHub run `26319862678`.
+- Downloaded artifacts were locally verified under
+  `target/release-candidate-evidence-26319862678/` with
+  `xtask verify-release-artifacts --expect-signature` for all intended
+  targets.
+- The candidate is not a support claim. Platform support still requires the
+  explicit publication decision and release wording for the selected target set.
