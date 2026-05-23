@@ -222,9 +222,9 @@ It is release-candidate plumbing, not a platform support claim.
 The manual release-artifacts workflow has produced candidate artifacts for the
 current native hosted x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS,
 ARM64 macOS, and x86_64 Windows MSVC matrix on commit
-`b5ccdc93f27afe6c888ace4566605edac690f2db`. That is workflow evidence for that
-exact commit only; it is not a published release and does not make any platform
-supported.
+`29e59cd6fe6ba2c355694c735acda3788d9fcb2f` in GitHub run
+`26318709139`. That signed workflow evidence is for that exact commit only; it
+is not a published release and does not make any platform supported.
 
 Build a local host archive:
 

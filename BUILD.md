@@ -84,15 +84,17 @@ Implemented and tested at the current pre-v1 level:
   ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC matrix
   and can additionally sign checksum manifests with Sigstore keyless signing
   when run.
-- Current release-candidate workflow evidence for commit
-  `b5ccdc93f27afe6c888ace4566605edac690f2db` exists in GitHub run
-  `26315320434`: the manual release-artifacts workflow completed package,
-  archive-smoke, and upload steps for x86_64 Linux GNU, ARM64 Linux GNU,
-  x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC native hosted targets.
-  Uploaded artifacts were observed with per-target archives, checksums,
-  Sigstore checksum bundles, CycloneDX SBOMs, release manifests,
-  archive-smoke JSON evidence, and installer scripts. This is workflow evidence
-  only, not a published release or platform support claim.
+- Current signed release-candidate workflow evidence for commit
+  `29e59cd6fe6ba2c355694c735acda3788d9fcb2f` exists in GitHub run
+  `26318709139`: the manual release-artifacts workflow completed package,
+  archive-smoke, verifier, and upload steps for x86_64 Linux GNU, ARM64 Linux
+  GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC native hosted
+  targets on 2026-05-23. Uploaded artifacts were downloaded under `target/`
+  and locally re-verified with `xtask verify-release-artifacts
+  --expect-signature` for all five target directories. Each target directory
+  contained the archive, checksums, Sigstore checksum bundle, CycloneDX SBOM,
+  release manifest, archive-smoke JSON evidence, and installer scripts. This is
+  workflow evidence only, not a published release or platform support claim.
 - Tested local-archive install paths now exist through `scripts/install.sh` and
   `scripts/install.ps1`; `xtask release-package` copies them beside the archive,
   includes them in `SHA256SUMS`, and the installers verify archive checksums
@@ -102,8 +104,8 @@ Implemented and tested at the current pre-v1 level:
   Ubuntu Linux ARM64 GNU, macOS Intel, macOS ARM64, and Windows x86_64 MSVC
   hosted runners. Completed passing jobs are host build/test evidence only, not
   platform support claims. Commit
-  `b5ccdc93f27afe6c888ace4566605edac690f2db` passed this workflow in GitHub run
-  `26315315837`.
+  `29e59cd6fe6ba2c355694c735acda3788d9fcb2f` passed this workflow in GitHub run
+  `26318164223` on 2026-05-23.
 - Live Backblaze B2 S3-compatible drills passed on 2026-05-22 under an
   isolated private development prefix for storage round-trip, CLI init,
   `backup -> snapshots -> ls -> restore -> check`, missing-manifest failure,

@@ -26,31 +26,38 @@ evidence, and relevant platform metadata tests for the exact release candidate.
 ## Observed Candidate Evidence
 
 Current observed workflow evidence for commit
-`b5ccdc93f27afe6c888ace4566605edac690f2db`:
+`29e59cd6fe6ba2c355694c735acda3788d9fcb2f`:
 
 - Normal CI passed in GitHub run
-  [26315315837](https://github.com/dunamismax/fileferry/actions/runs/26315315837)
-  on 2026-05-22 for Ubuntu Linux x86_64 GNU, Ubuntu Linux ARM64 GNU,
+  [26318164223](https://github.com/dunamismax/fileferry/actions/runs/26318164223)
+  on 2026-05-23 for Ubuntu Linux x86_64 GNU, Ubuntu Linux ARM64 GNU,
   macOS Intel, macOS ARM64, and Windows x86_64 MSVC hosted runners.
-- The manual release-artifacts workflow passed in GitHub run
-  [26315320434](https://github.com/dunamismax/fileferry/actions/runs/26315320434)
-  on 2026-05-22 for x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS,
+- The manual release-artifacts workflow passed with signing enabled in GitHub
+  run
+  [26318709139](https://github.com/dunamismax/fileferry/actions/runs/26318709139)
+  on 2026-05-23 for x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS,
   ARM64 macOS, and x86_64 Windows MSVC native hosted targets.
 - Each release-artifacts job completed formatting, clippy, tests, packaging,
-  archive smoke, and artifact upload steps.
+  archive smoke, artifact-directory verification, and artifact upload steps.
 - The uploaded per-target artifact directories were observed as unexpired and
   tied to the same head SHA. Each contained a target archive, `SHA256SUMS`,
   `SHA256SUMS.sigstore.json`, a CycloneDX `*.cdx.json` SBOM, a release
   manifest, an archive-smoke JSON file, `install.sh`, and `install.ps1`.
+- The uploaded artifacts were downloaded under
+  `target/release-candidate-evidence-26318709139/` and locally re-verified on
+  2026-05-23 with `cargo run -p xtask -- verify-release-artifacts --dir
+  <artifact-dir> --target <target> --expect-signature` for all five intended
+  targets.
 
 This evidence is tied to that exact commit and those workflow runs. It is not a
 published v1 release, not a support claim, and not a substitute for per-target
 platform metadata tests or final release notes.
 
 The release-artifacts run also emitted GitHub workflow annotations warning that
-`actions/upload-artifact@v4` was still using Node.js 20. Verify the workflow
-again, and update the action if needed, before relying on later release
-candidates.
+`actions/upload-artifact@v4` was still using Node.js 20. The Windows job also
+reported that `windows-latest` requests are being redirected to
+`windows-2025-vs2026` by June 15, 2026. Resolve or re-verify both workflow
+annotations before relying on later release candidates.
 
 ## Preconditions
 
@@ -263,3 +270,29 @@ Release notes must be written for users and operators. They should include:
 - Verification evidence summary.
 
 Release notes must not include AI attribution or unsupported platform claims.
+
+### Draft Candidate Notes
+
+Draft notes for commit `29e59cd6fe6ba2c355694c735acda3788d9fcb2f`:
+
+- FileFerry remains pre-v1. These notes describe a release candidate only;
+  no v1 tag or published release exists yet.
+- This candidate exercises the current encrypted local and S3-compatible
+  repository paths, restore drills, retention/prune flows, key-management
+  surface, JSON/JSONL contracts, secret-redaction canaries, installer scripts,
+  and release artifact tooling already tracked in `BUILD.md`.
+- Repository format v0 is frozen for the currently documented object families
+  and fixture-covered JSON shapes. Future format changes still require an
+  explicit version or documented feature gate with fixtures.
+- Signed candidate artifacts were produced by GitHub run `26318709139` for
+  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+  `x86_64-apple-darwin`, `aarch64-apple-darwin`, and
+  `x86_64-pc-windows-msvc`. Each target artifact directory contains an archive,
+  `SHA256SUMS`, `SHA256SUMS.sigstore.json`, CycloneDX SBOM, release manifest,
+  archive-smoke JSON, `install.sh`, and `install.ps1`.
+- Normal CI for the same commit passed in GitHub run `26318164223` across the
+  hosted Linux x86_64 GNU, Linux ARM64 GNU, macOS Intel, macOS ARM64, and
+  Windows x86_64 MSVC matrix.
+- The candidate is not a support claim. Platform support remains blocked on
+  final support wording, platform metadata evidence, publication decisions, and
+  resolving or re-verifying the current workflow annotations.
