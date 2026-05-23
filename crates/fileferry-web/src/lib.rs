@@ -9,23 +9,20 @@ use leptos::prelude::*;
 const SITE_CSS: &str = include_str!("site.css");
 const THEME_JS: &str = include_str!("theme.js");
 
-// Pre-rendered, syntax-highlighted terminal HTML. Kept as a raw string and
-// injected via `inner_html` so the Leptos `view!` macro never has to parse
-// embedded JSON literals or interleaved spans.
+// Pre-rendered terminal HTML is injected with `inner_html` so the Leptos
+// `view!` macro does not need to parse nested spans and JSON-like literals.
 const TERMINAL_HTML: &str = r#"<span class="prompt">$ </span><span class="cmd">ferry</span> <span class="arg">init</span> <span class="arg">s3://company-backups/laptops</span>
 <span class="out">repository initialized &middot; format v0 &middot; encrypted</span>
 
 <span class="prompt">$ </span><span class="cmd">ferry</span> <span class="arg">backup</span> <span class="arg">~/Documents</span> <span class="flag">--tag</span> <span class="arg">laptop</span> <span class="flag">--jsonl</span>
 <span class="json-key">{</span><span class="json-str">&quot;event&quot;:&quot;backup.started&quot;</span><span class="json-key">,...}</span>
 <span class="json-key">{</span><span class="json-str">&quot;event&quot;:&quot;backup.finished&quot;</span><span class="json-key">,...}</span>
-<span class="comment"># stdout stays JSONL &middot; progress on stderr</span>
+<span class="comment"># stdout stays JSONL &middot; progress stays on stderr</span>
 
 <span class="prompt">$ </span><span class="cmd">ferry</span> <span class="arg">restore</span> <span class="arg">latest</span> <span class="arg">~/restore-test</span>
-<span class="out">restored &middot; 14 files &middot; 0 metadata warnings</span>"#;
+<span class="out">restored &middot; verified bytes &middot; metadata warnings reported</span>"#;
 
-// Inline early-execution script. Reads the stored or system theme and applies
-// it to the documentElement before paint, so the first frame is never the
-// wrong theme.
+// Applies the saved or system theme before the first paint.
 const THEME_INIT_JS: &str = r#"(function(){try{var s=localStorage.getItem('fileferry-theme');var t=s||(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();"#;
 
 pub fn app() -> Router {
@@ -80,9 +77,9 @@ fn Homepage() -> impl IntoView {
                 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"/>
                 <meta
                     name="description"
-                    content="FileFerry is a planned all-Rust encrypted backup CLI for self-hosted, scriptable backups."
+                    content="FileFerry is an all-Rust encrypted backup CLI. Version 1.0.0-rc.1 is a release candidate, not final v1.0.0."
                 />
-                <title>"FileFerry — encrypted backups, same everywhere"</title>
+                <title>"FileFerry - encrypted backup CLI"</title>
                 <link rel="stylesheet" href="/assets/site.css"/>
                 <script inner_html=THEME_INIT_JS></script>
             </head>
@@ -91,14 +88,14 @@ fn Homepage() -> impl IntoView {
 
                 <header class="site-header">
                     <a class="brand" href="/" aria-label="FileFerry home">
-                        <span class="brand-mark" aria-hidden="true">"⏵"</span>
+                        <span class="brand-mark" aria-hidden="true">"F"</span>
                         <span>"FileFerry"</span>
                     </a>
                     <nav class="site-nav" aria-label="Primary navigation">
                         <a href="#status">"Status"</a>
+                        <a href="#install">"Install"</a>
                         <a href="#contract">"Contract"</a>
                         <a href="#security">"Security"</a>
-                        <a href="#roadmap">"Roadmap"</a>
                     </nav>
                     <div class="header-spacer"></div>
                     <div class="header-actions">
@@ -133,23 +130,25 @@ fn Homepage() -> impl IntoView {
                     <section class="hero" aria-labelledby="hero-title">
                         <div class="hero-grid">
                             <div class="hero-copy">
-                                <span class="eyebrow">"pre-v1 · in active development"</span>
+                                <span class="eyebrow">"1.0.0-rc.1 release candidate"</span>
                                 <h1 id="hero-title">
                                     "Encrypted backups."
                                     <br/>
                                     <span class="accent">"Same everywhere."</span>
                                 </h1>
                                 <p class="lead">
-                                    "FileFerry is an all-Rust backup CLI for operators, IT directors, and developers who want client-side encryption, predictable scripting, and boring restores on every machine they manage."
+                                    "FileFerry is an all-Rust CLI for encrypted, compressed, deduplicated backups to local and S3-compatible repositories. It is built for shells, restore drills, and self-hosted operations."
                                 </p>
                                 <div class="hero-actions">
-                                    <a class="button primary" href="https://github.com/dunamismax/fileferry">
+                                    <a class="button primary" href="https://github.com/dunamismax/fileferry/releases/tag/v1.0.0-rc.1">
                                         <svg viewBox="0 0 16 16" aria-hidden="true">
-                                            <path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+                                            <path d="M7.25 1.75a.75.75 0 0 1 1.5 0v7.69l2.22-2.22a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 0 1 1.06-1.06l2.22 2.22V1.75zM2 13.75a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75z"/>
                                         </svg>
-                                        "View on GitHub"
+                                        "Download RC"
                                     </a>
-                                    <a class="button secondary" href="#status">"Read project status"</a>
+                                    <a class="button secondary" href="https://github.com/dunamismax/fileferry">
+                                        "View source"
+                                    </a>
                                 </div>
                                 <dl class="hero-facts" aria-label="Product facts">
                                     <div>
@@ -172,7 +171,7 @@ fn Homepage() -> impl IntoView {
                                     <span class="dot red"></span>
                                     <span class="dot amber"></span>
                                     <span class="dot green"></span>
-                                    <span class="title">"~ · ferry"</span>
+                                    <span class="title">"~ / ferry"</span>
                                 </div>
                                 <pre><code inner_html=TERMINAL_HTML></code></pre>
                             </div>
@@ -182,42 +181,69 @@ fn Homepage() -> impl IntoView {
                     <section class="section" id="status" aria-labelledby="status-title">
                         <div class="section-inner">
                             <div class="section-heading">
-                                <h2 id="status-title">"Pre-v1 foundation, honest by default."</h2>
+                                <h2 id="status-title">"Release candidate, not final v1.0.0."</h2>
                                 <p>
-                                    "The Rust workspace, CLI shell, config and output contracts, initial crypto primitives, storage abstractions, and core backup, restore, and check primitives exist. The repository format is not yet frozen."
+                                    "The 1.0.0-rc.1 build exercises FileFerry's current encrypted backup, restore, check, retention, key-management, machine-output, and release-artifact paths. Platform wording is limited to observed CI, tests, artifacts, and smoke evidence."
                                 </p>
                             </div>
                             <div class="status-grid">
                                 <article class="status-card">
-                                    <span class="badge done">"Implemented"</span>
-                                    <h3>"CLI foundation"</h3>
-                                    <p>"version, completions, config precedence, profiles, JSON, JSONL, redacted diagnostics, golden tests."</p>
+                                    <span class="badge done">"Included"</span>
+                                    <h3>"Encrypted snapshots"</h3>
+                                    <p>"Client-side encrypted, compressed, deduplicated snapshots for local and S3-compatible repositories."</p>
                                 </article>
                                 <article class="status-card">
-                                    <span class="badge done">"Implemented"</span>
-                                    <h3>"Crypto groundwork"</h3>
-                                    <p>"master keys, passphrase key slots, HKDF subkeys, XChaCha20-Poly1305 authenticated envelopes."</p>
+                                    <span class="badge done">"Included"</span>
+                                    <h3>"Restore drills"</h3>
+                                    <p>"Restore by latest, id, tag, and path with destination safety checks and byte verification."</p>
                                 </article>
                                 <article class="status-card">
-                                    <span class="badge done">"Implemented"</span>
-                                    <h3>"Storage groundwork"</h3>
-                                    <p>"object-store trait, capability model, local backend, S3-compatible backend, retry/timeout policy."</p>
+                                    <span class="badge done">"Included"</span>
+                                    <h3>"Operator output"</h3>
+                                    <p>"Human output, one-document JSON, newline-delimited JSON events, and documented exit-code families."</p>
                                 </article>
                                 <article class="status-card">
-                                    <span class="badge done">"Implemented"</span>
-                                    <h3>"Backup pipeline"</h3>
-                                    <p>"source walking, FastCDC chunking, zstd compression, encrypted chunks, indexes, and manifests."</p>
+                                    <span class="badge done">"Included"</span>
+                                    <h3>"Release evidence"</h3>
+                                    <p>"Signed checksums, SBOMs, cargo-auditable metadata, manifests, installer scripts, and archive-smoke JSON."</p>
                                 </article>
                                 <article class="status-card">
-                                    <span class="badge done">"Implemented"</span>
-                                    <h3>"Restore + check"</h3>
-                                    <p>"snapshot selection, path-scoped restore, destination safety, dry-run, deterministic check subsets."</p>
+                                    <span class="badge pending">"Limited"</span>
+                                    <h3>"Metadata restore"</h3>
+                                    <p>"Regular-file and directory modified times plus Unix mode bits are applied where representable; other metadata is reported as warnings."</p>
                                 </article>
                                 <article class="status-card">
-                                    <span class="badge pending">"Not done yet"</span>
-                                    <h3>"Retention + release"</h3>
-                                    <p>"forget, prune, broader metadata application, signed cross-platform release artifacts and SBOMs."</p>
+                                    <span class="badge pending">"Not included"</span>
+                                    <h3>"Non-CLI product modes"</h3>
+                                    <p>"No GUI, TUI, daemon, scheduler, server, SaaS dashboard, mobile app, FUSE mount, or format-compatibility mode."</p>
                                 </article>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="section" id="install" aria-labelledby="install-title">
+                        <div class="section-inner deploy-section">
+                            <div class="deploy-copy">
+                                <span class="eyebrow">"signed RC artifacts"</span>
+                                <h2 id="install-title">"Download the target archive and verify the attached evidence."</h2>
+                                <p>
+                                    "The release candidate attaches archives for Linux x86_64 GNU, Linux ARM64 GNU, macOS x86_64, macOS ARM64, and Windows x86_64 MSVC. Each target includes checksums, a Sigstore bundle, SBOM, manifest, archive-smoke JSON, and installer scripts."
+                                </p>
+                            </div>
+                            <div class="deploy-card">
+                                <div class="deploy-card-header">"1.0.0-rc.1 artifact targets"</div>
+                                <dl class="deploy-rows">
+                                    <dt>"Linux"</dt>
+                                    <dd>"x86_64-unknown-linux-gnu"</dd>
+                                    <dt>"Linux"</dt>
+                                    <dd>"aarch64-unknown-linux-gnu"</dd>
+                                    <dt>"macOS"</dt>
+                                    <dd>"x86_64-apple-darwin"</dd>
+                                    <dt>"macOS"</dt>
+                                    <dd>"aarch64-apple-darwin"</dd>
+                                    <dt>"Windows"</dt>
+                                    <dd>"x86_64-pc-windows-msvc"</dd>
+                                </dl>
                             </div>
                         </div>
                     </section>
@@ -227,7 +253,7 @@ fn Homepage() -> impl IntoView {
                             <div class="section-heading">
                                 <h2 id="contract-title">"Built for shells, logs, runbooks, and restore drills."</h2>
                                 <p>
-                                    "FileFerry is automation-first. Human progress is optional; stdout is always machine output and exit codes are part of the API."
+                                    "FileFerry is automation-first. Human progress is optional; stdout is machine output and exit codes are treated as an API surface."
                                 </p>
                             </div>
                             <div class="contract-grid">
@@ -238,18 +264,18 @@ fn Homepage() -> impl IntoView {
                                 </article>
                                 <article class="contract-card">
                                     <span class="num">"02"</span>
-                                    <h3>"JSON and JSONL surfaces"</h3>
+                                    <h3>"JSON and JSONL"</h3>
                                     <p>"Single-document output for state. Newline-delimited events for long operations."</p>
                                 </article>
                                 <article class="contract-card">
                                     <span class="num">"03"</span>
                                     <h3>"Dry-run destructive work"</h3>
-                                    <p>"Forget, prune, and restore-over-existing have explicit, planned dry-run paths."</p>
+                                    <p>"Forget and prune expose explicit dry-run behavior before object deletion."</p>
                                 </article>
                                 <article class="contract-card">
                                     <span class="num">"04"</span>
-                                    <h3>"Exit codes are part of the API"</h3>
-                                    <p>"Failure families are documented and treated as automation contracts before v1."</p>
+                                    <h3>"Restore honesty"</h3>
+                                    <p>"Metadata that cannot be applied is reported instead of silently claimed restored."</p>
                                 </article>
                             </div>
                         </div>
@@ -260,7 +286,7 @@ fn Homepage() -> impl IntoView {
                             <div class="section-heading">
                                 <h2 id="security-title">"Encrypted before anything leaves the machine."</h2>
                                 <p>
-                                    "FileFerry is not trying to become a dashboard, daemon, scheduler, server, or compatibility shim. The product center is encrypted backup and reliable restore."
+                                    "FileFerry uses client-side encryption and authenticated repository objects. The release candidate has tests for wrong-key, wrong-password, tamper, corruption, and redaction paths, but it is not an external audit claim."
                                 </p>
                             </div>
                             <div class="feature-grid">
@@ -268,97 +294,23 @@ fn Homepage() -> impl IntoView {
                                     <span class="icon" aria-hidden="true">
                                         <svg viewBox="0 0 16 16"><path d="M4 4a4 4 0 1 1 8 0v2h.25c.97 0 1.75.78 1.75 1.75v5.5c0 .97-.78 1.75-1.75 1.75h-8.5A1.75 1.75 0 0 1 2 13.25v-5.5C2 6.78 2.78 6 3.75 6H4V4zm6.5 2V4a2.5 2.5 0 0 0-5 0v2h5zM3.5 7.75v5.5c0 .14.11.25.25.25h8.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25z"/></svg>
                                     </span>
-                                    <h3>"Client-side encryption"</h3>
-                                    <p>"Contents, names, directory shape, manifests, indexes, and sensitive config are designed to stay encrypted."</p>
+                                    <h3>"Authenticated encryption"</h3>
+                                    <p>"Contents, names, directory shape, manifests, indexes, and sensitive config are stored in authenticated encrypted objects."</p>
                                 </article>
                                 <article class="feature-card">
                                     <span class="icon" aria-hidden="true">
                                         <svg viewBox="0 0 16 16"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.78 6.22a.75.75 0 0 0-1.06-1.06L6.75 9.13 5.28 7.66a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5z"/></svg>
                                     </span>
-                                    <h3>"Restore first"</h3>
-                                    <p>"Every backup feature is judged by whether it makes restore safer, clearer, and easier to verify."</p>
-                                </article>
-                                <article class="feature-card">
-                                    <span class="icon" aria-hidden="true">
-                                        <svg viewBox="0 0 16 16"><path d="M3.5 1.75a.25.25 0 0 1 .25-.25h6.5L13 4.25v9.5a.25.25 0 0 1-.25.25h-9a.25.25 0 0 1-.25-.25V1.75zM3.75 0A1.75 1.75 0 0 0 2 1.75v12.5C2 15.216 2.784 16 3.75 16h9A1.75 1.75 0 0 0 14.5 14.25V4a.75.75 0 0 0-.22-.53L11.03.22A.75.75 0 0 0 10.5 0h-6.75z"/></svg>
-                                    </span>
-                                    <h3>"Original repository format"</h3>
-                                    <p>"FileFerry does not read or write restic, rustic, Borg, Kopia, or rclone-native repositories."</p>
+                                    <h3>"Original format"</h3>
+                                    <p>"FileFerry does not read or write restic, rustic, Borg, Kopia, or rclone-native repository formats."</p>
                                 </article>
                                 <article class="feature-card">
                                     <span class="icon" aria-hidden="true">
                                         <svg viewBox="0 0 16 16"><path d="M1.5 8a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0zM8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm.75 4.75a.75.75 0 0 0-1.5 0v3.5c0 .2.08.39.22.53l2 2a.75.75 0 1 0 1.06-1.06L8.75 7.94V4.75z"/></svg>
                                     </span>
-                                    <h3>"Append-friendly objects"</h3>
+                                    <h3>"Append-friendly storage"</h3>
                                     <p>"Immutable objects, retry-safe writes, explicit commit markers, and no required rename assumptions."</p>
                                 </article>
-                                <article class="feature-card">
-                                    <span class="icon" aria-hidden="true">
-                                        <svg viewBox="0 0 16 16"><path d="M11.28 6.78a.75.75 0 0 0-1.06-1.06L7.25 8.69 5.78 7.22a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l3.5-3.5zM16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-1.5 0a6.5 6.5 0 1 0-13 0 6.5 6.5 0 0 0 13 0z"/></svg>
-                                    </span>
-                                    <h3>"Evidence before claims"</h3>
-                                    <p>"Platform support waits for CI, tests, release artifacts, and observed behavior — not aspirational ticks."</p>
-                                </article>
-                                <article class="feature-card">
-                                    <span class="icon" aria-hidden="true">
-                                        <svg viewBox="0 0 16 16"><path d="M7.47 1.22a.75.75 0 0 1 1.06 0l3.25 3.25a.75.75 0 0 1-1.06 1.06L8.75 3.56V11a.75.75 0 0 1-1.5 0V3.56L5.28 5.53a.75.75 0 0 1-1.06-1.06l3.25-3.25zM2 13.75a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75z"/></svg>
-                                    </span>
-                                    <h3>"Self-hostable"</h3>
-                                    <p>"One Rust binary, one config format, one encrypted repository — owned by the person running it."</p>
-                                </article>
-                            </div>
-                        </div>
-                    </section>
-
-                    <section class="section" id="roadmap" aria-labelledby="roadmap-title">
-                        <div class="section-inner">
-                            <div class="section-heading">
-                                <h2 id="roadmap-title">"What's next."</h2>
-                                <p>
-                                    "The current foundation is useful only if it leads to boring recovery. The public roadmap keeps that pressure visible."
-                                </p>
-                            </div>
-                            <div class="roadmap-grid">
-                                <article class="roadmap-item now">
-                                    <div class="phase">"Now"</div>
-                                    <h3>"Retention + maintenance"</h3>
-                                    <p>"forget, prune two-phase safety, recoverable mark/sweep, retention policy plumbing into the CLI."</p>
-                                </article>
-                                <article class="roadmap-item next">
-                                    <div class="phase">"Next"</div>
-                                    <h3>"Broader metadata + S3 init"</h3>
-                                    <p>"platform metadata application, xattrs, mode/ownership restore, S3-compatible repository bootstrap from the CLI."</p>
-                                </article>
-                                <article class="roadmap-item later">
-                                    <div class="phase">"Then"</div>
-                                    <h3>"v1 release"</h3>
-                                    <p>"frozen format v0, cross-platform CI matrix, signed release artifacts, checksums, SBOMs, completions."</p>
-                                </article>
-                            </div>
-                        </div>
-                    </section>
-
-                    <section class="section" aria-labelledby="release-title">
-                        <div class="section-inner deploy-section">
-                            <div class="deploy-copy">
-                                <span class="eyebrow">"self-hosting"</span>
-                                <h2 id="release-title">"This site is a separate marketing binary."</h2>
-                                <p>
-                                    "The homepage is served by an Axum binary rendering Leptos views on the server. No database, no client-side app bundle, and a simple health endpoint for reverse proxies."
-                                </p>
-                            </div>
-                            <div class="deploy-card">
-                                <div class="deploy-card-header">"fileferry-web · run anywhere"</div>
-                                <dl class="deploy-rows">
-                                    <dt>"Binary"</dt>
-                                    <dd>"fileferry-web"</dd>
-                                    <dt>"Default bind"</dt>
-                                    <dd>"0.0.0.0:8080"</dd>
-                                    <dt>"Override"</dt>
-                                    <dd>"FILEFERRY_WEB_ADDR=127.0.0.1:8080"</dd>
-                                    <dt>"Health"</dt>
-                                    <dd>"GET /healthz → 200 ok"</dd>
-                                </dl>
                             </div>
                         </div>
                     </section>
@@ -366,10 +318,10 @@ fn Homepage() -> impl IntoView {
 
                 <footer>
                     <span class="footer-brand">"FileFerry"</span>
-                    <span>"MIT licensed · built in Rust"</span>
+                    <span>"MIT licensed · built in Rust · CLI-only"</span>
                     <span class="footer-links">
                         <a href="https://github.com/dunamismax/fileferry">"GitHub"</a>
-                        <a href="https://fileferry.app/">"fileferry.app"</a>
+                        <a href="https://github.com/dunamismax/fileferry/releases/tag/v1.0.0-rc.1">"1.0.0-rc.1"</a>
                     </span>
                 </footer>
 
@@ -386,16 +338,17 @@ mod tests {
     use tower::ServiceExt;
 
     #[test]
-    fn homepage_renders_honest_project_status() {
+    fn homepage_renders_release_candidate_status() {
         let html = render_homepage();
 
         assert!(html.contains("Encrypted backups."));
-        assert!(html.contains("Pre-v1 foundation"));
-        assert!(html.contains("fileferry-web"));
+        assert!(html.contains("1.0.0-rc.1 release candidate"));
+        assert!(html.contains("Release candidate, not final v1.0.0."));
+        assert!(html.contains("x86_64-unknown-linux-gnu"));
+        assert!(html.contains("CLI-only"));
         assert!(html.contains("/assets/site.css"));
         assert!(html.contains("/assets/theme.js"));
         assert!(html.contains("data-theme-toggle"));
-        assert!(html.contains("Toggle color theme"));
     }
 
     #[tokio::test]

@@ -2,81 +2,113 @@
 
 Encrypted backups. Same everywhere.
 
-FileFerry is a planned all-Rust backup CLI for operators, IT directors,
-developers, and teams that need reliable encrypted backups without platform
-drama. The command will be `ferry`.
+FileFerry is an all-Rust backup CLI. The primary command is `ferry`.
+It creates encrypted, compressed, deduplicated snapshots and restores them from
+local filesystem or S3-compatible object storage repositories.
 
-FileFerry is in early implementation. The active build plan lives
-in [`BUILD.md`](BUILD.md). This README describes the target product and the
-contracts the implementation must satisfy before release.
+FileFerry is CLI-only by design. It is not a GUI, TUI, daemon, scheduler,
+server, SaaS dashboard, FUSE mount, mobile app, or compatibility layer for
+another backup format.
 
-Homepage: [fileferry.app](https://fileferry.app/).
+Homepage: [fileferry.app](https://fileferry.app/)
 
-The public homepage is implemented as a separate lightweight Rust binary,
-`fileferry-web`, using Axum and server-rendered Leptos views. It is marketing
-infrastructure for `fileferry.app`, not a FileFerry backup server mode.
+Repository: [github.com/dunamismax/fileferry](https://github.com/dunamismax/fileferry)
 
-## Product Promise
+## Status
 
-FileFerry gives operators a secure, scriptable backup tool that behaves
-predictably on every machine they manage.
+`1.0.0-rc.1` is a release candidate, not final v1.0.0.
 
-It is for people who want:
+The current release candidate includes:
 
-- One binary.
-- One config format.
-- One scripting contract.
-- One encrypted repository format.
-- Boring restores.
-- First-class Windows, macOS, and Linux behavior.
+- Encrypted local and S3-compatible repository initialization.
+- Encrypted, compressed, deduplicated backup snapshots.
+- Restore by latest snapshot, snapshot id, tag, and path.
+- `snapshots`, `ls`, `check`, `forget`, `prune`, and key-management commands.
+- JSON and JSONL machine output for the implemented command surface.
+- Config profiles and environment-variable precedence.
+- Format v0 repository compatibility fixtures for the documented current
+  object families.
+- Signed release-candidate artifacts, checksums, SBOMs, cargo-auditable
+  metadata, installer scripts, and archive-smoke evidence for the intended RC
+  targets listed below.
 
-It is not a GUI, SaaS dashboard, agent service, FUSE mount, scheduler, server,
-mobile app, or compatibility layer for an existing backup repository format.
+Release-candidate artifacts are intended for:
 
-## Target Command Shape
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+- `x86_64-pc-windows-msvc`
+
+These targets have CI and release-artifact evidence for the RC. Do not read
+that as a broad promise that every filesystem feature, metadata field, storage
+provider, or operating-system edge case is fully supported. Known limits are
+documented below and in [BUILD.md](BUILD.md).
+
+## Install
+
+Download the archive for your target from the
+[FileFerry 1.0.0-rc.1 GitHub release](https://github.com/dunamismax/fileferry/releases/tag/v1.0.0-rc.1).
+
+Each target artifact directory contains:
+
+- `fileferry-1.0.0-rc.1-<target>.tar.gz`
+- `SHA256SUMS`
+- `SHA256SUMS.sigstore.json`
+- `fileferry-1.0.0-rc.1-<target>.manifest.json`
+- `fileferry-1.0.0-rc.1-<target>.cdx.json`
+- `fileferry-<target>.archive-smoke.json`
+- `install.sh`
+- `install.ps1`
+
+Unix shell installer:
 
 ```sh
-ferry init s3://company-backups/laptops
+sh ./install.sh \
+  --archive ./fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz \
+  --install-dir "$HOME/.local/bin"
+```
+
+PowerShell installer:
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File ./install.ps1 `
+  -Archive ./fileferry-1.0.0-rc.1-x86_64-pc-windows-msvc.tar.gz `
+  -InstallDir "$HOME/bin"
+```
+
+Both installers verify the archive against `SHA256SUMS` when it is present
+beside the archive. They also support explicit checksum input and dry runs.
+
+Manual install:
+
+```sh
+tar -xzf fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu/ferry "$HOME/.local/bin/ferry"
+ferry version
+```
+
+## Basic Usage
+
+Set a repository URL and passphrase through flags, config, or environment. The
+examples below use environment variables for clarity:
+
+```sh
+export FILEFERRY_REPOSITORY="$HOME/backups/fileferry-repo"
+export FILEFERRY_PASSWORD="change-this-passphrase"
+
+ferry init
 ferry backup ~/Documents --tag laptop --jsonl
 ferry snapshots --json
 ferry restore latest ~/restore-test
 ferry check --read-data-subset 5%
-ferry forget --keep-daily 14 --keep-weekly 8 --prune
+ferry forget --keep-daily 14 --keep-weekly 8 --dry-run
+ferry prune --dry-run
 ```
 
-Core command surface under design:
-
-```text
-ferry init
-ferry backup
-ferry restore
-ferry snapshots
-ferry ls
-ferry find
-ferry diff
-ferry check
-ferry forget
-ferry prune
-ferry key
-ferry repo
-ferry policy
-ferry doctor
-ferry completion
-ferry version
-```
-
-Global flags:
-
-```text
---repo <URL>          Repository URL
---profile <NAME>     Config profile
---config <FILE>      Config file path
---json               Emit one stable JSON document on stdout
---jsonl              Emit stable newline-delimited JSON events on stdout
---quiet              Reduce human output
---log-level <LEVEL>  Set log level
---no-progress        Disable progress UI
-```
+S3-compatible repositories use S3-style repository URLs and the documented S3
+environment/config path. See [docs/storage.md](docs/storage.md) and
+[docs/operations.md](docs/operations.md).
 
 ## Scripting Contract
 
@@ -84,413 +116,81 @@ FileFerry is automation-first:
 
 - Stdout is data.
 - Stderr is logs, progress, and diagnostics.
-- `--json` emits one JSON document.
-- `--jsonl` emits one JSON event per line.
-- Human progress is optional and never appears in JSON or JSONL output.
-- Exit codes are documented and stable before v1.
+- `--json` emits one JSON document on stdout.
+- `--jsonl` emits newline-delimited JSON events on stdout.
+- Progress bars and spinners do not appear in JSON or JSONL output.
 - Destructive commands support `--dry-run`.
-- Long operations can be interrupted safely.
-
-Planned exit code families:
-
-```text
-0   success
-1   generic failure
-2   invalid command, arguments, config, or environment
-3   repository not found, uninitialized, locked, or incompatible
-4   authentication, password, key, or permission failure
-5   storage, network, or filesystem I/O failure
-6   integrity, corruption, tampering, or verification failure
-7   requested snapshot, path, tag, or policy was not found
-8   operation was interrupted after reaching a safe state
-9   unsupported platform, filesystem feature, or backend capability
-10  partial success; inspect JSON output for item-level failures
-```
-
-These numbers are a target contract. Once marked stable for v1, they should
-not change without a compatibility plan.
+- Exit-code families are documented in
+  [docs/cli-contract.md](docs/cli-contract.md).
 
 ## Security Model
 
-FileFerry repositories are encrypted client-side before anything leaves the
-machine.
+FileFerry encrypts repository data client-side before writing it to local or
+object storage.
 
-The repository format must protect:
+The current design protects file contents, file names, directory structure,
+snapshot metadata, indexes, and sensitive repository config inside
+authenticated encrypted objects. Non-sensitive bootstrap fields, such as
+format version and KDF parameters, may be plaintext and are documented in
+[docs/security.md](docs/security.md) and
+[docs/repository-format.md](docs/repository-format.md).
 
-- File contents.
-- File names.
-- Directory structure.
-- Snapshot metadata.
-- Indexes.
-- Policy/config objects that reveal sensitive backup shape.
+Current primitives and behavior include Argon2id passphrase derivation, a
+random repository master key, HKDF-derived subkeys, XChaCha20-Poly1305
+authenticated encryption, wrong-key and tamper failure paths, secret-redaction
+tests, and encrypted recovery export.
 
-The target model is envelope encryption:
+This is release-candidate security engineering, not an external audit claim.
 
-- Each repository has a random master key.
-- Passphrases or key files unlock that master key.
-- Data, metadata, and indexes use derived subkeys.
-- Every encrypted object is authenticated.
-- Read, check, and restore detect corruption and tampering.
+## Known Limits
 
-Security-facing commands:
-
-```sh
-ferry key add
-ferry key remove
-ferry key rotate
-ferry key export-recovery
-ferry repo verify
-ferry repo inspect --json
-```
-
-Only non-sensitive bootstrap fields, such as format version and key derivation
-parameters, may be plaintext. Any plaintext repository field must be justified
-in the security design before the format freezes.
-
-## Repository Model
-
-FileFerry uses an original repository format. It does not read or write restic,
-rustic, Borg, Kopia, or rclone-native repository formats.
-
-Core object groups:
-
-- Encrypted chunks.
-- Encrypted snapshot manifests.
-- Encrypted indexes.
-- Encrypted policy/config object.
-- Temporary upload state.
-- Prune marks and maintenance metadata.
-
-Design goals:
-
-- Append-friendly writes.
-- Safe interruption.
-- No required rename operations.
-- Safe concurrent backups.
-- Two-phase prune.
-- Deterministic integrity checks.
-- Clear future migrations.
-
-Object storage is not treated like a filesystem. Repository operations must
-use immutable objects, idempotent writes, explicit commit markers, retry-safe
-upload state, and backend capability checks.
+- `1.0.0-rc.1` is not final v1.0.0.
+- Restore applies the implemented metadata subset only. It currently restores
+  regular-file and directory modified timestamps, restores Unix mode bits for
+  regular files and directories where representable, and verifies Unix
+  ownership without calling `chown`.
+- xattr values, ACL contents, file flags, resource forks, Windows attributes,
+  sparse extent maps, symlink metadata, and creation/birth timestamps are not
+  restored by this version.
+- Key rotation rotates unlock access by adding/removing key slots. It does not
+  rewrite repository data with a new master key.
+- Recovery export exists; recovery import and full repository rekey are not
+  implemented.
+- S3-compatible behavior is tested against the current abstraction and a
+  private Backblaze B2 development bucket. It is not a blanket claim for every
+  S3-compatible provider.
 
 ## Architecture
 
-Target Rust workspace:
-
 ```text
 crates/
-  fileferry-cli/       clap commands, output formats, config loading
-  fileferry-core/      snapshots, repository format, backup/restore engine
-  fileferry-storage/   local and object storage abstraction
-  fileferry-crypto/    key derivation, encryption, authenticated metadata
-  fileferry-platform/  filesystem metadata across supported platforms
-  fileferry-policy/    retention, pruning, lifecycle rules
-  fileferry-testkit/   fake stores, corruption fixtures, platform helpers
-  fileferry-web/       Axum + Leptos public homepage for fileferry.app
-xtask/                release, fixtures, and repo automation when useful
-docs/                 durable architecture, security, operations, release docs
+  fileferry-cli/       clap commands, config, human output, JSON/JSONL
+  fileferry-core/      snapshots, manifests, repository format, engines
+  fileferry-storage/   local and S3-compatible object storage
+  fileferry-crypto/    KDF, envelope encryption, authenticated objects
+  fileferry-platform/  filesystem paths and metadata
+  fileferry-policy/    retention and lifecycle policy
+  fileferry-testkit/   fake stores and integration-test helpers
+  fileferry-web/       public fileferry.app homepage
+xtask/                 release packaging and artifact verification
+docs/                  security, format, CLI, storage, operations, release
 ```
 
-Expected Rust stack:
-
-- `clap` for command parsing.
-- `tokio` for async storage and network work.
-- `serde`, `toml`, and `serde_json` for config and machine output.
-- `tracing` for logs and instrumentation.
-- `miette` or `color-eyre` for human diagnostics.
-- `object_store` first for S3-compatible, cloud, and local-style object
-  backends.
-- Optional OpenDAL adapter later for broader backend support.
-- `fastcdc` for content-defined chunking.
-- `blake3` for fast content IDs and checksums.
-- `zstd` for compression.
-- Argon2id for passphrase key derivation.
-- `zeroize` and `secrecy` for secret handling.
-
-The homepage stack is intentionally separate from the CLI/runtime stack:
-`fileferry-web` uses `axum`, `tokio`, and Leptos SSR to serve static marketing
-content, `/assets/site.css`, and `/healthz`.
-
-## Current Install Path
-
-FileFerry does not have published v1 release artifacts yet. The current tested
-install path is for local release archives produced by `xtask release-package`.
-It is release-candidate plumbing, not a platform support claim.
-
-The `1.0.0-rc.1` release-candidate artifact scope is x86_64 Linux GNU, ARM64
-Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC. Current signed
-candidate workflow evidence exists for commit
-`c8c82913eb923bed6b070f0961e56815132bb5ba`: CI passed in GitHub run
-`26319699007`, and release artifacts passed with signing enabled in GitHub run
-`26319862678`. The downloaded artifacts were locally re-verified under
-`target/release-candidate-evidence-26319862678/`. This is not a published
-release and does not make any platform supported.
-
-Build a local host archive:
-
-```sh
-cargo run -p xtask -- release-package --out-dir target/release-artifacts --auditable --sbom
-```
-
-Install from that archive with the Unix shell installer:
-
-```sh
-version="1.0.0-rc.1"
-host="$(rustc -vV | awk '/host:/ {print $2}')"
-sh target/release-artifacts/install.sh \
-  --archive "target/release-artifacts/fileferry-${version}-${host}.tar.gz" \
-  --install-dir "$HOME/.local/bin"
-```
-
-Install from the same archive with the PowerShell installer:
-
-```powershell
-$version = "1.0.0-rc.1"
-$hostTriple = rustc -vV | Select-String '^host: ' | ForEach-Object { $_.Line.Split(' ')[1] }
-pwsh -NoLogo -NoProfile -NonInteractive -File target/release-artifacts/install.ps1 `
-  -Archive "target/release-artifacts/fileferry-${version}-$hostTriple.tar.gz" `
-  -InstallDir "$HOME/.local/bin"
-```
-
-Both installers verify the archive against `SHA256SUMS` when it is present
-beside the archive. They also accept an explicit checksum file or digest and
-support dry runs:
-
-```sh
-sh target/release-artifacts/install.sh --archive ./fileferry.tar.gz --dry-run
-pwsh -NoLogo -NoProfile -NonInteractive -File ./install.ps1 -Archive ./fileferry.tar.gz -DryRun
-```
-
-The current release-candidate smoke path extracts the archive and runs the
-packaged binary:
-
-```sh
-version="1.0.0-rc.1"
-host="$(rustc -vV | awk '/host:/ {print $2}')"
-cargo run -p xtask -- archive-smoke \
-  --archive "target/release-artifacts/fileferry-${version}-${host}.tar.gz" \
-  --target "${host}" \
-  --installers-dir target/release-artifacts \
-  --expect-auditable
-```
-
-PowerShell verification has been run on macOS with `pwsh`. That proves the
-script path works there; it does not mark Windows supported.
-
-## Public Homepage
-
-Run the current homepage locally:
-
-```sh
-cargo run -p fileferry-web
-```
-
-By default it binds `0.0.0.0:8080`. Set `FILEFERRY_WEB_ADDR` to override the
-listener, for example:
-
-```sh
-FILEFERRY_WEB_ADDR=127.0.0.1:8080 cargo run -p fileferry-web
-```
-
-Ubuntu self-hosting notes live in
-[`docs/homepage-deployment.md`](docs/homepage-deployment.md).
-
-## Config
-
-Target config example:
-
-```toml
-[repository]
-url = "s3://company-backups/fileferry/laptops"
-profile = "default"
-
-[backup]
-sources = [
-  "~/Documents",
-  "~/Projects"
-]
-exclude = [
-  "**/.git",
-  "**/node_modules",
-  "**/target",
-  "**/.DS_Store"
-]
-tags = ["laptop", "workstation"]
-
-[retention]
-keep_daily = 14
-keep_weekly = 8
-keep_monthly = 12
-
-[storage]
-concurrency = 16
-timeout = "60s"
-retry = 5
-
-[output]
-progress = "auto"
-log_level = "info"
-```
-
-Environment variables:
-
-```text
-FILEFERRY_REPOSITORY
-FILEFERRY_PASSWORD
-FILEFERRY_PASSWORD_FILE
-FILEFERRY_CONFIG
-FILEFERRY_PROFILE
-FILEFERRY_LOG
-```
-
-Secrets must be redacted from logs, diagnostics, JSON, crash output, and test
-fixtures.
-
-## Storage Backends
-
-V1 target:
-
-- Local filesystem.
-- S3-compatible object storage.
-
-Later candidates:
-
-- Azure Blob Storage.
-- Google Cloud Storage.
-- WebDAV.
-- Backblaze B2 native or S3-compatible.
-- Optional OpenDAL extra backends.
-- Optional rclone bridge.
-
-rclone must not be a core dependency. FileFerry's default identity is a
-Rust-native backup tool.
-
-## Platform Support
-
-FileFerry is cross-platform first, but support is earned by CI and releases.
-
-Target v1 release artifacts:
-
-- Windows x86_64 MSVC.
-- macOS x86_64.
-- macOS ARM64.
-- Linux x86_64 GNU.
-- Linux ARM64 GNU.
-
-No platform should be called supported unless CI builds it, tests the relevant
-behavior, and release artifacts exist.
-
-The CI workflow is configured for host build/test jobs on Ubuntu Linux x86_64
-GNU, Ubuntu Linux ARM64 GNU, macOS Intel, macOS ARM64, and Windows x86_64
-MSVC. Completed passing jobs are build/test evidence only, not support claims.
-The manual release-artifacts workflow currently covers the native hosted
-x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64
-Windows MSVC matrix as release-candidate evidence only.
-
-## V1 Scope
-
-V1 should include:
-
-- `init`, `backup`, `restore`, `snapshots`, `ls`, `check`, `forget`, and
-  `prune`.
-- Key management.
-- Local backend.
-- S3-compatible backend.
-- JSON and JSONL output.
-- Config profiles.
-- Shell completions.
-- Signed cross-platform releases with checksums and SBOMs.
-
-V1 should not include:
-
-- GUI or TUI.
-- FUSE mount.
-- Daemon mode.
-- Server mode.
-- Every storage provider.
-- restic or rustic repository compatibility.
-- Mobile apps.
-- Built-in scheduling.
+The homepage crate is marketing infrastructure for `fileferry.app`; it is not
+a FileFerry backup server mode.
 
 ## Development
 
-The repo contains the initial Rust workspace, crate boundaries, CLI shell, CI
-workflow, planning docs, tested crypto primitives, local and S3-compatible
-storage groundwork, and core backup/restore/check primitives. The CLI
-currently exposes `version`, `completion`, local and S3-compatible repository
-`init`, `backup`, `restore`, `snapshots`, `ls`, `check`, and marker-only
-`forget`; it also exposes local and S3-compatible repository `prune` as a
-two-phase delete path for objects reachable only from forgotten snapshots,
-`ferry key add` as an append-only passphrase key-slot addition command,
-`ferry key remove` as marker-based external key-slot removal,
-`ferry key rotate` as unlock rotation that adds one new passphrase key slot
-and marker-removes explicitly selected external key slots, plus
-`ferry key export-recovery --output <FILE>` as an encrypted recovery-package
-export protected by the current repository passphrase. The key-management
-commands work for initialized local and S3-compatible repositories.
-Restore currently covers directory
-entries, regular-file contents, Unix symlinks, and modified timestamps for
-restored regular files and directories from initialized local and
-S3-compatible repositories. On Unix destinations it also restores captured
-regular-file and directory permission bits where representable and verifies
-captured Unix UID/GID ownership for restored regular files and directories,
-warning when created destination ownership does not match. It does not call
-`chown`. Symlink targets are restored, but selected regular-file and directory
-creation/birth timestamps, selected symlink timestamps, and captured Unix
-symlink mode/ownership are reported as not restored. New manifests record
-reportable xattr presence/count status where the platform and filesystem
-expose xattr listing, plus ACL status, file flag status, resource fork status,
-Windows attribute status, and sparse extent status scaffolding. ACL contents,
-file flag values, resource fork values, Windows attribute values, sparse extent
-maps, and xattr names/values are not restored; special mode bits and other
-metadata application are not implemented yet.
-Non-dry-run restore preflights selected destination paths for observed
-case-insensitive path collisions and rejects Windows reserved-name segments on
-Windows destinations before writes; this is not a broader platform-support
-claim.
-Check failures
-in JSON and JSONL modes now
-emit machine-readable failure envelopes with stable codes and object-key
-context where available.
-`ferry check --read-data-subset <N|PERCENT>` reads a deterministic subset of
-referenced chunk data for initialized local and S3-compatible repositories.
-`ferry forget` evaluates retention keep rules, supports dry-run, writes forget
-markers only when not in dry-run, and does not delete objects itself.
-`ferry prune` supports initialized local and S3-compatible repositories,
-supports dry-run, writes encrypted command lease state before non-dry-run
-marking or sweeping, writes encrypted prune plan/completion state, resumes an
-incomplete sweep when repository commit/forget state still matches the marked
-plan, and deletes only forgotten-snapshot commit markers, forget markers,
-manifests, indexes, and chunks that are not reachable from non-forgotten
-committed snapshots. It rejects another active readable prune lease as a locked
-repository, ignores expired readable leases, and fails closed on malformed
-lease state before candidate deletion. It does not clean stale temporary
-objects, repair corrupted repositories, compact beyond unreachable-object
-deletion, implement stale-lease breaking, or provide provider-specific S3
-lifecycle policy management. `ferry key add` writes one
-immutable additional key slot for the existing repository master key; it does not
-re-encrypt repository objects or recover lost keys. `ferry key remove` writes
-one immutable `key-slot-removals/<key-slot-id>` marker for an externally
-added key slot; it does not delete key-slot objects, remove the original
-bootstrap slot, rekey, re-encrypt repository objects, or recover lost keys.
-`ferry key rotate` writes
-one immutable new key slot for the existing repository master key, proves the
-new passphrase unlock path before marker-removing selected externally added
-old slots, and does not rekey, re-encrypt repository objects, delete key-slot
-objects, remove the original bootstrap slot, remove unselected slots, or
-recover lost keys. `ferry key export-recovery` writes a standalone encrypted
-recovery package to a destination file that must not already exist; it does
-not implement recovery import, export raw master-key material, rekey, rewrite
-repository objects, or recover lost passphrases. Broader metadata application
-is not implemented yet. The format v0 compatibility contract is frozen for the
-object families and fields documented in
-[`docs/repository-format.md`](docs/repository-format.md); future fields, new
-object families, and migration behavior require an explicit new format version
-or documented feature gate with fixtures.
+Normal local gate:
 
-The normal local gate is:
+```sh
+just fmt
+just check
+just test
+just build
+```
+
+Equivalent expanded commands:
 
 ```sh
 cargo fmt --all --check
@@ -499,21 +199,16 @@ cargo test --workspace --all-features
 cargo build --workspace
 ```
 
-For docs-only changes:
+Run the homepage locally:
 
 ```sh
-git diff --check
+FILEFERRY_WEB_ADDR=127.0.0.1:8080 cargo run -p fileferry-web
 ```
 
-Durable implementation details should move into `docs/` as they settle,
-especially architecture, repository format, security, CLI/JSON contracts,
-storage behavior, platform metadata, operations, and release process. Current
-design docs include [`docs/security.md`](docs/security.md),
-[`docs/repository-format.md`](docs/repository-format.md),
-[`docs/cli-contract.md`](docs/cli-contract.md),
-[`docs/operations.md`](docs/operations.md), and
-[`docs/platform-metadata.md`](docs/platform-metadata.md).
+Release process and artifact expectations live in
+[docs/release.md](docs/release.md). Current release notes live in
+[docs/release-notes-1.0.0-rc.1.md](docs/release-notes-1.0.0-rc.1.md).
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [LICENSE](LICENSE).
