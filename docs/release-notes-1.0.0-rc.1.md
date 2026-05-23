@@ -29,9 +29,10 @@ Release-candidate artifacts are attached for:
 - `aarch64-apple-darwin`
 - `x86_64-pc-windows-msvc`
 
-For each target, the release includes the target archive, `SHA256SUMS`,
-`SHA256SUMS.sigstore.json`, a CycloneDX SBOM, a release manifest,
-archive-smoke JSON evidence, `install.sh`, and `install.ps1`.
+For each target, the GitHub release includes the target archive, a target-named
+`SHA256SUMS` file, a target-named `SHA256SUMS.sigstore.json` file, a CycloneDX
+SBOM, a release manifest, and archive-smoke JSON evidence. Shared `install.sh`
+and `install.ps1` installer scripts are also attached.
 
 ## Install
 
@@ -55,6 +56,8 @@ pwsh -NoLogo -NoProfile -NonInteractive -File ./install.ps1 `
 ```
 
 Both installers verify the archive against `SHA256SUMS` when it is present
+beside the archive. When using the target-named checksum file from the GitHub
+release, pass it explicitly as the checksum file or save it as `SHA256SUMS`
 beside the archive.
 
 ## Security And Format

@@ -50,16 +50,17 @@ documented below and in [BUILD.md](BUILD.md).
 Download the archive for your target from the
 [FileFerry 1.0.0-rc.1 GitHub release](https://github.com/dunamismax/fileferry/releases/tag/v1.0.0-rc.1).
 
-Each target artifact directory contains:
+For each target, the GitHub release includes:
 
 - `fileferry-1.0.0-rc.1-<target>.tar.gz`
-- `SHA256SUMS`
-- `SHA256SUMS.sigstore.json`
+- `fileferry-1.0.0-rc.1-<target>.SHA256SUMS`
+- `fileferry-1.0.0-rc.1-<target>.SHA256SUMS.sigstore.json`
 - `fileferry-1.0.0-rc.1-<target>.manifest.json`
 - `fileferry-1.0.0-rc.1-<target>.cdx.json`
 - `fileferry-<target>.archive-smoke.json`
-- `install.sh`
-- `install.ps1`
+
+The release also includes shared `install.sh` and `install.ps1` installer
+scripts.
 
 Unix shell installer:
 
@@ -79,6 +80,8 @@ pwsh -NoLogo -NoProfile -NonInteractive -File ./install.ps1 `
 
 Both installers verify the archive against `SHA256SUMS` when it is present
 beside the archive. They also support explicit checksum input and dry runs.
+Because the GitHub release uses target-named checksum assets, pass the matching
+checksum file explicitly or save it as `SHA256SUMS` beside the archive.
 
 Manual install:
 

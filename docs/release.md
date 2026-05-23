@@ -254,6 +254,13 @@ Attach the verified archives, `SHA256SUMS`, Sigstore bundles, SBOMs, release
 manifests, archive-smoke JSON files, `install.sh`, and `install.ps1` from the
 fresh artifact run.
 
+GitHub release assets are flat and cannot contain duplicate file names. When
+uploading artifacts from the per-target workflow directories, keep the target
+archive, SBOM, manifest, and archive-smoke filenames unchanged, upload one
+shared `install.sh` and `install.ps1`, and rename duplicate per-target
+`SHA256SUMS` and `SHA256SUMS.sigstore.json` assets to target-qualified names
+such as `fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu.SHA256SUMS`.
+
 Do not publish a release from uncommitted changes. Do not publish artifacts
 whose binary version, commit, checksum, or smoke-test evidence cannot be tied
 back to the release candidate.
