@@ -92,7 +92,7 @@ directory.
   "status": "success",
   "data": {
     "command": "ferry",
-    "version": "0.0.0"
+    "version": "1.0.0-rc.1"
   }
 }
 ```
@@ -346,7 +346,7 @@ does not support JSON wrapping because the completion script itself is the data.
 
 ```json
 {"schema_version":1,"event":"command_started","command":"version","status":"started","data":null}
-{"schema_version":1,"event":"command_completed","command":"version","status":"success","data":{"command":"ferry","version":"0.0.0"}}
+{"schema_version":1,"event":"command_completed","command":"version","status":"success","data":{"command":"ferry","version":"1.0.0-rc.1"}}
 ```
 
 Reserved event names:

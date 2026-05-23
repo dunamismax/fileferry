@@ -23,9 +23,9 @@ not platform support by themselves. Support still requires the target-specific
 release artifact, checksum/signature/SBOM/auditable metadata, archive smoke
 evidence, and relevant platform metadata tests for the exact release candidate.
 
-## Observed Candidate Evidence
+## Previous Candidate Evidence
 
-Current observed workflow evidence for commit
+Previous observed workflow evidence for commit
 `29e59cd6fe6ba2c355694c735acda3788d9fcb2f`:
 
 - Normal CI passed in GitHub run
@@ -49,15 +49,16 @@ Current observed workflow evidence for commit
   <artifact-dir> --target <target> --expect-signature` for all five intended
   targets.
 
-This evidence is tied to that exact commit and those workflow runs. It is not a
-published v1 release, not a support claim, and not a substitute for per-target
-platform metadata tests or final release notes.
+This evidence is tied to that exact commit and those workflow runs. It is
+historical evidence only, not the `1.0.0-rc.1` release candidate, not a
+published v1 release, and not a support claim.
 
-The release-artifacts run also emitted GitHub workflow annotations warning that
-`actions/upload-artifact@v4` was still using Node.js 20. The Windows job also
-reported that `windows-latest` requests are being redirected to
-`windows-2025-vs2026` by June 15, 2026. Resolve or re-verify both workflow
-annotations before relying on later release candidates.
+Release-runner drift was rechecked on 2026-05-23 against current GitHub
+sources. The release workflow now uses `actions/upload-artifact@v7`, the latest
+stable major observed in the upstream action releases, and uses the concrete
+`windows-2025-vs2026` hosted runner label for the Windows x86_64 MSVC job
+instead of the ambiguous `windows-latest` label. The native host triple guard
+remains in the release workflow.
 
 ## Preconditions
 
@@ -125,9 +126,11 @@ artifacts are useful for dry runs, but they are not release artifacts.
 The retained archive smoke entrypoint is:
 
 ```sh
+version="1.0.0-rc.1"
+host="$(rustc -vV | awk '/host:/ {print $2}')"
 cargo run -p xtask -- archive-smoke \
-  --archive target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz \
-  --target "$(rustc -vV | awk '/host:/ {print $2}')" \
+  --archive "target/release-artifacts/fileferry-${version}-${host}.tar.gz" \
+  --target "${host}" \
   --installers-dir target/release-artifacts \
   --expect-auditable \
   --out target/release-artifacts/archive-smoke.json
@@ -173,17 +176,20 @@ install directory are supplied.
 Unix shell example:
 
 ```sh
+version="1.0.0-rc.1"
+host="$(rustc -vV | awk '/host:/ {print $2}')"
 sh target/release-artifacts/install.sh \
-  --archive target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz \
+  --archive "target/release-artifacts/fileferry-${version}-${host}.tar.gz" \
   --install-dir "$HOME/.local/bin"
 ```
 
 PowerShell example:
 
 ```powershell
+$version = "1.0.0-rc.1"
 $hostTriple = rustc -vV | Select-String '^host: ' | ForEach-Object { $_.Line.Split(' ')[1] }
 pwsh -NoLogo -NoProfile -NonInteractive -File target/release-artifacts/install.ps1 `
-  -Archive "target/release-artifacts/fileferry-0.0.0-$hostTriple.tar.gz" `
+  -Archive "target/release-artifacts/fileferry-${version}-$hostTriple.tar.gz" `
   -InstallDir "$HOME/.local/bin"
 ```
 
@@ -220,7 +226,7 @@ signing through GitHub OIDC. The current native hosted matrix is:
 - Linux ARM64 GNU on `ubuntu-24.04-arm`.
 - macOS x86_64 on `macos-15-intel`.
 - macOS ARM64 on `macos-15`.
-- Windows x86_64 MSVC on `windows-latest`.
+- Windows x86_64 MSVC on `windows-2025-vs2026`.
 
 The workflow verifies that `rustc -vV` reports a host triple matching the
 artifact target before packaging. After packaging, it runs `xtask
@@ -246,10 +252,12 @@ The manual process is intentionally explicit:
 Example local host build:
 
 ```sh
+version="1.0.0-rc.1"
+host="$(rustc -vV | awk '/host:/ {print $2}')"
 cargo run -p xtask -- release-package --auditable --sbom
 cargo run -p xtask -- archive-smoke \
-  --archive target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz \
-  --target "$(rustc -vV | awk '/host:/ {print $2}')" \
+  --archive "target/release-artifacts/fileferry-${version}-${host}.tar.gz" \
+  --target "${host}" \
   --installers-dir target/release-artifacts \
   --expect-auditable
 ```
@@ -271,12 +279,14 @@ Release notes must be written for users and operators. They should include:
 
 Release notes must not include AI attribution or unsupported platform claims.
 
-### Draft Candidate Notes
+### 1.0.0-rc.1 Draft Candidate Notes
 
-Draft notes for commit `29e59cd6fe6ba2c355694c735acda3788d9fcb2f`:
+Draft notes for the current `1.0.0-rc.1` candidate:
 
-- FileFerry remains pre-v1. These notes describe a release candidate only;
+- FileFerry remains unpublished. These notes describe a release candidate only;
   no v1 tag or published release exists yet.
+- The `ferry` package version and workspace crate versions are stamped as
+  `1.0.0-rc.1`.
 - This candidate exercises the current encrypted local and S3-compatible
   repository paths, restore drills, retention/prune flows, key-management
   surface, JSON/JSONL contracts, secret-redaction canaries, installer scripts,
@@ -284,15 +294,9 @@ Draft notes for commit `29e59cd6fe6ba2c355694c735acda3788d9fcb2f`:
 - Repository format v0 is frozen for the currently documented object families
   and fixture-covered JSON shapes. Future format changes still require an
   explicit version or documented feature gate with fixtures.
-- Signed candidate artifacts were produced by GitHub run `26318709139` for
-  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-  `x86_64-apple-darwin`, `aarch64-apple-darwin`, and
-  `x86_64-pc-windows-msvc`. Each target artifact directory contains an archive,
-  `SHA256SUMS`, `SHA256SUMS.sigstore.json`, CycloneDX SBOM, release manifest,
-  archive-smoke JSON, `install.sh`, and `install.ps1`.
-- Normal CI for the same commit passed in GitHub run `26318164223` across the
-  hosted Linux x86_64 GNU, Linux ARM64 GNU, macOS Intel, macOS ARM64, and
-  Windows x86_64 MSVC matrix.
-- The candidate is not a support claim. Platform support remains blocked on
-  final support wording, platform metadata evidence, publication decisions, and
-  resolving or re-verifying the current workflow annotations.
+- Intended artifact scope is `x86_64-unknown-linux-gnu`,
+  `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`,
+  `aarch64-apple-darwin`, and `x86_64-pc-windows-msvc`.
+- The candidate is not a support claim. Platform support remains blocked until
+  the exact `1.0.0-rc.1` commit has passing CI, signed artifacts, archive smoke
+  evidence, local verifier evidence, and an explicit publication decision.

@@ -24,7 +24,7 @@ fn version_subcommand_prints_human_version() {
         .arg("version")
         .assert()
         .success()
-        .stdout("ferry 0.0.0\n")
+        .stdout("ferry 1.0.0-rc.1\n")
         .stderr("");
 }
 
@@ -46,7 +46,7 @@ fn version_subcommand_supports_json() {
     assert_eq!(json["command"], "version");
     assert_eq!(json["status"], "success");
     assert_eq!(json["data"]["command"], "ferry");
-    assert_eq!(json["data"]["version"], "0.0.0");
+    assert_eq!(json["data"]["version"], "1.0.0-rc.1");
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn global_output_flags_work_after_subcommands() {
     let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
     assert_eq!(json["command"], "version");
     assert_eq!(json["data"]["command"], "ferry");
-    assert_eq!(json["data"]["version"], "0.0.0");
+    assert_eq!(json["data"]["version"], "1.0.0-rc.1");
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn version_subcommand_supports_jsonl_events() {
     let completed: serde_json::Value = serde_json::from_slice(lines[1]).expect("complete event");
     assert_eq!(started["event"], "command_started");
     assert_eq!(completed["event"], "command_completed");
-    assert_eq!(completed["data"]["version"], "0.0.0");
+    assert_eq!(completed["data"]["version"], "1.0.0-rc.1");
 }
 
 #[test]

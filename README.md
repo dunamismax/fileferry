@@ -219,12 +219,10 @@ FileFerry does not have published v1 release artifacts yet. The current tested
 install path is for local release archives produced by `xtask release-package`.
 It is release-candidate plumbing, not a platform support claim.
 
-The manual release-artifacts workflow has produced candidate artifacts for the
-current native hosted x86_64 Linux GNU, ARM64 Linux GNU, x86_64 macOS,
-ARM64 macOS, and x86_64 Windows MSVC matrix on commit
-`29e59cd6fe6ba2c355694c735acda3788d9fcb2f` in GitHub run
-`26318709139`. That signed workflow evidence is for that exact commit only; it
-is not a published release and does not make any platform supported.
+The intended v1 release-candidate artifact scope is x86_64 Linux GNU, ARM64
+Linux GNU, x86_64 macOS, ARM64 macOS, and x86_64 Windows MSVC. Candidate
+workflow evidence is tied to an exact commit and GitHub run; it is not a
+published release and does not make any platform supported.
 
 Build a local host archive:
 
@@ -235,18 +233,20 @@ cargo run -p xtask -- release-package --out-dir target/release-artifacts --audit
 Install from that archive with the Unix shell installer:
 
 ```sh
+version="1.0.0-rc.1"
 host="$(rustc -vV | awk '/host:/ {print $2}')"
 sh target/release-artifacts/install.sh \
-  --archive "target/release-artifacts/fileferry-0.0.0-${host}.tar.gz" \
+  --archive "target/release-artifacts/fileferry-${version}-${host}.tar.gz" \
   --install-dir "$HOME/.local/bin"
 ```
 
 Install from the same archive with the PowerShell installer:
 
 ```powershell
+$version = "1.0.0-rc.1"
 $hostTriple = rustc -vV | Select-String '^host: ' | ForEach-Object { $_.Line.Split(' ')[1] }
 pwsh -NoLogo -NoProfile -NonInteractive -File target/release-artifacts/install.ps1 `
-  -Archive "target/release-artifacts/fileferry-0.0.0-$hostTriple.tar.gz" `
+  -Archive "target/release-artifacts/fileferry-${version}-$hostTriple.tar.gz" `
   -InstallDir "$HOME/.local/bin"
 ```
 
@@ -263,8 +263,10 @@ The current release-candidate smoke path extracts the archive and runs the
 packaged binary:
 
 ```sh
+version="1.0.0-rc.1"
+host="$(rustc -vV | awk '/host:/ {print $2}')"
 cargo run -p xtask -- archive-smoke \
-  --archive "target/release-artifacts/fileferry-0.0.0-${host}.tar.gz" \
+  --archive "target/release-artifacts/fileferry-${version}-${host}.tar.gz" \
   --target "${host}" \
   --installers-dir target/release-artifacts \
   --expect-auditable

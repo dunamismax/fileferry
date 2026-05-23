@@ -6,7 +6,7 @@ Active build tracker for FileFerry and its `ferry` command.
 operating rules. This file is intentionally short: it exists to help agents
 pick the next useful build task without loading a project history.
 
-Last condensed: 2026-05-22.
+Last condensed: 2026-05-23.
 
 ---
 
@@ -106,6 +106,13 @@ Implemented and tested at the current pre-v1 level:
   platform support claims. Commit
   `29e59cd6fe6ba2c355694c735acda3788d9fcb2f` passed this workflow in GitHub run
   `26318164223` on 2026-05-23.
+- Per-target platform metadata tests exist for the documented current metadata
+  scope in `fileferry-platform`: Linux and macOS cfg-gated tests assert source
+  platform, Unix metadata, timestamps, xattr status, and unsupported extension
+  scaffolding; Windows cfg-gated tests assert Windows source platform, absence
+  of Unix metadata, and unsupported extension scaffolding. These tests run
+  through the hosted CI matrix above and do not claim restoration of metadata
+  that is only reported as unsupported or not-yet-restored.
 - Live Backblaze B2 S3-compatible drills passed on 2026-05-22 under an
   isolated private development prefix for storage round-trip, CLI init,
   `backup -> snapshots -> ls -> restore -> check`, missing-manifest failure,
@@ -143,7 +150,7 @@ status text:
       prefix and record current provider evidence.
 - [ ] Add CI builds and tests for every platform that README or release docs
       call supported.
-- [ ] Add per-target platform metadata tests before making support claims.
+- [x] Add per-target platform metadata tests before making support claims.
 - [x] Audit logs, errors, JSON, JSONL, tests, and docs for secret leakage.
 - [x] Audit exit codes, JSON schemas, JSONL event order, and stdout/stderr
       separation as compatibility surfaces.
@@ -206,6 +213,9 @@ Platform and release:
 - [x] Platform metadata target documented.
 - [x] Current host-observed metadata behavior and restore-warning contract
       tested.
+- [x] Per-target platform metadata tests exist for the documented current
+      metadata scope on Linux, macOS, and Windows through cfg-gated
+      `fileferry-platform` tests in the hosted CI matrix.
 - [ ] CI, tests, and artifacts exist for every claimed supported platform.
 - [ ] Release archives, checksums, signatures, SBOM, and audit metadata exist
       for the exact release candidate.

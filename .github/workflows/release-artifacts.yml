@@ -29,7 +29,7 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-15
             target: aarch64-apple-darwin
-          - os: windows-latest
+          - os: windows-2025-vs2026
             target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout
@@ -113,7 +113,7 @@ jobs:
           cargo run -p xtask -- "${args[@]}"
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fileferry-${{ matrix.target }}-release-artifacts
           path: target/release-artifacts/*
