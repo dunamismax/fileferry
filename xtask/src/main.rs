@@ -210,6 +210,7 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
     let workspace = env::current_dir().map_err(|error| format!("read current dir: {error}"))?;
     let host = host_triple()?;
     let target = options.target.unwrap_or_else(|| host.clone());
+    validate_release_target(&target)?;
     let out_dir = options
         .out_dir
         .unwrap_or_else(|| workspace.join("target").join("release-artifacts"));
@@ -518,6 +519,7 @@ fn verify_release_artifacts(options: VerifyReleaseArtifactsOptions) -> Result<()
         ));
     }
     let target = options.target.unwrap_or(host_triple()?);
+    validate_release_target(&target)?;
 
     let archive = find_one_artifact(&dir, &target, "target archive", |name| {
         name.starts_with("fileferry-") && name.ends_with(&format!("-{target}.tar.gz"))
@@ -544,7 +546,32 @@ fn verify_release_artifacts(options: VerifyReleaseArtifactsOptions) -> Result<()
     }
 
     let archive_name = file_name(&archive)?;
+    let archive_target = infer_release_target_from_archive_name(&archive)?;
+    if archive_target != target {
+        return Err(format!(
+            "target archive `{archive_name}` encodes target `{archive_target}`, expected `{target}`"
+        ));
+    }
     let sbom_name = file_name(&sbom_path)?;
+    let manifest_target = infer_release_target_from_artifact_name(
+        &manifest_path,
+        ".manifest.json",
+        "release manifest JSON",
+    )?;
+    if manifest_target != target {
+        return Err(format!(
+            "release manifest JSON {} encodes target `{manifest_target}`, expected `{target}`",
+            manifest_path.display()
+        ));
+    }
+    let sbom_target =
+        infer_release_target_from_artifact_name(&sbom_path, ".cdx.json", "CycloneDX SBOM")?;
+    if sbom_target != target {
+        return Err(format!(
+            "CycloneDX SBOM {} encodes target `{sbom_target}`, expected `{target}`",
+            sbom_path.display()
+        ));
+    }
     let manifest: ReleaseManifestEvidence = read_json_file(&manifest_path, "release manifest")?;
     if manifest.schema_version != 1 {
         return Err(format!(
@@ -776,7 +803,7 @@ fn find_archive_smoke_for_target(
         parsed.push(ArchiveSmokeEvidenceFile { path, evidence });
     }
 
-    let mut matches = parsed
+    let matches = parsed
         .into_iter()
         .filter(|smoke| smoke.evidence.archive == archive_name)
         .collect::<Vec<_>>();
@@ -784,8 +811,20 @@ fn find_archive_smoke_for_target(
         0 => Err(format!(
             "missing archive-smoke JSON for target `{target}` archive `{archive_name}`"
         )),
-        1 => Ok(matches.remove(0)),
+        1 => {
+            let mut matches = matches;
+            let smoke = matches.remove(0);
+            let smoke_name = file_name(&smoke.path)?;
+            let expected_suffix = format!("{target}.archive-smoke.json");
+            if !smoke_name.ends_with(&expected_suffix) {
+                return Err(format!(
+                    "archive-smoke JSON `{smoke_name}` references archive `{archive_name}` but does not encode target `{target}`"
+                ));
+            }
+            Ok(smoke)
+        }
         _ => {
+            let mut matches = matches;
             matches.sort_by(|left, right| left.path.cmp(&right.path));
             let names = matches
                 .iter()
@@ -1025,9 +1064,19 @@ struct ArchiveSmokeRequest {
 
 fn archive_smoke(request: ArchiveSmokeRequest) -> Result<ArchiveSmokeTest, String> {
     let archive = canonical_file(&request.archive, "archive")?;
+    let archive_target = infer_release_target_from_archive_name(&archive)?;
     let target = match request.target {
-        Some(target) => target,
-        None => infer_release_target_from_archive_name(&archive)?,
+        Some(target) => {
+            validate_release_target(&target)?;
+            if target != archive_target {
+                return Err(format!(
+                    "archive {} encodes target `{archive_target}`, but --target was `{target}`",
+                    file_name(&archive)?
+                ));
+            }
+            target
+        }
+        None => archive_target,
     };
     let checksum_file = resolve_checksum_file(&archive, request.checksum_file)?;
     let checksum_verified = if request.verify_checksum {
@@ -1084,20 +1133,39 @@ fn archive_smoke(request: ArchiveSmokeRequest) -> Result<ArchiveSmokeTest, Strin
 }
 
 fn infer_release_target_from_archive_name(archive: &Path) -> Result<String, String> {
-    let archive_name = file_name(archive)?;
+    infer_release_target_from_artifact_name(archive, ".tar.gz", "archive")
+}
+
+fn infer_release_target_from_artifact_name(
+    artifact: &Path,
+    suffix: &str,
+    label: &str,
+) -> Result<String, String> {
+    let artifact_name = file_name(artifact)?;
     let matches = RELEASE_TARGETS
         .iter()
         .copied()
-        .filter(|target| archive_name.ends_with(&format!("-{target}.tar.gz")))
+        .filter(|target| artifact_name.ends_with(&format!("-{target}{suffix}")))
         .collect::<Vec<_>>();
     match matches.len() {
         1 => Ok(matches[0].to_string()),
         0 => Err(format!(
-            "could not infer release target from archive `{archive_name}`; pass --target"
+            "could not infer release target from {label} `{artifact_name}`"
         )),
         _ => Err(format!(
-            "archive `{archive_name}` matched multiple release targets; pass --target"
+            "{label} `{artifact_name}` matched multiple release targets"
         )),
+    }
+}
+
+fn validate_release_target(target: &str) -> Result<(), String> {
+    if RELEASE_TARGETS.contains(&target) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported release target `{target}`; expected one of {}",
+            RELEASE_TARGETS.join(", ")
+        ))
     }
 }
 
@@ -1819,6 +1887,68 @@ mod tests {
     }
 
     #[test]
+    fn verify_release_artifacts_rejects_wrong_archive_smoke_filename_target() {
+        let root = create_temp_dir("fileferry-xtask-verify-smoke-name").expect("temp root");
+        let target = "x86_64-unknown-linux-gnu";
+        let wrong_target = "aarch64-unknown-linux-gnu";
+        let stem = format!("fileferry-0.0.0-{target}");
+        let archive_name = format!("{stem}.tar.gz");
+        let manifest_name = format!("{stem}.manifest.json");
+        let sbom_name = format!("{stem}.cdx.json");
+        fs::write(root.join(&archive_name), b"archive").expect("write archive");
+        fs::write(
+            root.join(&sbom_name),
+            r#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#,
+        )
+        .expect("write sbom");
+        fs::write(root.join("install.sh"), b"#!/bin/sh\n").expect("write install.sh");
+        fs::write(root.join("install.ps1"), b"Write-Output ferry\n").expect("write install.ps1");
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            package: "fileferry",
+            binary: "ferry",
+            version: "0.0.0",
+            target,
+            commit: "0123456789abcdef",
+            archive: archive_name.clone(),
+            installers: vec!["install.sh".to_string(), "install.ps1".to_string()],
+            auditable_build: true,
+            auditable_metadata: Some(test_auditable_metadata(target)),
+            sbom: Some(sbom_name.clone()),
+            smoke_test: None,
+            archive_smoke_test: None,
+        };
+        write_json(&root.join(&manifest_name), &manifest).expect("write manifest");
+        write_json(
+            &root.join(format!("fileferry-{wrong_target}.archive-smoke.json")),
+            &test_archive_smoke(target, &archive_name),
+        )
+        .expect("write archive smoke");
+        write_checksums(
+            &root.join("SHA256SUMS"),
+            &[
+                root.join(&archive_name),
+                root.join(&manifest_name),
+                root.join(&sbom_name),
+                root.join("install.sh"),
+                root.join("install.ps1"),
+            ],
+        )
+        .expect("write checksums");
+
+        let error = verify_release_artifacts(VerifyReleaseArtifactsOptions {
+            dir: Some(root.clone()),
+            target: Some(target.to_string()),
+            expect_signature: false,
+        })
+        .expect_err("wrong archive-smoke filename target should fail");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(error.contains("archive-smoke JSON"));
+        assert!(error.contains("does not encode target `x86_64-unknown-linux-gnu`"));
+    }
+
+    #[test]
     fn verify_archive_smoke_rejects_target_mismatch() {
         let target = "x86_64-unknown-linux-gnu";
         let archive_name = format!("fileferry-0.0.0-{target}.tar.gz");
@@ -1864,6 +1994,61 @@ mod tests {
         .expect_err("missing packaged-binary auditable proof should fail");
 
         assert!(error.contains("packaged-binary auditable metadata proof"));
+    }
+
+    #[test]
+    fn archive_smoke_rejects_target_that_does_not_match_archive_filename() {
+        let root = create_temp_dir("fileferry-xtask-archive-target").expect("temp root");
+        let archive = root.join("fileferry-0.0.0-aarch64-unknown-linux-gnu.tar.gz");
+        fs::write(&archive, b"not a tar archive").expect("write fake archive");
+
+        let error = archive_smoke(ArchiveSmokeRequest {
+            archive,
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            checksum_file: None,
+            verify_checksum: false,
+            installers_dir: None,
+            expect_auditable: false,
+        })
+        .expect_err("archive filename target mismatch should fail");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(error.contains("encodes target `aarch64-unknown-linux-gnu`"));
+        assert!(error.contains("--target was `x86_64-unknown-linux-gnu`"));
+    }
+
+    #[test]
+    fn archive_smoke_rejects_archive_without_release_target_filename() {
+        let root = create_temp_dir("fileferry-xtask-archive-no-target").expect("temp root");
+        let archive = root.join("fileferry-0.0.0-test.tar.gz");
+        fs::write(&archive, b"not a tar archive").expect("write fake archive");
+
+        let error = archive_smoke(ArchiveSmokeRequest {
+            archive,
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            checksum_file: None,
+            verify_checksum: false,
+            installers_dir: None,
+            expect_auditable: false,
+        })
+        .expect_err("archive filename without release target should fail");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(error.contains("could not infer release target from archive"));
+    }
+
+    #[test]
+    fn verify_release_artifacts_rejects_unsupported_target() {
+        let root = create_temp_dir("fileferry-xtask-unsupported-target").expect("temp root");
+        let error = verify_release_artifacts(VerifyReleaseArtifactsOptions {
+            dir: Some(root.clone()),
+            target: Some("x86_64-unknown-freebsd".to_string()),
+            expect_signature: false,
+        })
+        .expect_err("unsupported release target should fail");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(error.contains("unsupported release target `x86_64-unknown-freebsd`"));
     }
 
     #[test]
