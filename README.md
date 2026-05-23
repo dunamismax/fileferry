@@ -229,7 +229,7 @@ supported.
 Build a local host archive:
 
 ```sh
-cargo run -p xtask -- release-package --out-dir target/release-artifacts
+cargo run -p xtask -- release-package --out-dir target/release-artifacts --auditable --sbom
 ```
 
 Install from that archive with the Unix shell installer:
@@ -265,7 +265,9 @@ packaged binary:
 ```sh
 cargo run -p xtask -- archive-smoke \
   --archive "target/release-artifacts/fileferry-0.0.0-${host}.tar.gz" \
-  --installers-dir target/release-artifacts
+  --target "${host}" \
+  --installers-dir target/release-artifacts \
+  --expect-auditable
 ```
 
 PowerShell verification has been run on macOS with `pwsh`. That proves the

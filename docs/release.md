@@ -120,14 +120,18 @@ The retained archive smoke entrypoint is:
 ```sh
 cargo run -p xtask -- archive-smoke \
   --archive target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz \
+  --target "$(rustc -vV | awk '/host:/ {print $2}')" \
   --installers-dir target/release-artifacts \
+  --expect-auditable \
   --out target/release-artifacts/archive-smoke.json
 ```
 
 `archive-smoke` verifies the archive against `SHA256SUMS` when it is present
 beside the archive, extracts the archive, runs the packaged binary with
-`ferry version --json`, and optionally runs available installer scripts from
-`--installers-dir` before smoke-testing the installed binary. Use
+`ferry version --json`, verifies cargo-auditable metadata on the packaged
+binary when `--expect-auditable` is supplied, and optionally runs available
+installer scripts from `--installers-dir` before smoke-testing the installed
+binary. Use `--target <TRIPLE>` to make target mismatch failures explicit. Use
 `--checksum-file <FILE>` to point at a checksum manifest in another location.
 Use `--no-checksum` only for local diagnostics; unchecked archives are not
 release evidence.
@@ -238,7 +242,9 @@ Example local host build:
 cargo run -p xtask -- release-package --auditable --sbom
 cargo run -p xtask -- archive-smoke \
   --archive target/release-artifacts/fileferry-0.0.0-$(rustc -vV | awk '/host:/ {print $2}').tar.gz \
-  --installers-dir target/release-artifacts
+  --target "$(rustc -vV | awk '/host:/ {print $2}')" \
+  --installers-dir target/release-artifacts \
+  --expect-auditable
 ```
 
 Do not publish a release from uncommitted changes. Do not publish artifacts

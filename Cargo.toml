@@ -20,6 +20,7 @@ repository = "https://github.com/dunamismax/fileferry"
 
 [workspace.dependencies]
 assert_cmd = "2.2.2"
+auditable-info = "0.10.0"
 argon2 = { version = "0.5.3", features = ["zeroize"] }
 axum = "0.8.4"
 blake3 = "1.8.5"

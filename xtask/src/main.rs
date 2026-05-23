@@ -38,11 +38,20 @@ fn usage() -> String {
     [
         "usage:",
         "  cargo run -p xtask -- release-package [--target TRIPLE] [--out-dir DIR] [--auditable] [--sbom] [--sign] [--skip-build] [--skip-smoke]",
-        "  cargo run -p xtask -- archive-smoke --archive FILE [--checksum-file FILE] [--no-checksum] [--installers-dir DIR] [--out FILE]",
+        "  cargo run -p xtask -- archive-smoke --archive FILE [--target TRIPLE] [--checksum-file FILE] [--no-checksum] [--installers-dir DIR] [--expect-auditable] [--out FILE]",
         "  cargo run -p xtask -- verify-release-artifacts [--dir DIR] [--target TRIPLE] [--expect-signature]",
     ]
     .join("\n")
 }
+
+const FERRY_ROOT_PACKAGE: &str = "fileferry-cli";
+const RELEASE_TARGETS: &[&str] = &[
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+];
 
 #[derive(Debug, Default)]
 struct ReleasePackageOptions {
@@ -58,9 +67,11 @@ struct ReleasePackageOptions {
 #[derive(Debug, Default)]
 struct ArchiveSmokeOptions {
     archive: Option<PathBuf>,
+    target: Option<String>,
     checksum_file: Option<PathBuf>,
     no_checksum: bool,
     installers_dir: Option<PathBuf>,
+    expect_auditable: bool,
     out: Option<PathBuf>,
 }
 
@@ -122,6 +133,10 @@ impl ArchiveSmokeOptions {
                     index += 1;
                     options.archive = Some(PathBuf::from(value(args, index, "--archive")?));
                 }
+                "--target" => {
+                    index += 1;
+                    options.target = Some(value(args, index, "--target")?);
+                }
                 "--checksum-file" => {
                     index += 1;
                     options.checksum_file =
@@ -133,6 +148,7 @@ impl ArchiveSmokeOptions {
                     options.installers_dir =
                         Some(PathBuf::from(value(args, index, "--installers-dir")?));
                 }
+                "--expect-auditable" => options.expect_auditable = true,
                 "--out" => {
                     index += 1;
                     options.out = Some(PathBuf::from(value(args, index, "--out")?));
@@ -216,6 +232,15 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
             binary.display()
         ));
     }
+    let auditable_metadata = if options.auditable {
+        Some(verify_auditable_metadata(
+            &binary,
+            &target,
+            "release binary",
+        )?)
+    } else {
+        None
+    };
 
     fs::create_dir_all(&out_dir)
         .map_err(|error| format!("create artifact dir {}: {error}", out_dir.display()))?;
@@ -271,6 +296,7 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
             .map(|path| file_name(path))
             .collect::<Result<Vec<_>, _>>()?,
         auditable_build: options.auditable,
+        auditable_metadata,
         sbom: sbom.as_ref().map(|path| file_name(path)).transpose()?,
         smoke_test,
         archive_smoke_test: None,
@@ -288,9 +314,11 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
     if !options.skip_smoke && target == host {
         let archive_smoke = archive_smoke(ArchiveSmokeRequest {
             archive: archive.clone(),
+            target: Some(target.clone()),
             checksum_file: Some(checksums.clone()),
             verify_checksum: true,
             installers_dir: Some(out_dir.clone()),
+            expect_auditable: options.auditable,
         })?;
         manifest.archive_smoke_test = Some(archive_smoke);
         write_json(&manifest_path, &manifest)?;
@@ -460,9 +488,11 @@ fn archive_smoke_command(options: ArchiveSmokeOptions) -> Result<(), String> {
         .expect("archive presence was validated by option parsing");
     let request = ArchiveSmokeRequest {
         archive,
+        target: options.target,
         checksum_file: options.checksum_file,
         verify_checksum: !options.no_checksum,
         installers_dir: options.installers_dir,
+        expect_auditable: options.expect_auditable,
     };
     let evidence = archive_smoke(request)?;
     if let Some(out) = options.out {
@@ -558,6 +588,18 @@ fn verify_release_artifacts(options: VerifyReleaseArtifactsOptions) -> Result<()
             manifest_path.display()
         ));
     }
+    let Some(auditable_metadata) = &manifest.auditable_metadata else {
+        return Err(format!(
+            "release manifest {} does not include auditable metadata proof for target `{target}`",
+            manifest_path.display()
+        ));
+    };
+    verify_auditable_metadata_evidence(
+        auditable_metadata,
+        &target,
+        &manifest.version,
+        "release manifest auditable metadata",
+    )?;
     require_manifest_installer(&manifest, "install.sh")?;
     require_manifest_installer(&manifest, "install.ps1")?;
     if manifest.commit.trim().is_empty() {
@@ -576,7 +618,13 @@ fn verify_release_artifacts(options: VerifyReleaseArtifactsOptions) -> Result<()
         verify_smoke_test(smoke, "release manifest host smoke")?;
     }
     if let Some(smoke) = &manifest.archive_smoke_test {
-        verify_archive_smoke_test(smoke, &archive_name, "release manifest archive smoke")?;
+        verify_archive_smoke_test(
+            smoke,
+            &target,
+            &archive_name,
+            &manifest.version,
+            "release manifest archive smoke",
+        )?;
     }
 
     let sbom: serde_json::Value = read_json_file(&sbom_path, "CycloneDX SBOM")?;
@@ -599,7 +647,9 @@ fn verify_release_artifacts(options: VerifyReleaseArtifactsOptions) -> Result<()
     let archive_smoke = find_archive_smoke_for_target(&dir, &target, &archive_name)?;
     verify_archive_smoke_test(
         &archive_smoke.evidence,
+        &target,
         &archive_name,
+        &manifest.version,
         "archive-smoke evidence JSON",
     )?;
 
@@ -752,9 +802,17 @@ fn find_archive_smoke_for_target(
 
 fn verify_archive_smoke_test(
     smoke: &ArchiveSmokeTest,
+    target: &str,
     archive_name: &str,
+    version: &str,
     label: &str,
 ) -> Result<(), String> {
+    if smoke.target != target {
+        return Err(format!(
+            "{label} targets `{}`, expected `{target}`",
+            smoke.target
+        ));
+    }
     if smoke.archive != archive_name {
         return Err(format!(
             "{label} references archive `{}`, expected `{archive_name}`",
@@ -770,6 +828,17 @@ fn verify_archive_smoke_test(
     if !smoke.checksum_verified {
         return Err(format!("{label} did not verify SHA256SUMS"));
     }
+    let Some(auditable_metadata) = &smoke.auditable_metadata else {
+        return Err(format!(
+            "{label} does not include packaged-binary auditable metadata proof for target `{target}`"
+        ));
+    };
+    verify_auditable_metadata_evidence(
+        auditable_metadata,
+        target,
+        version,
+        &format!("{label} auditable metadata"),
+    )?;
     verify_smoke_test(&smoke.binary_smoke, label)?;
     if smoke.installer_smoke_tests.is_empty() {
         return Err(format!("{label} contains no installer smoke tests"));
@@ -798,12 +867,105 @@ fn verify_smoke_test(smoke: &SmokeTest, label: &str) -> Result<(), String> {
     }
     let stdout: serde_json::Value = serde_json::from_str(&smoke.stdout)
         .map_err(|error| format!("{label} stdout is not JSON: {error}"))?;
-    if stdout
-        .get("version")
+    if stdout_version(&stdout).is_none() {
+        return Err(format!("{label} stdout JSON is missing version data"));
+    }
+    Ok(())
+}
+
+fn stdout_version(stdout: &serde_json::Value) -> Option<&str> {
+    stdout
+        .get("data")
+        .and_then(|data| data.get("version"))
         .and_then(serde_json::Value::as_str)
-        .is_none()
-    {
-        return Err(format!("{label} stdout JSON is missing `version`"));
+        .or_else(|| stdout.get("version").and_then(serde_json::Value::as_str))
+}
+
+fn verify_auditable_metadata(
+    binary: &Path,
+    target: &str,
+    label: &str,
+) -> Result<AuditableMetadataEvidence, String> {
+    let info =
+        auditable_info::audit_info_from_file(binary, Default::default()).map_err(|error| {
+            format!(
+                "{label} {} for target `{target}` does not contain readable cargo-auditable metadata: {error}",
+                binary.display()
+            )
+        })?;
+    let root_packages = info
+        .packages
+        .iter()
+        .filter(|package| package.root)
+        .collect::<Vec<_>>();
+    if root_packages.len() != 1 {
+        return Err(format!(
+            "{label} {} for target `{target}` has {} cargo-auditable root packages, expected 1",
+            binary.display(),
+            root_packages.len()
+        ));
+    }
+    let root = root_packages[0];
+    if root.name != FERRY_ROOT_PACKAGE {
+        return Err(format!(
+            "{label} {} for target `{target}` has cargo-auditable root package `{}`, expected `{FERRY_ROOT_PACKAGE}`",
+            binary.display(),
+            root.name
+        ));
+    }
+    if info.packages.is_empty() {
+        return Err(format!(
+            "{label} {} for target `{target}` has empty cargo-auditable package metadata",
+            binary.display()
+        ));
+    }
+    Ok(AuditableMetadataEvidence {
+        target: target.to_string(),
+        binary: file_name(binary)?,
+        root_package: root.name.clone(),
+        root_version: root.version.to_string(),
+        package_count: info.packages.len(),
+        format: info.format,
+    })
+}
+
+fn verify_auditable_metadata_evidence(
+    evidence: &AuditableMetadataEvidence,
+    target: &str,
+    version: &str,
+    label: &str,
+) -> Result<(), String> {
+    if evidence.target != target {
+        return Err(format!(
+            "{label} targets `{}`, expected `{target}`",
+            evidence.target
+        ));
+    }
+    let expected_binary = if target.contains("windows") {
+        "ferry.exe"
+    } else {
+        "ferry"
+    };
+    if evidence.binary != expected_binary {
+        return Err(format!(
+            "{label} references binary `{}`, expected `{expected_binary}` for target `{target}`",
+            evidence.binary
+        ));
+    }
+    if evidence.root_package != FERRY_ROOT_PACKAGE {
+        return Err(format!(
+            "{label} root package is `{}`, expected `{FERRY_ROOT_PACKAGE}`",
+            evidence.root_package
+        ));
+    }
+    if evidence.root_version != version {
+        return Err(format!(
+            "{label} root version is `{}`, expected manifest version `{version}`",
+            evidence.root_version
+        ));
+    }
+    if evidence.package_count == 0 {
+        return Err(format!("{label} reports zero packages"));
     }
     Ok(())
 }
@@ -854,13 +1016,19 @@ fn verify_checksum_for_file(
 
 struct ArchiveSmokeRequest {
     archive: PathBuf,
+    target: Option<String>,
     checksum_file: Option<PathBuf>,
     verify_checksum: bool,
     installers_dir: Option<PathBuf>,
+    expect_auditable: bool,
 }
 
 fn archive_smoke(request: ArchiveSmokeRequest) -> Result<ArchiveSmokeTest, String> {
     let archive = canonical_file(&request.archive, "archive")?;
+    let target = match request.target {
+        Some(target) => target,
+        None => infer_release_target_from_archive_name(&archive)?,
+    };
     let checksum_file = resolve_checksum_file(&archive, request.checksum_file)?;
     let checksum_verified = if request.verify_checksum {
         let Some(checksum_file) = &checksum_file else {
@@ -880,9 +1048,16 @@ fn archive_smoke(request: ArchiveSmokeRequest) -> Result<ArchiveSmokeTest, Strin
         extract_archive(&archive, &temp_root)?;
         let binary = find_extracted_binary(&temp_root)?;
         let binary_smoke = smoke_test_binary(&binary)?;
+        let auditable_metadata =
+            match verify_auditable_metadata(&binary, &target, "packaged archive binary") {
+                Ok(evidence) => Some(evidence),
+                Err(error) if request.expect_auditable => return Err(error),
+                Err(_) => None,
+            };
         let installer_smoke_tests =
             smoke_test_installers(&archive, request.installers_dir.as_deref(), &temp_root)?;
         Ok(ArchiveSmokeTest {
+            target,
             archive: file_name(&archive)?,
             checksum_file: checksum_file
                 .as_ref()
@@ -890,6 +1065,7 @@ fn archive_smoke(request: ArchiveSmokeRequest) -> Result<ArchiveSmokeTest, Strin
                 .transpose()?,
             checksum_verified,
             extracted_binary: binary.display().to_string(),
+            auditable_metadata,
             binary_smoke,
             installer_smoke_tests,
         })
@@ -904,6 +1080,24 @@ fn archive_smoke(request: ArchiveSmokeRequest) -> Result<ArchiveSmokeTest, Strin
         (Ok(evidence), Ok(())) => Ok(evidence),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn infer_release_target_from_archive_name(archive: &Path) -> Result<String, String> {
+    let archive_name = file_name(archive)?;
+    let matches = RELEASE_TARGETS
+        .iter()
+        .copied()
+        .filter(|target| archive_name.ends_with(&format!("-{target}.tar.gz")))
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches[0].to_string()),
+        0 => Err(format!(
+            "could not infer release target from archive `{archive_name}`; pass --target"
+        )),
+        _ => Err(format!(
+            "archive `{archive_name}` matched multiple release targets; pass --target"
+        )),
     }
 }
 
@@ -1254,6 +1448,7 @@ struct ReleaseManifestEvidence {
     archive: String,
     installers: Vec<String>,
     auditable_build: bool,
+    auditable_metadata: Option<AuditableMetadataEvidence>,
     sbom: Option<String>,
     smoke_test: Option<SmokeTest>,
     archive_smoke_test: Option<ArchiveSmokeTest>,
@@ -1270,9 +1465,20 @@ struct ReleaseManifest<'a> {
     archive: String,
     installers: Vec<String>,
     auditable_build: bool,
+    auditable_metadata: Option<AuditableMetadataEvidence>,
     sbom: Option<String>,
     smoke_test: Option<SmokeTest>,
     archive_smoke_test: Option<ArchiveSmokeTest>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct AuditableMetadataEvidence {
+    target: String,
+    binary: String,
+    root_package: String,
+    root_version: String,
+    package_count: usize,
+    format: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1284,10 +1490,12 @@ struct SmokeTest {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ArchiveSmokeTest {
+    target: String,
     archive: String,
     checksum_file: Option<String>,
     checksum_verified: bool,
     extracted_binary: String,
+    auditable_metadata: Option<AuditableMetadataEvidence>,
     binary_smoke: SmokeTest,
     installer_smoke_tests: Vec<InstallerSmokeTest>,
 }
@@ -1338,10 +1546,13 @@ mod tests {
         let args = [
             "--archive",
             "target/release-artifacts/fileferry-0.0.0-test.tar.gz",
+            "--target",
+            "x86_64-unknown-linux-gnu",
             "--checksum-file",
             "target/release-artifacts/SHA256SUMS",
             "--installers-dir",
             "target/release-artifacts",
+            "--expect-auditable",
             "--out",
             "target/release-artifacts/archive-smoke.json",
         ]
@@ -1357,6 +1568,7 @@ mod tests {
                 "target/release-artifacts/fileferry-0.0.0-test.tar.gz"
             ))
         );
+        assert_eq!(options.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(
             options.checksum_file.as_deref(),
             Some(Path::new("target/release-artifacts/SHA256SUMS"))
@@ -1369,6 +1581,7 @@ mod tests {
             options.out.as_deref(),
             Some(Path::new("target/release-artifacts/archive-smoke.json"))
         );
+        assert!(options.expect_auditable);
     }
 
     #[test]
@@ -1444,7 +1657,7 @@ mod tests {
         fs::write(root.join("SHA256SUMS.sigstore.json"), r#"{"bundle":true}"#)
             .expect("write signature bundle");
 
-        let archive_smoke = test_archive_smoke(&archive_name);
+        let archive_smoke = test_archive_smoke(target, &archive_name);
         let manifest = ReleaseManifest {
             schema_version: 1,
             package: "fileferry",
@@ -1455,9 +1668,10 @@ mod tests {
             archive: archive_name.clone(),
             installers: vec!["install.sh".to_string(), "install.ps1".to_string()],
             auditable_build: true,
+            auditable_metadata: Some(test_auditable_metadata(target)),
             sbom: Some(sbom_name.clone()),
             smoke_test: Some(test_smoke()),
-            archive_smoke_test: Some(test_archive_smoke(&archive_name)),
+            archive_smoke_test: Some(test_archive_smoke(target, &archive_name)),
         };
         write_json(&root.join(&manifest_name), &manifest).expect("write manifest");
         write_json(&root.join(&smoke_name), &archive_smoke).expect("write archive smoke");
@@ -1510,6 +1724,7 @@ mod tests {
             archive: archive_name.clone(),
             installers: vec!["install.sh".to_string(), "install.ps1".to_string()],
             auditable_build: true,
+            auditable_metadata: Some(test_auditable_metadata(wrong_target)),
             sbom: Some(sbom_name.clone()),
             smoke_test: None,
             archive_smoke_test: None,
@@ -1517,7 +1732,7 @@ mod tests {
         write_json(&root.join(&manifest_name), &manifest).expect("write manifest");
         write_json(
             &root.join(format!("fileferry-{target}.archive-smoke.json")),
-            &test_archive_smoke(&archive_name),
+            &test_archive_smoke(target, &archive_name),
         )
         .expect("write archive smoke");
         write_checksums(
@@ -1569,6 +1784,7 @@ mod tests {
             archive: archive_name.clone(),
             installers: vec!["install.sh".to_string(), "install.ps1".to_string()],
             auditable_build: true,
+            auditable_metadata: Some(test_auditable_metadata(target)),
             sbom: Some(sbom_name.clone()),
             smoke_test: None,
             archive_smoke_test: None,
@@ -1576,7 +1792,7 @@ mod tests {
         write_json(&root.join(&manifest_name), &manifest).expect("write manifest");
         write_json(
             &root.join(format!("fileferry-{target}.archive-smoke.json")),
-            &test_archive_smoke(&archive_name),
+            &test_archive_smoke(target, &archive_name),
         )
         .expect("write archive smoke");
         write_checksums(
@@ -1600,6 +1816,54 @@ mod tests {
 
         fs::remove_dir_all(&root).expect("remove fixture root");
         assert!(error.contains("missing Sigstore bundle"));
+    }
+
+    #[test]
+    fn verify_archive_smoke_rejects_target_mismatch() {
+        let target = "x86_64-unknown-linux-gnu";
+        let archive_name = format!("fileferry-0.0.0-{target}.tar.gz");
+        let mut smoke = test_archive_smoke("aarch64-unknown-linux-gnu", &archive_name);
+
+        let error = verify_archive_smoke_test(
+            &smoke,
+            target,
+            &archive_name,
+            "0.0.0",
+            "archive-smoke evidence JSON",
+        )
+        .expect_err("target mismatch should fail");
+
+        assert!(error.contains("targets `aarch64-unknown-linux-gnu`"));
+
+        smoke.target = target.to_string();
+        smoke.auditable_metadata = Some(test_auditable_metadata(target));
+        verify_archive_smoke_test(
+            &smoke,
+            target,
+            &archive_name,
+            "0.0.0",
+            "archive-smoke evidence JSON",
+        )
+        .expect("corrected smoke evidence should verify");
+    }
+
+    #[test]
+    fn verify_archive_smoke_requires_packaged_binary_auditable_metadata() {
+        let target = "x86_64-unknown-linux-gnu";
+        let archive_name = format!("fileferry-0.0.0-{target}.tar.gz");
+        let mut smoke = test_archive_smoke(target, &archive_name);
+        smoke.auditable_metadata = None;
+
+        let error = verify_archive_smoke_test(
+            &smoke,
+            target,
+            &archive_name,
+            "0.0.0",
+            "archive-smoke evidence JSON",
+        )
+        .expect_err("missing packaged-binary auditable proof should fail");
+
+        assert!(error.contains("packaged-binary auditable metadata proof"));
     }
 
     #[test]
@@ -1644,9 +1908,11 @@ mod tests {
 
         let evidence = archive_smoke(ArchiveSmokeRequest {
             archive,
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
             checksum_file: None,
             verify_checksum: true,
             installers_dir: Some(installers_dir),
+            expect_auditable: false,
         })
         .expect("archive smoke should pass");
 
@@ -1665,7 +1931,7 @@ mod tests {
 
     #[cfg(unix)]
     fn create_test_archive(root: &Path) -> PathBuf {
-        let package_dir = root.join("stage/fileferry-0.0.0-test-target");
+        let package_dir = root.join("stage/fileferry-0.0.0-x86_64-unknown-linux-gnu");
         fs::create_dir_all(&package_dir).expect("create package dir");
         let binary = package_dir.join("ferry");
         fs::write(
@@ -1679,24 +1945,26 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&binary, permissions).expect("chmod binary");
 
-        let archive = root.join("fileferry-0.0.0-test-target.tar.gz");
+        let archive = root.join("fileferry-0.0.0-x86_64-unknown-linux-gnu.tar.gz");
         let mut command = Command::new("tar");
         command
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
             .arg(root.join("stage"))
-            .arg("fileferry-0.0.0-test-target");
+            .arg("fileferry-0.0.0-x86_64-unknown-linux-gnu");
         run_command(&mut command, "create test archive").expect("create test archive");
         archive
     }
 
-    fn test_archive_smoke(archive_name: &str) -> ArchiveSmokeTest {
+    fn test_archive_smoke(target: &str, archive_name: &str) -> ArchiveSmokeTest {
         ArchiveSmokeTest {
+            target: target.to_string(),
             archive: archive_name.to_string(),
             checksum_file: Some("SHA256SUMS".to_string()),
             checksum_verified: true,
             extracted_binary: "/tmp/fileferry/ferry".to_string(),
+            auditable_metadata: Some(test_auditable_metadata(target)),
             binary_smoke: test_smoke(),
             installer_smoke_tests: vec![InstallerSmokeTest {
                 installer: "install.sh".to_string(),
@@ -1707,11 +1975,35 @@ mod tests {
         }
     }
 
+    fn test_auditable_metadata(target: &str) -> AuditableMetadataEvidence {
+        AuditableMetadataEvidence {
+            target: target.to_string(),
+            binary: if target.contains("windows") {
+                "ferry.exe".to_string()
+            } else {
+                "ferry".to_string()
+            },
+            root_package: FERRY_ROOT_PACKAGE.to_string(),
+            root_version: "0.0.0".to_string(),
+            package_count: 42,
+            format: 0,
+        }
+    }
+
     fn test_smoke() -> SmokeTest {
         SmokeTest {
             command: "ferry version --json".to_string(),
             exit_code: 0,
-            stdout: "{\"version\":\"0.0.0\"}\n".to_string(),
+            stdout: serde_json::json!({
+                "schema_version": 1,
+                "command": "version",
+                "status": "success",
+                "data": {
+                    "command": "ferry",
+                    "version": "0.0.0"
+                }
+            })
+            .to_string(),
         }
     }
 

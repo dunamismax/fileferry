@@ -95,7 +95,9 @@ jobs:
           fi
           cargo run -p xtask -- archive-smoke \
             --archive "${archives[0]}" \
+            --target "${TARGET}" \
             --installers-dir target/release-artifacts \
+            --expect-auditable \
             --out "target/release-artifacts/fileferry-${TARGET}.archive-smoke.json"
 
       - name: Verify release artifact evidence
