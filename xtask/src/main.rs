@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,6 +45,7 @@ fn usage() -> String {
 }
 
 const FERRY_ROOT_PACKAGE: &str = "fileferry-cli";
+const SIGSTORE_BUNDLE_NAME: &str = "SHA256SUMS.sigstore.json";
 const RELEASE_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -326,11 +327,18 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
         write_checksums(&checksums, &checksum_inputs)?;
     }
 
+    let signature_bundle_path = out_dir.join(SIGSTORE_BUNDLE_NAME);
     let signature_bundle = if options.sign {
-        let bundle = out_dir.join("SHA256SUMS.sigstore.json");
+        let bundle = signature_bundle_path;
         sign_checksums(&checksums, &bundle)?;
         Some(bundle)
     } else {
+        if let Some(removed) = remove_stale_sigstore_bundle(&out_dir)? {
+            println!(
+                "removed stale signature bundle for unsigned package: {}",
+                removed.display()
+            );
+        }
         None
     };
 
@@ -345,6 +353,8 @@ fn release_package(options: ReleasePackageOptions) -> Result<(), String> {
     println!("manifest: {}", manifest_path.display());
     if let Some(bundle) = signature_bundle {
         println!("signature: {}", bundle.display());
+    } else {
+        println!("signature: unsigned package; {SIGSTORE_BUNDLE_NAME} was not produced");
     }
 
     Ok(())
@@ -534,15 +544,14 @@ fn verify_release_artifacts(options: VerifyReleaseArtifactsOptions) -> Result<()
     let install_sh = require_file(&dir.join("install.sh"), "Unix installer")?;
     let install_ps1 = require_file(&dir.join("install.ps1"), "PowerShell installer")?;
 
+    let signature_path = dir.join(SIGSTORE_BUNDLE_NAME);
     if options.expect_signature {
-        let signature = require_file(&dir.join("SHA256SUMS.sigstore.json"), "Sigstore bundle")?;
-        let value: serde_json::Value = read_json_file(&signature, "Sigstore bundle")?;
-        if !value.is_object() {
-            return Err(format!(
-                "Sigstore bundle {} is not a JSON object",
-                signature.display()
-            ));
-        }
+        verify_sigstore_bundle(&signature_path)?;
+    } else if signature_path.exists() {
+        return Err(format!(
+            "unexpected Sigstore bundle in unsigned artifact verification: {}; rerun with --expect-signature for signed artifacts or remove stale signing evidence",
+            signature_path.display()
+        ));
     }
 
     let archive_name = file_name(&archive)?;
@@ -746,6 +755,30 @@ fn require_file(path: &Path, label: &str) -> Result<PathBuf, String> {
         Ok(path.to_path_buf())
     } else {
         Err(format!("missing {label}: {}", path.display()))
+    }
+}
+
+fn verify_sigstore_bundle(path: &Path) -> Result<(), String> {
+    let signature = require_file(path, "Sigstore bundle")?;
+    let value: serde_json::Value = read_json_file(&signature, "Sigstore bundle")?;
+    if !value.is_object() {
+        return Err(format!(
+            "Sigstore bundle {} is not a JSON object",
+            signature.display()
+        ));
+    }
+    Ok(())
+}
+
+fn remove_stale_sigstore_bundle(out_dir: &Path) -> Result<Option<PathBuf>, String> {
+    let path = out_dir.join(SIGSTORE_BUNDLE_NAME);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(Some(path)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "remove stale Sigstore bundle {}: {error}",
+            path.display()
+        )),
     }
 }
 
@@ -1887,6 +1920,57 @@ mod tests {
     }
 
     #[test]
+    fn verify_release_artifacts_rejects_signature_when_not_expected() {
+        let root =
+            create_temp_dir("fileferry-xtask-verify-unexpected-signature").expect("temp root");
+        let target = "x86_64-unknown-linux-gnu";
+        write_verify_release_fixture(&root, target, Some(r#"{"bundle":true}"#));
+
+        let error = verify_release_artifacts(VerifyReleaseArtifactsOptions {
+            dir: Some(root.clone()),
+            target: Some(target.to_string()),
+            expect_signature: false,
+        })
+        .expect_err("unexpected signature should fail unsigned verification");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(error.contains("unexpected Sigstore bundle"));
+        assert!(error.contains("--expect-signature"));
+    }
+
+    #[test]
+    fn verify_release_artifacts_rejects_malformed_signature_when_expected() {
+        let root = create_temp_dir("fileferry-xtask-verify-bad-signature").expect("temp root");
+        let target = "x86_64-unknown-linux-gnu";
+        write_verify_release_fixture(&root, target, Some("[]"));
+
+        let error = verify_release_artifacts(VerifyReleaseArtifactsOptions {
+            dir: Some(root.clone()),
+            target: Some(target.to_string()),
+            expect_signature: true,
+        })
+        .expect_err("malformed signature bundle should fail signed verification");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(error.contains("Sigstore bundle"));
+        assert!(error.contains("is not a JSON object"));
+    }
+
+    #[test]
+    fn remove_stale_sigstore_bundle_deletes_unsigned_package_leftover() {
+        let root = create_temp_dir("fileferry-xtask-stale-signature").expect("temp root");
+        let bundle = root.join(SIGSTORE_BUNDLE_NAME);
+        fs::write(&bundle, r#"{"bundle":true}"#).expect("write stale bundle");
+
+        let removed = remove_stale_sigstore_bundle(&root).expect("remove stale bundle");
+        let second = remove_stale_sigstore_bundle(&root).expect("ignore missing stale bundle");
+
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert_eq!(removed.as_deref(), Some(bundle.as_path()));
+        assert!(second.is_none());
+    }
+
+    #[test]
     fn verify_release_artifacts_rejects_wrong_archive_smoke_filename_target() {
         let root = create_temp_dir("fileferry-xtask-verify-smoke-name").expect("temp root");
         let target = "x86_64-unknown-linux-gnu";
@@ -2158,6 +2242,59 @@ mod tests {
                 binary_smoke: test_smoke(),
             }],
         }
+    }
+
+    fn write_verify_release_fixture(root: &Path, target: &str, signature_json: Option<&str>) {
+        let stem = format!("fileferry-0.0.0-{target}");
+        let archive_name = format!("{stem}.tar.gz");
+        let manifest_name = format!("{stem}.manifest.json");
+        let sbom_name = format!("{stem}.cdx.json");
+        let smoke_name = format!("fileferry-{target}.archive-smoke.json");
+        fs::write(root.join(&archive_name), b"archive").expect("write archive");
+        fs::write(
+            root.join(&sbom_name),
+            r#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#,
+        )
+        .expect("write sbom");
+        fs::write(root.join("install.sh"), b"#!/bin/sh\n").expect("write install.sh");
+        fs::write(root.join("install.ps1"), b"Write-Output ferry\n").expect("write install.ps1");
+        if let Some(signature_json) = signature_json {
+            fs::write(root.join(SIGSTORE_BUNDLE_NAME), signature_json)
+                .expect("write signature bundle");
+        }
+
+        let manifest = ReleaseManifest {
+            schema_version: 1,
+            package: "fileferry",
+            binary: "ferry",
+            version: "0.0.0",
+            target,
+            commit: "0123456789abcdef",
+            archive: archive_name.clone(),
+            installers: vec!["install.sh".to_string(), "install.ps1".to_string()],
+            auditable_build: true,
+            auditable_metadata: Some(test_auditable_metadata(target)),
+            sbom: Some(sbom_name.clone()),
+            smoke_test: Some(test_smoke()),
+            archive_smoke_test: Some(test_archive_smoke(target, &archive_name)),
+        };
+        write_json(&root.join(&manifest_name), &manifest).expect("write manifest");
+        write_json(
+            &root.join(&smoke_name),
+            &test_archive_smoke(target, &archive_name),
+        )
+        .expect("write archive smoke");
+        write_checksums(
+            &root.join("SHA256SUMS"),
+            &[
+                root.join(&archive_name),
+                root.join(&manifest_name),
+                root.join(&sbom_name),
+                root.join("install.sh"),
+                root.join("install.ps1"),
+            ],
+        )
+        .expect("write checksums");
     }
 
     fn test_auditable_metadata(target: &str) -> AuditableMetadataEvidence {
