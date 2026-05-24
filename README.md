@@ -107,6 +107,7 @@ ferry snapshots --json
 ferry find --all --glob 'Projects/**/*.rs'
 ferry diff --from-tag laptop --to-latest --path Projects
 ferry repo --verify --json
+ferry doctor --json
 ferry restore latest ~/restore-test
 ferry check --read-data-subset 5%
 ferry policy set --keep-daily 14 --keep-weekly 8
@@ -169,8 +170,8 @@ This is release-candidate security engineering, not an external audit claim.
   `ferry diff` for manifest-level snapshot comparison, `ferry repo` for safe
   repository status plus opt-in encrypted metadata/state verification, and
   `ferry policy` for encrypted repository-local retention policy config
-  storage, display, and explicit deletion; full repository rekey is not
-  implemented.
+  storage, display, and explicit deletion, plus `ferry doctor` for safe
+  repository diagnostics; full repository rekey is not implemented.
 - `ferry find` searches decrypted snapshot metadata after repository unlock. It
   does not search file contents or read chunk data.
 - `ferry diff` compares decrypted snapshot manifests after repository unlock.
@@ -181,6 +182,11 @@ This is release-candidate security engineering, not an external audit claim.
   and object keys. `ferry repo --verify` unlocks the repository and verifies
   encrypted metadata, indexes, forget markers, leases, policy, upload, and
   prune state without reading chunk data.
+- `ferry doctor` defaults to safe health summaries, unlocks current initialized
+  repositories to verify encrypted metadata and auxiliary state, and reads
+  chunk data only when `--read-data` or `--read-data-subset` is supplied.
+  Aggregate object-family counts require `--show-object-counts`. Doctor does
+  not repair repositories.
 - `ferry policy` stores retention policy config in encrypted repository
   objects. It does not automatically apply stored policies to `forget` yet.
 - S3-compatible behavior is tested against the current abstraction and a

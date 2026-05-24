@@ -199,6 +199,32 @@ fn command_failure_json(output: &[u8]) -> Value {
     serde_json::from_slice(output).expect("failure json")
 }
 
+fn assert_doctor_corruption_is_redacted(
+    repo_url: &str,
+    passphrase: &str,
+    expected_code: &str,
+    redacted_object_prefix: &str,
+) {
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", repo_url, "--json", "doctor"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output.clone()).expect("doctor failure utf8");
+    let failed = command_failure_json(&output);
+    assert_eq!(failed["command"], "doctor");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(failed["data"]["code"], expected_code);
+    assert_eq!(failed["data"]["exit_code"], 6);
+    assert_eq!(failed["data"]["object_key"], Value::Null);
+    assert_eq!(failed["data"]["path"], Value::Null);
+    assert!(!text.contains(redacted_object_prefix));
+}
+
 #[test]
 fn init_creates_encrypted_local_repository_and_snapshots_lists_it() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -590,6 +616,341 @@ fn repo_verify_checks_lease_and_prune_state() {
             .as_str()
             .unwrap()
             .starts_with("objects/prune-plan/")
+    );
+}
+
+#[test]
+fn doctor_reports_safe_health_without_backup_shape_by_default() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "doctor-passphrase";
+
+    let uninitialized_output = fileferry()
+        .args(["--repo", &repo_url, "--json", "doctor"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let uninitialized: Value =
+        serde_json::from_slice(&uninitialized_output).expect("doctor uninitialized json");
+    assert_eq!(uninitialized["command"], "doctor");
+    assert_eq!(uninitialized["status"], "success");
+    assert_eq!(uninitialized["data"]["initialized"], false);
+    assert_eq!(uninitialized["data"]["health"]["status"], "uninitialized");
+    assert_eq!(uninitialized["data"]["health"]["checked"], false);
+    assert!(uninitialized["data"]["verification"].is_null());
+    assert!(uninitialized["data"]["object_families"].is_null());
+    assert_eq!(uninitialized["data"]["repair"]["attempted"], false);
+    assert_eq!(uninitialized["data"]["repair"]["available"], false);
+
+    init_repo(&repo_url, passphrase);
+    let source = temp.path().join("doctor-source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(
+        source.join("do-not-leak-doctor-source-name.txt"),
+        b"doctor contents",
+    )
+    .expect("write source");
+    backup_source_with_tags(&repo_url, passphrase, &source, &["secret-doctor-tag"]);
+
+    let doctor_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "doctor"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let doctor_text = String::from_utf8(doctor_output.clone()).expect("doctor utf8");
+    let doctor: Value = serde_json::from_slice(&doctor_output).expect("doctor json");
+    assert_eq!(doctor["data"]["health"]["status"], "healthy");
+    assert_eq!(doctor["data"]["health"]["checked"], true);
+    assert_eq!(
+        doctor["data"]["verification"]["read_data_mode"],
+        "metadata_only"
+    );
+    assert_eq!(doctor["data"]["verification"]["chunk_objects_checked"], 0);
+    assert!(doctor["data"]["object_families"].is_null());
+    assert!(!doctor_text.contains("do-not-leak-doctor-source-name"));
+    assert!(!doctor_text.contains("secret-doctor-tag"));
+    assert!(!doctor_text.contains(passphrase));
+
+    let counted_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "doctor",
+            "--read-data-subset",
+            "1",
+            "--show-object-counts",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let events = String::from_utf8(counted_output)
+        .expect("doctor jsonl utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("doctor jsonl event"))
+        .collect::<Vec<_>>();
+    assert_eq!(events[0]["event"], "command_started");
+    assert_eq!(events.last().unwrap()["event"], "command_completed");
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["event"] == "progress" && event["data"]["phase"] == "read_data" })
+    );
+    let completed = events.last().expect("completed event");
+    assert_eq!(
+        completed["data"]["verification"]["read_data_mode"],
+        "subset"
+    );
+    assert!(
+        completed["data"]["verification"]["chunk_objects_checked"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        completed["data"]["object_families"]
+            .as_array()
+            .expect("object family counts")
+            .iter()
+            .any(|family| family["family"] == "manifest" && family["objects"] == 1)
+    );
+}
+
+#[test]
+fn doctor_handles_incompatible_and_corrupt_bootstrap_without_unlock() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let passphrase = "doctor-bootstrap-passphrase";
+
+    let version_repo = temp.path().join("version-repo");
+    let version_repo_url = version_repo.display().to_string();
+    init_repo(&version_repo_url, passphrase);
+    let mut bootstrap: Value =
+        serde_json::from_slice(&fs::read(version_repo.join("bootstrap")).expect("bootstrap bytes"))
+            .expect("bootstrap json");
+    bootstrap["format_version"] = json!(999);
+    fs::write(
+        version_repo.join("bootstrap"),
+        serde_json::to_vec(&bootstrap).expect("unsupported version json"),
+    )
+    .expect("write unsupported version");
+
+    let version_output = fileferry()
+        .args(["--repo", &version_repo_url, "--json", "doctor"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let version: Value = serde_json::from_slice(&version_output).expect("doctor version json");
+    assert_eq!(version["data"]["health"]["status"], "incompatible");
+    assert_eq!(
+        version["data"]["format"]["compatibility"],
+        "unsupported_future"
+    );
+    assert!(version["data"]["verification"].is_null());
+
+    let corrupt_repo = temp.path().join("corrupt-repo");
+    let corrupt_repo_url = corrupt_repo.display().to_string();
+    init_repo(&corrupt_repo_url, passphrase);
+    fs::write(corrupt_repo.join("bootstrap"), b"not-json").expect("corrupt bootstrap");
+    let corrupt_output = fileferry()
+        .args(["--repo", &corrupt_repo_url, "--json", "doctor"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let corrupt_text = String::from_utf8(corrupt_output.clone()).expect("corrupt utf8");
+    let corrupt = command_failure_json(&corrupt_output);
+    assert_eq!(
+        corrupt["data"]["code"],
+        "repository_bootstrap_decode_failed"
+    );
+    assert_eq!(corrupt["data"]["object_key"], Value::Null);
+    assert!(!corrupt_text.contains("not-json"));
+}
+
+#[test]
+fn doctor_failures_are_structured_redacted_and_hide_object_keys_by_default() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let passphrase = "doctor-corruption-passphrase";
+
+    let wrong_repo = temp.path().join("wrong-repo");
+    let wrong_repo_url = wrong_repo.display().to_string();
+    init_repo(&wrong_repo_url, passphrase);
+    let wrong_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-doctor-passphrase-canary")
+        .args(["--repo", &wrong_repo_url, "--json", "doctor"])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_text = String::from_utf8(wrong_output.clone()).expect("wrong utf8");
+    let wrong = command_failure_json(&wrong_output);
+    assert_eq!(wrong["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong["data"]["object_key"], Value::Null);
+    assert_eq!(wrong["data"]["path"], Value::Null);
+    assert!(!wrong_text.contains("wrong-doctor-passphrase-canary"));
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), patterned_bytes(5, 700_000)).expect("write source");
+
+    let manifest_repo = temp.path().join("manifest-repo");
+    let manifest_repo_url = manifest_repo.display().to_string();
+    init_repo(&manifest_repo_url, passphrase);
+    backup_source(&manifest_repo_url, passphrase, &source);
+    fs::write(
+        find_first_file(manifest_repo.join("objects/manifest")),
+        b"not encrypted manifest",
+    )
+    .expect("corrupt manifest");
+    assert_doctor_corruption_is_redacted(
+        &manifest_repo_url,
+        passphrase,
+        "repository_object_decode_failed",
+        "objects/manifest/",
+    );
+
+    let index_repo = temp.path().join("index-repo");
+    let index_repo_url = index_repo.display().to_string();
+    init_repo(&index_repo_url, passphrase);
+    backup_source(&index_repo_url, passphrase, &source);
+    fs::write(
+        find_first_file(index_repo.join("objects/index")),
+        b"not encrypted index",
+    )
+    .expect("corrupt index");
+    assert_doctor_corruption_is_redacted(
+        &index_repo_url,
+        passphrase,
+        "repository_object_decode_failed",
+        "objects/index/",
+    );
+
+    let policy_repo = temp.path().join("policy-repo");
+    let policy_repo_url = policy_repo.display().to_string();
+    init_repo(&policy_repo_url, passphrase);
+    let policy_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &policy_repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-daily",
+            "3",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let policy: Value = serde_json::from_slice(&policy_output).expect("policy json");
+    fs::write(
+        policy_repo.join(
+            policy["data"]["policy_object"]
+                .as_str()
+                .expect("policy object"),
+        ),
+        b"not encrypted policy",
+    )
+    .expect("corrupt policy");
+    assert_doctor_corruption_is_redacted(
+        &policy_repo_url,
+        passphrase,
+        "repository_policy_config_decode_failed",
+        "objects/policy/",
+    );
+
+    let lease_repo = temp.path().join("lease-repo");
+    let lease_repo_url = lease_repo.display().to_string();
+    init_repo(&lease_repo_url, passphrase);
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let store = LocalStore::new(&lease_repo);
+    let opened = runtime
+        .block_on(open_repository(
+            &store,
+            &SecretString::from(passphrase.to_owned()),
+        ))
+        .expect("open lease repo");
+    let pipeline =
+        BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id)).expect("pipeline");
+    let lease_id = "ab".repeat(32);
+    runtime
+        .block_on(pipeline.write_repository_lease_state(
+            &store,
+            &opened.master_key,
+            RepositoryLeaseStateRequest {
+                lease_id: lease_id.clone(),
+                writer_id: "cd".repeat(32),
+                command_kind: RepositoryLeaseCommandKind::RepositoryMaintenance,
+                acquired_at_unix_seconds: 10,
+                expires_at_unix_seconds: 20,
+            },
+        ))
+        .expect("write lease");
+    fs::write(
+        lease_repo.join("locks").join(&lease_id),
+        b"not encrypted lease",
+    )
+    .expect("corrupt lease");
+    assert_doctor_corruption_is_redacted(
+        &lease_repo_url,
+        passphrase,
+        "repository_lease_state_decode_failed",
+        "locks/",
+    );
+
+    let prune_repo = temp.path().join("prune-repo");
+    let prune_repo_url = prune_repo.display().to_string();
+    init_repo(&prune_repo_url, passphrase);
+    let prune_source = temp.path().join("prune-source");
+    fs::create_dir(&prune_source).expect("create prune source");
+    fs::write(prune_source.join("sample.txt"), b"first").expect("write first");
+    backup_source(&prune_repo_url, passphrase, &prune_source);
+    fs::write(prune_source.join("sample.txt"), b"second").expect("write second");
+    backup_source(&prune_repo_url, passphrase, &prune_source);
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &prune_repo_url, "forget", "--keep-last", "1"])
+        .assert()
+        .success()
+        .stderr("");
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &prune_repo_url, "prune"])
+        .assert()
+        .success()
+        .stderr("");
+    fs::write(
+        find_first_file(prune_repo.join("objects/prune-plan")),
+        b"not encrypted prune plan",
+    )
+    .expect("corrupt prune plan");
+    assert_doctor_corruption_is_redacted(
+        &prune_repo_url,
+        passphrase,
+        "repository_prune_plan_decode_failed",
+        "objects/prune-plan/",
     );
 }
 

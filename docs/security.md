@@ -330,6 +330,17 @@ body. `policy delete` authenticates the selected encrypted policy object before
 deleting it and supports `--dry-run`. Stored policy configs are not
 automatically applied by `forget` yet.
 
+`ferry doctor` exposes a diagnostic path for initialized local and
+S3-compatible repositories. For current initialized repositories it unlocks
+with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates encrypted
+snapshot metadata, indexes, forget markers, policy/config objects, upload
+state, lease state, and prune state, and reads referenced chunk data only when
+explicitly requested. Default success output omits decrypted snapshot shape and
+omits aggregate object-family counts unless `--show-object-counts` is supplied.
+Default doctor failure output hides object keys and filesystem paths; lower
+level commands remain available when an operator explicitly needs object-key
+context for manual investigation.
+
 Current upload-state fixture coverage includes one initialized repository with
 one encrypted upload-state object. Focused tests prove that current code
 authenticates and validates the fixture, rejects malformed encrypted framing and

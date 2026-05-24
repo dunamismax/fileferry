@@ -193,6 +193,22 @@ repo
   data.object_families: array of RepositoryObjectFamilyStatus
   data.verification: RepositoryVerificationStatus | null
 
+doctor
+  data.repository_url: redacted string
+  data.backend: "local" | "s3_compatible"
+  data.initialized: boolean
+  data.repository_id: string | null
+  data.format: RepositoryFormatStatus | null
+  data.storage: RepositoryStorageStatus
+  data.health.status: "healthy" | "uninitialized" | "incompatible" |
+                      "degraded"
+  data.health.checked: boolean
+  data.health.diagnostics: array of safe diagnostic strings
+  data.verification: RepositoryVerificationStatus | null
+  data.object_families: array of RepositoryObjectFamilyStatus | null
+  data.repair.attempted: boolean
+  data.repair.available: boolean
+
 check
   data.repository_id: string
   data.checked_at_unix_seconds: integer
@@ -547,6 +563,8 @@ init: validate_repository, create_bootstrap, write_key_slot, complete
 backup: walk_sources, plan_chunks, write_chunks, write_index, write_manifest, write_commit, complete
 restore: load_manifest, read_chunks, write_entries, apply_metadata, verify, complete
 check: load_commits, verify_metadata, verify_indexes, read_data, complete
+doctor: inspect_repository, verify_metadata, verify_auxiliary_state,
+        read_data, complete
 forget: load_snapshots, evaluate_policy, write_forget_state, complete
 prune: plan, mark, sweep, verify_reachability, complete
 key add: load_bootstrap, derive_key, write_key_slot, complete
@@ -644,6 +662,26 @@ repo command_started
 repo command_completed
   status: "success"
   data: Repo data schema above
+
+doctor command_started
+  status: "started"
+  data: null
+
+doctor progress
+  status: "started"
+  data.phase: "inspect_repository" | "verify_metadata" |
+              "verify_auxiliary_state" | "read_data" | "complete"
+  data.message: string
+  data.items_done: integer | null
+  data.items_total: integer | null
+  data.bytes_done: integer | null
+  data.bytes_total: integer | null
+  data.snapshot_id: null
+  data.object_key: null
+
+doctor command_completed
+  status: "success"
+  data: Doctor data schema above
 
 check command_started
   status: "started"
@@ -867,6 +905,24 @@ authenticates committed manifests, chunk indexes, forget markers, policy
 config objects, upload state, lease state, and prune state. It uses
 metadata-only repository checking and does not read chunk data. The command
 does not repair repositories.
+
+`ferry doctor` diagnoses local or S3-compatible repository health without
+repairing repository state. It reports safe operational facts and health
+summaries by default: initialized/uninitialized status, redacted repository
+URL, backend kind, format compatibility, storage requirement status, metadata
+verification counts, auxiliary-state verification counts, and repair
+availability. It does not print decrypted snapshot paths, tags, source names,
+object keys, per-snapshot state, or object-family counts by default. For a
+current initialized repository, doctor requires `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`, unlocks the repository, authenticates committed
+manifests, chunk indexes, forget markers, policy config objects, upload state,
+lease state, and prune state, and reads no chunk data unless `--read-data` or
+`--read-data-subset <N|PERCENT>` is supplied. `--show-object-counts` explicitly
+adds aggregate object-family counts. Unsupported future format versions and
+unsupported feature flags are reported as incompatible diagnostics without
+unlock. Runtime doctor failures hide object keys and filesystem paths in the
+default failure envelope; use lower-level commands such as `check` or
+`repo --verify` when object-key context is required for manual repair.
 
 `ferry check` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

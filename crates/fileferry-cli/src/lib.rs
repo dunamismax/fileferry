@@ -205,6 +205,25 @@ pub enum Command {
         read_data_subset: Option<CheckReadDataSubset>,
     },
 
+    /// Diagnose repository health without revealing backup shape by default.
+    Doctor {
+        /// Read and verify every referenced chunk object.
+        #[arg(long = "read-data", conflicts_with = "read_data_subset")]
+        read_data: bool,
+
+        /// Read and verify a deterministic subset of referenced chunks, as a count or percent.
+        #[arg(
+            long = "read-data-subset",
+            value_name = "N|PERCENT",
+            value_parser = parse_read_data_subset
+        )]
+        read_data_subset: Option<CheckReadDataSubset>,
+
+        /// Include aggregate repository object-family counts.
+        #[arg(long = "show-object-counts")]
+        show_object_counts: bool,
+    },
+
     /// Mark snapshots forgotten without deleting repository objects.
     Forget {
         /// Report what would be forgotten without writing forget markers.
@@ -411,6 +430,7 @@ impl Command {
             Self::Find { .. } => "find",
             Self::Diff { .. } => "diff",
             Self::Check { .. } => "check",
+            Self::Doctor { .. } => "doctor",
             Self::Forget { .. } => "forget",
             Self::Prune { .. } => "prune",
             Self::Policy {
@@ -1008,6 +1028,42 @@ struct RepoVerificationData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct DoctorData {
+    repository_url: String,
+    backend: CliBackendKind,
+    initialized: bool,
+    repository_id: Option<String>,
+    format: Option<RepoFormatData>,
+    storage: RepoStorageData,
+    health: DoctorHealthData,
+    verification: Option<RepoVerificationData>,
+    object_families: Option<Vec<RepoObjectFamilyData>>,
+    repair: DoctorRepairData,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct DoctorHealthData {
+    status: DoctorHealthStatus,
+    checked: bool,
+    diagnostics: Vec<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorHealthStatus {
+    Healthy,
+    Uninitialized,
+    Incompatible,
+    Degraded,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct DoctorRepairData {
+    attempted: bool,
+    available: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct KeyAddData {
     repository_id: String,
     key_slot_id: String,
@@ -1427,6 +1483,20 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             let config = resolve_config(&cli.globals)?;
             check(mode, &config, read_data_subset)
         }
+        Command::Doctor {
+            read_data,
+            read_data_subset,
+            show_object_counts,
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            doctor(
+                mode,
+                &config,
+                read_data,
+                read_data_subset,
+                show_object_counts,
+            )
+        }
         Command::Forget {
             dry_run,
             keep_last,
@@ -1594,7 +1664,7 @@ fn render_error_output(
     let output = match mode {
         OutputMode::Human => Output {
             stdout: String::new(),
-            stderr: format!("{error}\n"),
+            stderr: format!("{}\n", data.message),
             exit_code,
         },
         OutputMode::Json => {
@@ -1643,15 +1713,54 @@ fn render_error_output(
 fn failure_data(command: &'static str, error: &CliError, exit_code: i32) -> FailureData {
     FailureData {
         code: failure_code(error).to_owned(),
-        message: error.to_string(),
+        message: failure_message(command, error),
         exit_code,
         retryable: failure_retryable(error),
-        path: failure_path(error),
-        object_key: failure_object_key(error),
+        path: if command == "doctor" {
+            None
+        } else {
+            failure_path(error)
+        },
+        object_key: if command == "doctor" {
+            None
+        } else {
+            failure_object_key(error)
+        },
         finding: match error {
             CliError::Core(error) if command == "check" => check_finding_for_core_error(error),
             _ => None,
         },
+    }
+}
+
+fn failure_message(command: &'static str, error: &CliError) -> String {
+    if command != "doctor" {
+        return error.to_string();
+    }
+
+    match error {
+        CliError::Repository(RepositoryError::MissingPassword) => {
+            "repository doctor could not unlock the repository".to_owned()
+        }
+        CliError::Core(error) if matches!(error.as_ref(), CoreError::RepositoryUnlock { .. }) => {
+            "repository doctor could not unlock the repository".to_owned()
+        }
+        CliError::Core(error)
+            if matches!(
+                error.as_ref(),
+                CoreError::UnsupportedRepositoryFormat { .. }
+                    | CoreError::UnsupportedRepositoryFeatures
+            ) =>
+        {
+            "repository doctor found an incompatible repository format".to_owned()
+        }
+        CliError::Core(error) if core_exit_code(error) == 6 => {
+            "repository doctor found an integrity or metadata problem".to_owned()
+        }
+        CliError::Core(error) if matches!(error.as_ref(), CoreError::Storage { .. }) => {
+            "repository doctor could not read repository storage".to_owned()
+        }
+        _ => "repository doctor failed".to_owned(),
     }
 }
 
@@ -2830,6 +2939,146 @@ fn check(
     ))?;
 
     emit_check_command(mode, data)
+}
+
+fn doctor(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    read_data: bool,
+    read_data_subset: Option<CheckReadDataSubset>,
+    show_object_counts: bool,
+) -> Result<Output, CliError> {
+    let repository = repository_store_for_command(
+        config,
+        "doctor",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
+    let runtime = tokio_runtime()?;
+    let capabilities = repository.store.capabilities();
+    let storage = repo_storage_data(capabilities);
+    let families = if show_object_counts {
+        Some(runtime.block_on(inspect_repository_object_families(
+            repository.store.as_ref(),
+        ))?)
+    } else {
+        None
+    };
+    let inspection = match runtime.block_on(inspect_repository_format(repository.store.as_ref())) {
+        Ok(inspection) => Some(inspection),
+        Err(CoreError::RepositoryNotInitialized) => None,
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut verification = None;
+    let mut diagnostics = Vec::new();
+    let checked;
+    let status;
+
+    match &inspection {
+        None => {
+            checked = false;
+            status = DoctorHealthStatus::Uninitialized;
+            diagnostics.push("repository is not initialized");
+        }
+        Some(inspection) if inspection.compatibility != RepositoryFormatCompatibility::Current => {
+            checked = false;
+            status = DoctorHealthStatus::Incompatible;
+            diagnostics.push("repository format is not compatible with this build");
+        }
+        Some(_) if !storage.repository_requirements_met => {
+            checked = false;
+            status = DoctorHealthStatus::Degraded;
+            diagnostics.push("storage backend does not meet repository requirements");
+        }
+        Some(_) => {
+            let passphrase = repository_passphrase()?;
+            let opened =
+                runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
+            let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+            let options = doctor_check_options(read_data, read_data_subset);
+            let check = runtime.block_on(pipeline.check_repository_with_options(
+                repository.store.as_ref(),
+                &opened.master_key,
+                options,
+            ))?;
+            let forget_markers_checked = runtime
+                .block_on(pipeline.read_forgotten_snapshot_ids(repository.store.as_ref()))?
+                .len();
+            let auxiliary =
+                runtime.block_on(pipeline.check_repository_auxiliary_state(
+                    repository.store.as_ref(),
+                    &opened.master_key,
+                ))?;
+            verification = Some(RepoVerificationData {
+                unlocked: true,
+                key_slots: opened.key_slots,
+                metadata_objects_checked: check.metadata_objects_checked,
+                chunk_objects_checked: check.chunk_objects_checked,
+                bytes_read: check.bytes_read,
+                read_data_mode: check.read_data_mode,
+                forget_markers_checked,
+                policy_configs_checked: auxiliary.policy_configs_checked,
+                upload_states_checked: auxiliary.upload_states_checked,
+                lease_states_checked: auxiliary.lease_states_checked,
+                prune_plans_checked: auxiliary.prune_plans_checked,
+                prune_completions_checked: auxiliary.prune_completions_checked,
+            });
+            checked = true;
+            status = DoctorHealthStatus::Healthy;
+            diagnostics.push("repository metadata and configured health checks passed");
+        }
+    }
+
+    let data = DoctorData {
+        repository_url: redact_for_display(&repository.url),
+        backend: repository.backend,
+        initialized: inspection.is_some(),
+        repository_id: inspection
+            .as_ref()
+            .map(|inspection| inspection.repository_id.clone()),
+        format: inspection.as_ref().map(|inspection| RepoFormatData {
+            format_version: inspection.format_version,
+            latest_supported_format_version: inspection.latest_supported_format_version,
+            compatibility: repo_format_compatibility(inspection.compatibility),
+            features: inspection.features.clone(),
+        }),
+        storage,
+        health: DoctorHealthData {
+            status,
+            checked,
+            diagnostics,
+        },
+        verification,
+        object_families: families.map(|families| {
+            families
+                .iter()
+                .map(|summary| RepoObjectFamilyData {
+                    family: repo_object_family_name(summary.family),
+                    objects: summary.objects,
+                    status: repo_object_family_status(summary.family, summary.objects, checked),
+                })
+                .collect()
+        }),
+        repair: DoctorRepairData {
+            attempted: false,
+            available: false,
+        },
+    };
+
+    emit_doctor_command(mode, data)
+}
+
+fn doctor_check_options(
+    read_data: bool,
+    read_data_subset: Option<CheckReadDataSubset>,
+) -> CheckRepositoryOptions {
+    if let Some(subset) = read_data_subset {
+        CheckRepositoryOptions::subset(subset)
+    } else if read_data {
+        CheckRepositoryOptions::full()
+    } else {
+        CheckRepositoryOptions::metadata_only()
+    }
 }
 
 fn forget(
@@ -4164,6 +4413,186 @@ fn restore_warning_stderr(warnings: &[RestoreMetadataWarning]) -> String {
             )
         })
         .collect()
+}
+
+fn emit_doctor_command(mode: OutputMode, data: DoctorData) -> Result<Output, CliError> {
+    let stdout = match mode {
+        OutputMode::Human => doctor_human_output(&data),
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command: "doctor",
+                status: CommandStatus::Success,
+                data,
+            };
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<DoctorData> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command: "doctor",
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let phases = doctor_progress_phases(&data);
+            let mut lines = vec![serde_json::to_string(&started)?];
+            for (phase, message) in phases {
+                let event = CommandEvent {
+                    schema_version: OUTPUT_SCHEMA_VERSION,
+                    event: EventKind::Progress,
+                    command: "doctor",
+                    status: CommandStatus::Started,
+                    data: Some(ProgressData {
+                        phase,
+                        message,
+                        items_done: data.verification.as_ref().map(|verification| {
+                            verification.metadata_objects_checked
+                                + verification.chunk_objects_checked
+                                + verification.policy_configs_checked
+                                + verification.upload_states_checked
+                                + verification.lease_states_checked
+                                + verification.prune_plans_checked
+                                + verification.prune_completions_checked
+                        }),
+                        items_total: data.verification.as_ref().map(|verification| {
+                            verification.metadata_objects_checked
+                                + verification.chunk_objects_checked
+                                + verification.policy_configs_checked
+                                + verification.upload_states_checked
+                                + verification.lease_states_checked
+                                + verification.prune_plans_checked
+                                + verification.prune_completions_checked
+                        }),
+                        bytes_done: data
+                            .verification
+                            .as_ref()
+                            .map(|verification| verification.bytes_read),
+                        bytes_total: data
+                            .verification
+                            .as_ref()
+                            .map(|verification| verification.bytes_read),
+                        snapshot_id: None,
+                        object_key: None,
+                    }),
+                };
+                lines.push(serde_json::to_string(&event)?);
+            }
+            let completed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandCompleted,
+                command: "doctor",
+                status: CommandStatus::Success,
+                data: Some(data),
+            };
+            lines.push(serde_json::to_string(&completed)?);
+            lines.join("\n") + "\n"
+        }
+    };
+
+    Ok(Output {
+        stdout,
+        stderr: String::new(),
+        exit_code: 0,
+    })
+}
+
+fn doctor_progress_phases(data: &DoctorData) -> Vec<(&'static str, &'static str)> {
+    let mut phases = vec![(
+        "inspect_repository",
+        "inspected repository bootstrap and storage",
+    )];
+    if data.health.checked {
+        phases.push(("verify_metadata", "verified encrypted repository metadata"));
+        phases.push((
+            "verify_auxiliary_state",
+            "verified encrypted auxiliary repository state",
+        ));
+        if data.verification.as_ref().is_some_and(|verification| {
+            verification.read_data_mode != fileferry_core::CheckReadDataMode::MetadataOnly
+        }) {
+            phases.push(("read_data", "read and verified referenced chunk data"));
+        }
+    }
+    phases.push(("complete", "completed repository diagnostics"));
+    phases
+}
+
+fn doctor_human_output(data: &DoctorData) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Repository doctor status={}",
+        display_doctor_health_status(data.health.status)
+    ));
+    lines.push(format!(
+        "repository={} backend={} initialized={}",
+        data.repository_url, data.backend, data.initialized
+    ));
+    if let Some(repository_id) = &data.repository_id {
+        lines.push(format!("repository_id={repository_id}"));
+    }
+    if let Some(format) = &data.format {
+        lines.push(format!(
+            "format_version={} latest_supported_format_version={} compatibility={}",
+            format.format_version,
+            format.latest_supported_format_version,
+            display_repo_format_compatibility(format.compatibility)
+        ));
+    }
+    lines.push(format!(
+        "storage repository_requirements_met={} conditional_create={} delete={} listing={}",
+        data.storage.repository_requirements_met,
+        data.storage.conditional_create,
+        data.storage.delete,
+        data.storage.listing
+    ));
+    if let Some(verification) = &data.verification {
+        lines.push(format!(
+            "verification checked={} read_data_mode={} metadata_objects_checked={} chunk_objects_checked={} bytes_read={}",
+            data.health.checked,
+            display_check_read_data_mode(verification.read_data_mode),
+            verification.metadata_objects_checked,
+            verification.chunk_objects_checked,
+            verification.bytes_read
+        ));
+        lines.push(format!(
+            "auxiliary_state forget_markers_checked={} policy_configs_checked={} upload_states_checked={} lease_states_checked={} prune_plans_checked={} prune_completions_checked={}",
+            verification.forget_markers_checked,
+            verification.policy_configs_checked,
+            verification.upload_states_checked,
+            verification.lease_states_checked,
+            verification.prune_plans_checked,
+            verification.prune_completions_checked
+        ));
+    }
+    if let Some(families) = &data.object_families {
+        lines.push("object_families:".to_owned());
+        lines.extend(families.iter().map(|family| {
+            format!(
+                "  {} objects={} status={}",
+                family.family,
+                family.objects,
+                display_repo_object_family_status(family.status)
+            )
+        }));
+    }
+    lines.extend(
+        data.health
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("diagnostic={diagnostic}")),
+    );
+    lines.push("repair attempted=false available=false".to_owned());
+    lines.join("\n") + "\n"
+}
+
+fn display_doctor_health_status(status: DoctorHealthStatus) -> &'static str {
+    match status {
+        DoctorHealthStatus::Healthy => "healthy",
+        DoctorHealthStatus::Uninitialized => "uninitialized",
+        DoctorHealthStatus::Incompatible => "incompatible",
+        DoctorHealthStatus::Degraded => "degraded",
+    }
 }
 
 fn emit_check_command(
