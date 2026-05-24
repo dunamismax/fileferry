@@ -104,6 +104,7 @@ ferry init
 ferry backup ~/Documents --tag laptop --jsonl
 ferry snapshots --json
 ferry find --all --glob 'Projects/**/*.rs'
+ferry diff --from-tag laptop --to-latest --path Projects
 ferry restore latest ~/restore-test
 ferry check --read-data-subset 5%
 ferry forget --keep-daily 14 --keep-weekly 8 --dry-run
@@ -160,10 +161,15 @@ This is release-candidate security engineering, not an external audit claim.
   rewrite repository data with a new master key.
 - The published `1.0.0-rc.1` artifacts include recovery export but not
   recovery import or `ferry find`. Current main adds recovery import as a new
-  external key slot and adds `ferry find` for encrypted snapshot-metadata
-  search; full repository rekey is not implemented.
+  external key slot, `ferry find` for encrypted snapshot-metadata search, and
+  `ferry diff` for manifest-level snapshot comparison; full repository rekey is
+  not implemented.
 - `ferry find` searches decrypted snapshot metadata after repository unlock. It
   does not search file contents or read chunk data.
+- `ferry diff` compares decrypted snapshot manifests after repository unlock.
+  It reports added, removed, changed, and unchanged entries, including regular
+  file content-identity changes from manifest chunk references, but it does not
+  read chunk data or compare file contents byte-by-byte.
 - S3-compatible behavior is tested against the current abstraction and a
   private Backblaze B2 development bucket. It is not a blanket claim for every
   S3-compatible provider.

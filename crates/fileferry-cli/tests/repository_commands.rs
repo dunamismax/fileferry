@@ -6,6 +6,7 @@ use fileferry_core::{
 use fileferry_storage::{
     LocalStore, ObjectKey, ObjectKeyPrefix, ObjectStore, S3Store, S3StoreConfig,
 };
+use predicates::prelude::PredicateBooleanExt;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use std::{
@@ -4938,6 +4939,299 @@ fn find_no_match_and_wrong_password_are_structured_and_redacted() {
     assert_eq!(wrong["data"]["code"], "repository_unlock_failed");
     assert_eq!(wrong["data"]["exit_code"], 4);
     assert!(!wrong_text.contains("wrong-find-passphrase-canary"));
+}
+
+#[test]
+fn diff_compares_snapshot_manifests_with_scriptable_output() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("changed.txt"), b"version-one").expect("write changed");
+    fs::write(source.join("removed.txt"), b"removed").expect("write removed");
+    fs::write(source.join("same.txt"), b"same").expect("write same");
+    let first_backup = backup_source_with_tags(&repo_url, passphrase, &source, &["before"]);
+    let first_snapshot_id = first_backup["data"]["snapshot_id"]
+        .as_str()
+        .expect("first snapshot id")
+        .to_owned();
+
+    fs::write(source.join("changed.txt"), b"version-two").expect("modify changed");
+    fs::remove_file(source.join("removed.txt")).expect("remove file");
+    fs::write(source.join("added.txt"), b"added").expect("write added");
+    let second_backup = backup_source_with_tags(&repo_url, passphrase, &source, &["after"]);
+    let second_snapshot_id = second_backup["data"]["snapshot_id"]
+        .as_str()
+        .expect("second snapshot id")
+        .to_owned();
+
+    let diff_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "diff",
+            "--from-snapshot",
+            &first_snapshot_id,
+            "--to-snapshot",
+            &second_snapshot_id,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let diff: Value = serde_json::from_slice(&diff_output).expect("diff json");
+    assert_eq!(diff["command"], "diff");
+    assert_eq!(diff["status"], "success");
+    assert_eq!(diff["data"]["from_snapshot_id"], first_snapshot_id);
+    assert_eq!(diff["data"]["to_snapshot_id"], second_snapshot_id);
+    assert_eq!(diff["data"]["path_scopes"], json!(["."]));
+    assert_eq!(diff["data"]["added_count"], 1);
+    assert_eq!(diff["data"]["removed_count"], 1);
+    assert_eq!(diff["data"]["changed_count"], 1);
+    assert_eq!(diff["data"]["unchanged_count"], 1);
+
+    let entries = diff["data"]["entries"].as_array().expect("diff entries");
+    let changed = entries
+        .iter()
+        .find(|entry| entry["path"] == platform_relative_path("changed.txt"))
+        .expect("changed entry");
+    assert_eq!(changed["status"], "changed");
+    assert_eq!(changed["content_changed"], true);
+    assert_eq!(changed["from"]["kind"], "regular_file");
+    assert_eq!(changed["to"]["kind"], "regular_file");
+    assert_eq!(changed["from"]["size_bytes"], 11);
+    assert_eq!(changed["to"]["size_bytes"], 11);
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry["path"] == platform_relative_path("added.txt"))
+            .expect("added entry")["status"],
+        "added"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry["path"] == platform_relative_path("removed.txt"))
+            .expect("removed entry")["status"],
+        "removed"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry["path"] == platform_relative_path("same.txt"))
+            .expect("same entry")["status"],
+        "unchanged"
+    );
+
+    let scoped_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "diff",
+            "--from-tag",
+            "before",
+            "--to-tag",
+            "after",
+            "--path",
+            "changed.txt",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let scoped: Value = serde_json::from_slice(&scoped_output).expect("scoped diff json");
+    assert_eq!(
+        scoped["data"]["path_scopes"],
+        json!([platform_relative_path("changed.txt")])
+    );
+    assert_eq!(scoped["data"]["added_count"], 0);
+    assert_eq!(scoped["data"]["removed_count"], 0);
+    assert_eq!(scoped["data"]["changed_count"], 1);
+    assert_eq!(scoped["data"]["unchanged_count"], 0);
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "diff",
+            "--from-snapshot",
+            &first_snapshot_id,
+            "--to-snapshot",
+            &second_snapshot_id,
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("added=1 removed=1 changed=1 unchanged=1").and(
+                predicates::str::contains("changed\tfile\t11\tcontent_changed=true"),
+            ),
+        )
+        .stderr("");
+
+    let jsonl_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "diff",
+            "--from-snapshot",
+            &first_snapshot_id,
+            "--to-snapshot",
+            &second_snapshot_id,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = jsonl_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let started: Value = serde_json::from_slice(lines[0]).expect("diff started");
+    let completed: Value = serde_json::from_slice(lines[1]).expect("diff completed");
+    assert_eq!(started["event"], "command_started");
+    assert_eq!(started["command"], "diff");
+    assert_eq!(completed["event"], "command_completed");
+    assert_eq!(completed["command"], "diff");
+    assert_eq!(completed["data"]["changed_count"], 1);
+}
+
+#[test]
+fn diff_no_difference_missing_path_wrong_password_and_missing_manifest_are_structured() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("same.txt"), b"same").expect("write same");
+    let backup = backup_source(&repo_url, passphrase, &source);
+    let snapshot_id = backup["data"]["snapshot_id"]
+        .as_str()
+        .expect("snapshot id")
+        .to_owned();
+
+    let no_diff_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "diff",
+            "--from-snapshot",
+            &snapshot_id,
+            "--to-snapshot",
+            &snapshot_id,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let no_diff: Value = serde_json::from_slice(&no_diff_output).expect("no diff json");
+    assert_eq!(no_diff["data"]["added_count"], 0);
+    assert_eq!(no_diff["data"]["removed_count"], 0);
+    assert_eq!(no_diff["data"]["changed_count"], 0);
+    assert_eq!(no_diff["data"]["unchanged_count"], 1);
+
+    let missing_path_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "diff",
+            "--from-snapshot",
+            &snapshot_id,
+            "--to-snapshot",
+            &snapshot_id,
+            "--path",
+            "missing.txt",
+        ])
+        .assert()
+        .code(7)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let missing_path: Value =
+        serde_json::from_slice(&missing_path_output).expect("missing path json");
+    assert_eq!(missing_path["command"], "diff");
+    assert_eq!(missing_path["status"], "failure");
+    assert_eq!(missing_path["data"]["code"], "snapshot_path_not_found");
+    assert_eq!(missing_path["data"]["exit_code"], 7);
+
+    let wrong_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-diff-passphrase-canary")
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "diff",
+            "--from-snapshot",
+            &snapshot_id,
+            "--to-snapshot",
+            &snapshot_id,
+        ])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_text = String::from_utf8(wrong_output.clone()).expect("wrong diff utf8");
+    let wrong: Value = serde_json::from_slice(&wrong_output).expect("wrong diff json");
+    assert_eq!(wrong["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong["data"]["exit_code"], 4);
+    assert!(!wrong_text.contains("wrong-diff-passphrase-canary"));
+
+    let manifest_path = find_first_file(repo.join("objects/manifest"));
+    fs::remove_file(manifest_path).expect("remove manifest");
+    let missing_manifest_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "diff",
+            "--from-snapshot",
+            &snapshot_id,
+            "--to-snapshot",
+            &snapshot_id,
+        ])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let missing_manifest: Value =
+        serde_json::from_slice(&missing_manifest_output).expect("missing manifest json");
+    assert_eq!(
+        missing_manifest["data"]["code"],
+        "repository_referenced_object_missing"
+    );
+    assert_eq!(missing_manifest["data"]["exit_code"], 6);
 }
 
 #[test]

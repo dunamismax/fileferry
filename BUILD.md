@@ -20,8 +20,8 @@ candidate.
 
 Implemented and tested in current main:
 
-- `ferry init`, `backup`, `restore`, `snapshots`, `ls`, `check`, `forget`,
-  `find`, `prune`, `completion`, and `version`.
+- `ferry init`, `backup`, `restore`, `snapshots`, `ls`, `find`, `diff`,
+  `check`, `forget`, `prune`, `completion`, and `version`.
 - Key add, marker-based key remove, limited unlock rotation, encrypted
   recovery export, and recovery import as a new external key slot. Full
   repository rekey and bootstrap-slot removal are not implemented.
@@ -106,8 +106,8 @@ Core product:
 - [x] Encrypted local and S3-compatible repository initialization.
 - [x] Encrypted, compressed, deduplicated backup snapshots.
 - [x] Restore by latest, snapshot id, tag, and path.
-- [x] `snapshots`, `ls`, `find`, `check`, `forget`, and recoverable two-phase
-      `prune`.
+- [x] `snapshots`, `ls`, `find`, `diff`, `check`, `forget`, and recoverable
+      two-phase `prune`.
 - [x] Key add/remove/rotate/export-recovery/import-recovery paths.
 - [x] Stable config profiles and environment variables.
 - [x] Shell completion generation.
@@ -145,7 +145,7 @@ Platform and release:
 Additional command surface:
 
 - [x] `ferry find`.
-- [ ] `ferry diff`.
+- [x] `ferry diff`.
 - [ ] `ferry repo`.
 - [ ] `ferry policy`.
 - [ ] `ferry doctor`.
@@ -171,6 +171,9 @@ FUSE mount, and compatibility with existing backup repository formats.
   repository data with a new master key.
 - `ferry find` searches encrypted snapshot metadata after repository unlock.
   It does not search file contents or read chunk data.
+- `ferry diff` compares encrypted snapshot metadata after repository unlock.
+  It uses manifest chunk references for regular-file content identity, but it
+  does not read chunk data or compare file contents byte-by-byte.
 - Command leases cover current mutation paths. They are not a full stale-lease
   repair system or broad concurrent-backup proof.
 - S3-compatible behavior must be described only to the level backed by current

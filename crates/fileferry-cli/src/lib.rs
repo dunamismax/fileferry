@@ -6,8 +6,8 @@ use fileferry_core::{
     RECOVERY_EXPORT_WARNING, RepositoryAeadAlgorithm, RestoreDestinationAction,
     RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotFindRequest,
     SnapshotFindScope, SnapshotSelection, add_repository_key_slot, create_repository,
-    export_repository_recovery, find_snapshot_entries, import_repository_recovery,
-    list_snapshot_entries, open_repository, remove_repository_key_slot,
+    diff_snapshot_entries, export_repository_recovery, find_snapshot_entries,
+    import_repository_recovery, list_snapshot_entries, open_repository, remove_repository_key_slot,
     rotate_repository_key_slots, select_snapshot, snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
@@ -158,6 +158,37 @@ pub enum Command {
         /// Snapshot-relative glob to match. Supports *, ?, and ** path segments.
         #[arg(long = "glob", value_name = "GLOB")]
         globs: Vec<String>,
+    },
+
+    /// Compare two committed snapshots.
+    Diff {
+        /// Snapshot id for the older side.
+        #[arg(long = "from-snapshot", conflicts_with_all = ["from_tag", "from_latest"])]
+        from_snapshot: Option<String>,
+
+        /// Select the newest older-side snapshot with this tag.
+        #[arg(long = "from-tag", conflicts_with_all = ["from_snapshot", "from_latest"])]
+        from_tag: Option<String>,
+
+        /// Select the newest committed snapshot for the older side.
+        #[arg(long = "from-latest", conflicts_with_all = ["from_snapshot", "from_tag"])]
+        from_latest: bool,
+
+        /// Snapshot id for the newer side.
+        #[arg(long = "to-snapshot", conflicts_with_all = ["to_tag", "to_latest"])]
+        to_snapshot: Option<String>,
+
+        /// Select the newest newer-side snapshot with this tag.
+        #[arg(long = "to-tag", conflicts_with_all = ["to_snapshot", "to_latest"])]
+        to_tag: Option<String>,
+
+        /// Select the newest committed snapshot for the newer side.
+        #[arg(long = "to-latest", conflicts_with_all = ["to_snapshot", "to_tag"])]
+        to_latest: bool,
+
+        /// Snapshot-relative path to compare exactly or as a subtree. May be repeated.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<PathBuf>,
     },
 
     /// Verify an initialized local repository.
@@ -314,6 +345,7 @@ impl Command {
             Self::Snapshots => "snapshots",
             Self::Ls { .. } => "ls",
             Self::Find { .. } => "find",
+            Self::Diff { .. } => "diff",
             Self::Check { .. } => "check",
             Self::Forget { .. } => "forget",
             Self::Prune { .. } => "prune",
@@ -538,6 +570,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidChunkingConfig { .. } => 1,
         CoreError::SourceRootNotAbsolute { .. }
         | CoreError::InvalidCheckDataSubset { .. }
+        | CoreError::InvalidDiffRequest { .. }
         | CoreError::InvalidFindRequest { .. }
         | CoreError::InvalidKeyRotation { .. }
         | CoreError::InvalidRestoreRequest { .. }
@@ -1028,6 +1061,29 @@ enum CliFindMatchReason {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct DiffData {
+    from_snapshot_id: String,
+    to_snapshot_id: String,
+    path_scopes: Vec<String>,
+    added_count: usize,
+    removed_count: usize,
+    changed_count: usize,
+    unchanged_count: usize,
+    entries: Vec<CliDiffEntry>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct CliDiffEntry {
+    path: String,
+    status: fileferry_core::SnapshotDiffEntryStatus,
+    from: Option<CliSnapshotEntry>,
+    to: Option<CliSnapshotEntry>,
+    content_changed: bool,
+    metadata_changed: bool,
+    metadata_changes: Vec<fileferry_core::SnapshotDiffMetadataChange>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct ForgetData {
     dry_run: bool,
     snapshots_matched: usize,
@@ -1163,6 +1219,24 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
                 paths,
                 names,
                 globs,
+            )
+        }
+        Command::Diff {
+            from_snapshot,
+            from_tag,
+            from_latest,
+            to_snapshot,
+            to_tag,
+            to_latest,
+            paths,
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            diff(
+                mode,
+                &config,
+                diff_selection(from_snapshot, from_tag, from_latest, "from")?,
+                diff_selection(to_snapshot, to_tag, to_latest, "to")?,
+                paths,
             )
         }
         Command::Check { read_data_subset } => {
@@ -1464,6 +1538,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::UnsupportedRepositoryFeatures => "repository_features_unsupported",
         CoreError::RepositoryUnlock { .. } => "repository_unlock_failed",
         CoreError::SnapshotNotFound { .. } => "snapshot_not_found",
+        CoreError::InvalidDiffRequest { .. } => "diff_request_invalid",
         CoreError::InvalidFindRequest { .. } => "find_request_invalid",
         CoreError::FindNoMatches => "find_no_matches",
         CoreError::SnapshotPathNotFound { .. } => "snapshot_path_not_found",
@@ -2413,6 +2488,99 @@ fn find(
     })
 }
 
+fn diff(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    from: SnapshotSelection,
+    to: SnapshotSelection,
+    paths: Vec<PathBuf>,
+) -> Result<Output, CliError> {
+    let loaded = load_repository_snapshots_for_command(config, "diff")?;
+    let result = diff_snapshot_entries(
+        &loaded.manifests,
+        &fileferry_core::SnapshotDiffRequest { from, to, paths },
+    )?;
+    let data = DiffData {
+        from_snapshot_id: result.from_snapshot_id,
+        to_snapshot_id: result.to_snapshot_id,
+        path_scopes: result
+            .path_scopes
+            .iter()
+            .map(|path| display_snapshot_path(path))
+            .collect(),
+        added_count: result.added_count,
+        removed_count: result.removed_count,
+        changed_count: result.changed_count,
+        unchanged_count: result.unchanged_count,
+        entries: result
+            .entries
+            .iter()
+            .map(|entry| CliDiffEntry {
+                path: display_snapshot_path(&entry.path),
+                status: entry.status,
+                from: entry
+                    .from
+                    .as_ref()
+                    .map(CliSnapshotEntry::from_snapshot_entry),
+                to: entry.to.as_ref().map(CliSnapshotEntry::from_snapshot_entry),
+                content_changed: entry.content_changed,
+                metadata_changed: entry.metadata_changed,
+                metadata_changes: entry.metadata_changes.clone(),
+            })
+            .collect(),
+    };
+
+    emit_command(mode, "diff", data, |data| {
+        let mut lines = vec![format!(
+            "from={} to={} added={} removed={} changed={} unchanged={}",
+            data.from_snapshot_id,
+            data.to_snapshot_id,
+            data.added_count,
+            data.removed_count,
+            data.changed_count,
+            data.unchanged_count
+        )];
+
+        lines.extend(data.entries.iter().map(|entry| {
+            let size = entry
+                .to
+                .as_ref()
+                .or(entry.from.as_ref())
+                .and_then(|side| side.size_bytes)
+                .map(|size| size.to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            let kind = entry
+                .to
+                .as_ref()
+                .or(entry.from.as_ref())
+                .map(|side| display_entry_kind(&side.kind))
+                .unwrap_or("-");
+            let changes = if entry.metadata_changes.is_empty() {
+                "-".to_owned()
+            } else {
+                entry
+                    .metadata_changes
+                    .iter()
+                    .map(display_diff_metadata_change)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+
+            format!(
+                "{}\t{}\t{}\tcontent_changed={}\tmetadata_changes={}\t{}",
+                display_diff_status(entry.status),
+                kind,
+                size,
+                entry.content_changed,
+                changes,
+                entry.path
+            )
+        }));
+
+        lines.join("\n") + "\n"
+    })
+}
+
 fn check(
     mode: OutputMode,
     config: &ResolvedConfig,
@@ -3056,6 +3224,31 @@ fn snapshot_selection(
     }
 }
 
+fn diff_selection(
+    snapshot: Option<String>,
+    tag: Option<String>,
+    latest: bool,
+    side: &'static str,
+) -> Result<SnapshotSelection, CliError> {
+    match (snapshot, tag, latest) {
+        (Some(snapshot), None, false) => Ok(SnapshotSelection::Id(snapshot)),
+        (None, Some(tag), false) => Ok(SnapshotSelection::Tag(tag)),
+        (None, None, true) => Ok(SnapshotSelection::Latest),
+        (None, None, false) => Err(CoreError::InvalidDiffRequest {
+            reason: if side == "from" {
+                "provide --from-snapshot, --from-tag, or --from-latest"
+            } else {
+                "provide --to-snapshot, --to-tag, or --to-latest"
+            },
+        }
+        .into()),
+        _ => Err(CoreError::InvalidDiffRequest {
+            reason: "provide only one selector per diff side",
+        }
+        .into()),
+    }
+}
+
 fn find_scope(
     snapshots: Vec<String>,
     tags: Vec<String>,
@@ -3089,6 +3282,38 @@ fn display_find_match_reason(reason: &CliFindMatchReason) -> &'static str {
         CliFindMatchReason::Name => "name",
         CliFindMatchReason::Glob => "glob",
         CliFindMatchReason::Tag => "tag",
+    }
+}
+
+fn display_diff_status(status: fileferry_core::SnapshotDiffEntryStatus) -> &'static str {
+    match status {
+        fileferry_core::SnapshotDiffEntryStatus::Added => "added",
+        fileferry_core::SnapshotDiffEntryStatus::Removed => "removed",
+        fileferry_core::SnapshotDiffEntryStatus::Changed => "changed",
+        fileferry_core::SnapshotDiffEntryStatus::Unchanged => "unchanged",
+    }
+}
+
+fn display_diff_metadata_change(
+    change: &fileferry_core::SnapshotDiffMetadataChange,
+) -> &'static str {
+    match change {
+        fileferry_core::SnapshotDiffMetadataChange::Kind => "kind",
+        fileferry_core::SnapshotDiffMetadataChange::Size => "size",
+        fileferry_core::SnapshotDiffMetadataChange::Modified => "modified",
+        fileferry_core::SnapshotDiffMetadataChange::Created => "created",
+        fileferry_core::SnapshotDiffMetadataChange::SymlinkTarget => "symlink_target",
+        fileferry_core::SnapshotDiffMetadataChange::UnixMode => "unix_mode",
+        fileferry_core::SnapshotDiffMetadataChange::UnixOwner => "unix_owner",
+        fileferry_core::SnapshotDiffMetadataChange::XattrsStatus => "xattrs_status",
+        fileferry_core::SnapshotDiffMetadataChange::AclsStatus => "acls_status",
+        fileferry_core::SnapshotDiffMetadataChange::FileFlagsStatus => "file_flags_status",
+        fileferry_core::SnapshotDiffMetadataChange::ResourceForksStatus => "resource_forks_status",
+        fileferry_core::SnapshotDiffMetadataChange::WindowsAttributesStatus => {
+            "windows_attributes_status"
+        }
+        fileferry_core::SnapshotDiffMetadataChange::SparseExtentsStatus => "sparse_extents_status",
+        fileferry_core::SnapshotDiffMetadataChange::SourcePlatform => "source_platform",
     }
 }
 

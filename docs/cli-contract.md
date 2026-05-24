@@ -173,6 +173,16 @@ find
   data.matches_count: integer
   data.matches: array of SnapshotFindMatch
 
+diff
+  data.from_snapshot_id: string
+  data.to_snapshot_id: string
+  data.path_scopes: array of snapshot-relative strings
+  data.added_count: integer
+  data.removed_count: integer
+  data.changed_count: integer
+  data.unchanged_count: integer
+  data.entries: array of SnapshotDiffEntry
+
 check
   data.repository_id: string
   data.checked_at_unix_seconds: integer
@@ -311,6 +321,20 @@ SnapshotFindMatch
   modified: TimestampValue
   metadata_status: "complete" | "partial" | "unsupported"
   match_reasons: array containing "path", "name", "glob", or "tag"
+
+SnapshotDiffEntry
+  path: snapshot-relative string
+  status: "added" | "removed" | "changed" | "unchanged"
+  from: SnapshotEntry | null
+  to: SnapshotEntry | null
+  content_changed: boolean
+  metadata_changed: boolean
+  metadata_changes: array containing available changed metadata field names,
+    such as "kind", "size", "modified", "created", "symlink_target",
+    "unix_mode", "unix_owner", "xattrs_status", "acls_status",
+    "file_flags_status", "resource_forks_status",
+    "windows_attributes_status", "sparse_extents_status", or
+    "source_platform"
 
 TimestampValue
   status: "captured" | "unsupported" | "denied"
@@ -528,6 +552,14 @@ find command_completed
   status: "success"
   data: Find data schema above
 
+diff command_started
+  status: "started"
+  data: null
+
+diff command_completed
+  status: "success"
+  data: Diff data schema above
+
 check command_started
   status: "started"
   data: null
@@ -599,7 +631,7 @@ Repository commands now resolve the repository backend through the same
 local/S3 target parser before command execution. S3-compatible URLs with
 embedded credentials, query strings, or fragments are rejected before use.
 S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`, `check`,
-`find`, `forget`, `prune`, and key-management commands use the explicit S3
+`find`, `diff`, `forget`, `prune`, and key-management commands use the explicit S3
 environment contract above and redact repository URLs as `s3://<redacted>`.
 
 `ferry backup <SOURCE>...` opens an initialized local or S3-compatible
@@ -695,6 +727,21 @@ lists non-root entries from snapshots carrying the requested tag. Find does
 not search file contents and does not read chunk data. A find request with no
 entry predicate and no tag scope fails as invalid input. A well-formed find
 request with no matching entries fails with exit-code family `7`.
+
+`ferry diff` opens an initialized local or S3-compatible repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, decrypts committed snapshot
+manifests, and compares two snapshot selections. Each side requires exactly
+one selector: `--from-snapshot <ID>`, `--from-tag <TAG>`, or `--from-latest`
+for the older side, and `--to-snapshot <ID>`, `--to-tag <TAG>`, or
+`--to-latest` for the newer side. `--path <PATH>` may be repeated to compare
+only exact snapshot-relative paths or subtrees. A path scope that exists in
+neither snapshot fails with exit code `7`. Diff reports added, removed,
+changed, and unchanged entry counts plus per-entry status. For regular files,
+`content_changed` is derived from manifest chunk ids, offsets, and lengths.
+Diff does not read chunk objects or compare file contents byte-by-byte.
+`metadata_changes` is limited to metadata fields present in the decrypted
+manifest; unsupported or not-yet-restored platform metadata is reported only
+as status changes, not as value-level comparisons.
 
 `ferry check` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

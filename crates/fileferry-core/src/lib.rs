@@ -269,6 +269,9 @@ pub enum CoreError {
     #[error("find request did not match any snapshot entries")]
     FindNoMatches,
 
+    #[error("diff request is invalid: {reason}")]
+    InvalidDiffRequest { reason: &'static str },
+
     #[error("forget policy did not select any snapshots to forget")]
     ForgetNoSnapshotsMatched,
 
@@ -5218,6 +5221,64 @@ pub enum SnapshotFindMatchReason {
     Tag,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotDiffRequest {
+    pub from: SnapshotSelection,
+    pub to: SnapshotSelection,
+    pub paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotDiffResult {
+    pub from_snapshot_id: String,
+    pub to_snapshot_id: String,
+    pub path_scopes: Vec<PathBuf>,
+    pub added_count: usize,
+    pub removed_count: usize,
+    pub changed_count: usize,
+    pub unchanged_count: usize,
+    pub entries: Vec<SnapshotDiffEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotDiffEntry {
+    pub path: PathBuf,
+    pub status: SnapshotDiffEntryStatus,
+    pub from: Option<SnapshotEntry>,
+    pub to: Option<SnapshotEntry>,
+    pub content_changed: bool,
+    pub metadata_changed: bool,
+    pub metadata_changes: Vec<SnapshotDiffMetadataChange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotDiffEntryStatus {
+    Added,
+    Removed,
+    Changed,
+    Unchanged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotDiffMetadataChange {
+    Kind,
+    Size,
+    Modified,
+    Created,
+    SymlinkTarget,
+    UnixMode,
+    UnixOwner,
+    XattrsStatus,
+    AclsStatus,
+    FileFlagsStatus,
+    ResourceForksStatus,
+    WindowsAttributesStatus,
+    SparseExtentsStatus,
+    SourcePlatform,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CheckRepositoryOptions {
     pub read_data: CheckReadDataSelection,
@@ -5581,6 +5642,103 @@ pub fn find_snapshot_entries(
     })
 }
 
+pub fn diff_snapshot_entries(
+    manifests: &[SnapshotManifest],
+    request: &SnapshotDiffRequest,
+) -> CoreResult<SnapshotDiffResult> {
+    let from_manifest = select_snapshot(manifests, &request.from)?;
+    let to_manifest = select_snapshot(manifests, &request.to)?;
+    let path_scopes = if request.paths.is_empty() {
+        vec![PathBuf::new()]
+    } else {
+        request
+            .paths
+            .iter()
+            .map(|path| normalize_restore_path(path))
+            .collect::<CoreResult<Vec<_>>>()?
+    };
+
+    for path_scope in &path_scopes {
+        if path_scope.as_os_str().is_empty() {
+            continue;
+        }
+
+        let exists_in_from = manifest_has_path_scope(from_manifest, path_scope);
+        let exists_in_to = manifest_has_path_scope(to_manifest, path_scope);
+        if !exists_in_from && !exists_in_to {
+            return Err(CoreError::SnapshotPathNotFound {
+                snapshot_id: format!("{}..{}", from_manifest.snapshot_id, to_manifest.snapshot_id),
+                path: path_scope.clone(),
+            });
+        }
+    }
+
+    let from_entries = diff_scoped_manifest_entries(from_manifest, &path_scopes);
+    let to_entries = diff_scoped_manifest_entries(to_manifest, &path_scopes);
+    let mut paths = from_entries.keys().cloned().collect::<BTreeSet<_>>();
+    paths.extend(to_entries.keys().cloned());
+
+    let mut entries = Vec::with_capacity(paths.len());
+    let mut added_count = 0;
+    let mut removed_count = 0;
+    let mut changed_count = 0;
+    let mut unchanged_count = 0;
+
+    for path in paths {
+        let from = from_entries.get(&path).copied();
+        let to = to_entries.get(&path).copied();
+        let (status, content_changed, metadata_changed, metadata_changes) = match (from, to) {
+            (None, Some(_)) => {
+                added_count += 1;
+                (SnapshotDiffEntryStatus::Added, false, false, Vec::new())
+            }
+            (Some(_), None) => {
+                removed_count += 1;
+                (SnapshotDiffEntryStatus::Removed, false, false, Vec::new())
+            }
+            (Some(from), Some(to)) => {
+                let content_changed = manifest_entry_content_changed(from, to);
+                let metadata_changes = manifest_entry_metadata_changes(from, to);
+                let metadata_changed = !metadata_changes.is_empty();
+                if content_changed || metadata_changed {
+                    changed_count += 1;
+                    (
+                        SnapshotDiffEntryStatus::Changed,
+                        content_changed,
+                        metadata_changed,
+                        metadata_changes,
+                    )
+                } else {
+                    unchanged_count += 1;
+                    (SnapshotDiffEntryStatus::Unchanged, false, false, Vec::new())
+                }
+            }
+            (None, None) => unreachable!("diff paths are built from entry maps"),
+        };
+
+        entries.push(SnapshotDiffEntry {
+            path,
+            status,
+            from: from.map(snapshot_entry_from_manifest),
+            to: to.map(snapshot_entry_from_manifest),
+            content_changed,
+            metadata_changed,
+            metadata_changes,
+        });
+    }
+
+    Ok(SnapshotDiffResult {
+        from_snapshot_id: from_manifest.snapshot_id.clone(),
+        to_snapshot_id: to_manifest.snapshot_id.clone(),
+        path_scopes,
+        added_count,
+        removed_count,
+        changed_count,
+        unchanged_count,
+        entries,
+    })
+}
+
 fn select_find_manifests<'a>(
     manifests: &'a [SnapshotManifest],
     scope: &SnapshotFindScope,
@@ -5631,6 +5789,156 @@ fn select_find_manifests<'a>(
     selected.dedup_by(|left, right| left.snapshot_id == right.snapshot_id);
 
     Ok(selected)
+}
+
+fn diff_scoped_manifest_entries<'a>(
+    manifest: &'a SnapshotManifest,
+    path_scopes: &[PathBuf],
+) -> BTreeMap<PathBuf, &'a ManifestEntry> {
+    manifest
+        .body
+        .entries
+        .iter()
+        .filter(|entry| !entry.relative_path.as_os_str().is_empty())
+        .filter(|entry| {
+            path_scopes
+                .iter()
+                .any(|path_scope| diff_path_scope_matches(path_scope, &entry.relative_path))
+        })
+        .map(|entry| (entry.relative_path.clone(), entry))
+        .collect()
+}
+
+fn manifest_has_path_scope(manifest: &SnapshotManifest, path_scope: &Path) -> bool {
+    manifest.body.entries.iter().any(|entry| {
+        !entry.relative_path.as_os_str().is_empty()
+            && diff_path_scope_matches(path_scope, &entry.relative_path)
+    })
+}
+
+fn diff_path_scope_matches(path_scope: &Path, candidate: &Path) -> bool {
+    path_scope.as_os_str().is_empty()
+        || candidate == path_scope
+        || candidate.starts_with(path_scope)
+}
+
+fn manifest_entry_content_changed(from: &ManifestEntry, to: &ManifestEntry) -> bool {
+    if from.metadata.kind != EntryKind::RegularFile && to.metadata.kind != EntryKind::RegularFile {
+        return false;
+    }
+
+    manifest_entry_content_identity(from) != manifest_entry_content_identity(to)
+}
+
+fn manifest_entry_content_identity(entry: &ManifestEntry) -> Vec<(&str, u64, u64)> {
+    entry
+        .chunks
+        .iter()
+        .map(|chunk| (chunk.chunk_id.as_str(), chunk.offset, chunk.length))
+        .collect()
+}
+
+fn manifest_entry_metadata_changes(
+    from: &ManifestEntry,
+    to: &ManifestEntry,
+) -> Vec<SnapshotDiffMetadataChange> {
+    let mut changes = Vec::new();
+    let from_metadata = &from.metadata;
+    let to_metadata = &to.metadata;
+
+    push_metadata_change(
+        &mut changes,
+        from_metadata.kind != to_metadata.kind,
+        SnapshotDiffMetadataChange::Kind,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.size_bytes != to_metadata.size_bytes,
+        SnapshotDiffMetadataChange::Size,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.modified != to_metadata.modified,
+        SnapshotDiffMetadataChange::Modified,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.created != to_metadata.created,
+        SnapshotDiffMetadataChange::Created,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.symlink_target != to_metadata.symlink_target,
+        SnapshotDiffMetadataChange::SymlinkTarget,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.source_platform != to_metadata.source_platform,
+        SnapshotDiffMetadataChange::SourcePlatform,
+    );
+
+    match (&from_metadata.unix, &to_metadata.unix) {
+        (Some(from_unix), Some(to_unix)) => {
+            push_metadata_change(
+                &mut changes,
+                from_unix.mode != to_unix.mode,
+                SnapshotDiffMetadataChange::UnixMode,
+            );
+            push_metadata_change(
+                &mut changes,
+                from_unix.uid != to_unix.uid || from_unix.gid != to_unix.gid,
+                SnapshotDiffMetadataChange::UnixOwner,
+            );
+        }
+        (None, None) => {}
+        (Some(_), None) | (None, Some(_)) => {
+            changes.push(SnapshotDiffMetadataChange::UnixMode);
+            changes.push(SnapshotDiffMetadataChange::UnixOwner);
+        }
+    }
+
+    push_metadata_change(
+        &mut changes,
+        from_metadata.extensions.xattrs != to_metadata.extensions.xattrs,
+        SnapshotDiffMetadataChange::XattrsStatus,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.extensions.acls != to_metadata.extensions.acls,
+        SnapshotDiffMetadataChange::AclsStatus,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.extensions.file_flags != to_metadata.extensions.file_flags,
+        SnapshotDiffMetadataChange::FileFlagsStatus,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.extensions.resource_forks != to_metadata.extensions.resource_forks,
+        SnapshotDiffMetadataChange::ResourceForksStatus,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.extensions.windows_attributes != to_metadata.extensions.windows_attributes,
+        SnapshotDiffMetadataChange::WindowsAttributesStatus,
+    );
+    push_metadata_change(
+        &mut changes,
+        from_metadata.extensions.sparse_extents != to_metadata.extensions.sparse_extents,
+        SnapshotDiffMetadataChange::SparseExtentsStatus,
+    );
+
+    changes
+}
+
+fn push_metadata_change(
+    changes: &mut Vec<SnapshotDiffMetadataChange>,
+    changed: bool,
+    field: SnapshotDiffMetadataChange,
+) {
+    if changed {
+        changes.push(field);
+    }
 }
 
 fn find_path_matches(query: &Path, candidate: &Path) -> bool {
