@@ -103,6 +103,7 @@ export FILEFERRY_PASSWORD="change-this-passphrase"
 ferry init
 ferry backup ~/Documents --tag laptop --jsonl
 ferry snapshots --json
+ferry find --all --glob 'Projects/**/*.rs'
 ferry restore latest ~/restore-test
 ferry check --read-data-subset 5%
 ferry forget --keep-daily 14 --keep-weekly 8 --dry-run
@@ -158,8 +159,11 @@ This is release-candidate security engineering, not an external audit claim.
 - Key rotation rotates unlock access by adding/removing key slots. It does not
   rewrite repository data with a new master key.
 - The published `1.0.0-rc.1` artifacts include recovery export but not
-  recovery import. Current main adds recovery import as a new external key slot;
-  full repository rekey is not implemented.
+  recovery import or `ferry find`. Current main adds recovery import as a new
+  external key slot and adds `ferry find` for encrypted snapshot-metadata
+  search; full repository rekey is not implemented.
+- `ferry find` searches decrypted snapshot metadata after repository unlock. It
+  does not search file contents or read chunk data.
 - S3-compatible behavior is tested against the current abstraction and a
   private Backblaze B2 development bucket. It is not a blanket claim for every
   S3-compatible provider.

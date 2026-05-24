@@ -4,9 +4,10 @@ use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, BackupRequest, CheckReadDataSubset,
     CheckRepositoryOptions, CoreError, MetadataStatus, PruneRepositoryOptions,
     RECOVERY_EXPORT_WARNING, RepositoryAeadAlgorithm, RestoreDestinationAction,
-    RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection,
-    add_repository_key_slot, create_repository, export_repository_recovery,
-    import_repository_recovery, list_snapshot_entries, open_repository, remove_repository_key_slot,
+    RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotFindRequest,
+    SnapshotFindScope, SnapshotSelection, add_repository_key_slot, create_repository,
+    export_repository_recovery, find_snapshot_entries, import_repository_recovery,
+    list_snapshot_entries, open_repository, remove_repository_key_slot,
     rotate_repository_key_slots, select_snapshot, snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
@@ -126,6 +127,37 @@ pub enum Command {
 
         /// Snapshot-relative path to list.
         path: Option<PathBuf>,
+    },
+
+    /// Find entries in one or more committed snapshots.
+    Find {
+        /// Snapshot id to search. May be repeated.
+        #[arg(long = "snapshot", conflicts_with_all = ["tags", "latest", "all"])]
+        snapshots: Vec<String>,
+
+        /// Search snapshots carrying this tag. May be repeated.
+        #[arg(long = "tag", conflicts_with_all = ["snapshots", "latest", "all"])]
+        tags: Vec<String>,
+
+        /// Search the newest committed snapshot.
+        #[arg(long, conflicts_with_all = ["snapshots", "tags", "all"])]
+        latest: bool,
+
+        /// Search all committed snapshots.
+        #[arg(long, conflicts_with_all = ["snapshots", "tags", "latest"])]
+        all: bool,
+
+        /// Snapshot-relative path to match exactly or as a subtree. May be repeated.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<PathBuf>,
+
+        /// Entry name to match exactly. May be repeated.
+        #[arg(long = "name", value_name = "NAME")]
+        names: Vec<String>,
+
+        /// Snapshot-relative glob to match. Supports *, ?, and ** path segments.
+        #[arg(long = "glob", value_name = "GLOB")]
+        globs: Vec<String>,
     },
 
     /// Verify an initialized local repository.
@@ -281,6 +313,7 @@ impl Command {
             Self::Backup { .. } => "backup",
             Self::Snapshots => "snapshots",
             Self::Ls { .. } => "ls",
+            Self::Find { .. } => "find",
             Self::Check { .. } => "check",
             Self::Forget { .. } => "forget",
             Self::Prune { .. } => "prune",
@@ -456,6 +489,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::RepositoryLeaseConflict { .. } => 3,
         CoreError::RepositoryUnlock { .. } => 4,
         CoreError::SnapshotNotFound { .. }
+        | CoreError::FindNoMatches
         | CoreError::ForgetNoSnapshotsMatched
         | CoreError::KeySlotNotFound { .. }
         | CoreError::SnapshotPathNotFound { .. } => 7,
@@ -504,6 +538,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidChunkingConfig { .. } => 1,
         CoreError::SourceRootNotAbsolute { .. }
         | CoreError::InvalidCheckDataSubset { .. }
+        | CoreError::InvalidFindRequest { .. }
         | CoreError::InvalidKeyRotation { .. }
         | CoreError::InvalidRestoreRequest { .. }
         | CoreError::RestoreDestinationNotAbsolute { .. }
@@ -964,6 +999,35 @@ struct LsData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct FindData {
+    snapshots_searched: usize,
+    matches_count: usize,
+    matches: Vec<CliFindMatch>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct CliFindMatch {
+    snapshot_id: String,
+    created_at_unix_seconds: u64,
+    tags: Vec<String>,
+    path: String,
+    kind: EntryKind,
+    size_bytes: Option<u64>,
+    modified: CliTimestampValue,
+    metadata_status: MetadataStatus,
+    match_reasons: Vec<CliFindMatchReason>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CliFindMatchReason {
+    Path,
+    Name,
+    Glob,
+    Tag,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct ForgetData {
     dry_run: bool,
     snapshots_matched: usize,
@@ -1080,6 +1144,25 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
                 &config,
                 snapshot_selection(snapshot, tag, latest),
                 path.unwrap_or_default(),
+            )
+        }
+        Command::Find {
+            snapshots,
+            tags,
+            latest,
+            all,
+            paths,
+            names,
+            globs,
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            find(
+                mode,
+                &config,
+                find_scope(snapshots, tags, latest, all),
+                paths,
+                names,
+                globs,
             )
         }
         Command::Check { read_data_subset } => {
@@ -1381,6 +1464,8 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::UnsupportedRepositoryFeatures => "repository_features_unsupported",
         CoreError::RepositoryUnlock { .. } => "repository_unlock_failed",
         CoreError::SnapshotNotFound { .. } => "snapshot_not_found",
+        CoreError::InvalidFindRequest { .. } => "find_request_invalid",
+        CoreError::FindNoMatches => "find_no_matches",
         CoreError::SnapshotPathNotFound { .. } => "snapshot_path_not_found",
         CoreError::InvalidSnapshotManifest { .. } => "snapshot_manifest_invalid",
         CoreError::InvalidChunkIndex { .. } => "chunk_index_invalid",
@@ -2259,6 +2344,75 @@ fn ls(
     })
 }
 
+fn find(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    scope: SnapshotFindScope,
+    paths: Vec<PathBuf>,
+    names: Vec<String>,
+    globs: Vec<String>,
+) -> Result<Output, CliError> {
+    let loaded = load_repository_snapshots_for_command(config, "find")?;
+    let result = find_snapshot_entries(
+        &loaded.manifests,
+        &SnapshotFindRequest {
+            scope,
+            paths,
+            names,
+            globs,
+        },
+    )?;
+    let data = FindData {
+        snapshots_searched: result.snapshots_searched,
+        matches_count: result.matches_count,
+        matches: result
+            .matches
+            .into_iter()
+            .map(|found| CliFindMatch {
+                snapshot_id: found.snapshot_id,
+                created_at_unix_seconds: found.created_at_unix_seconds,
+                tags: found.tags,
+                path: display_snapshot_path(&found.entry.relative_path),
+                kind: found.entry.kind,
+                size_bytes: found.entry.size_bytes,
+                modified: timestamp_value(&found.entry.modified),
+                metadata_status: found.entry.metadata_status,
+                match_reasons: found
+                    .match_reasons
+                    .into_iter()
+                    .map(cli_find_match_reason)
+                    .collect(),
+            })
+            .collect(),
+    };
+
+    emit_command(mode, "find", data, |data| {
+        data.matches
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    entry.snapshot_id,
+                    display_entry_kind(&entry.kind),
+                    entry
+                        .size_bytes
+                        .map(|size| size.to_string())
+                        .unwrap_or_else(|| "-".to_owned()),
+                    entry
+                        .match_reasons
+                        .iter()
+                        .map(display_find_match_reason)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    entry.path
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    })
+}
+
 fn check(
     mode: OutputMode,
     config: &ResolvedConfig,
@@ -2491,9 +2645,16 @@ struct LoadedRepositorySnapshots {
 fn load_repository_snapshots(
     config: &ResolvedConfig,
 ) -> Result<LoadedRepositorySnapshots, CliError> {
+    load_repository_snapshots_for_command(config, "snapshots")
+}
+
+fn load_repository_snapshots_for_command(
+    config: &ResolvedConfig,
+    command: &'static str,
+) -> Result<LoadedRepositorySnapshots, CliError> {
     let repository = repository_store_for_command(
         config,
-        "snapshots",
+        command,
         &[CliBackendKind::Local, CliBackendKind::S3Compatible],
     )?;
     let passphrase = repository_passphrase()?;
@@ -2892,6 +3053,42 @@ fn snapshot_selection(
         (Some(snapshot), None, false) => SnapshotSelection::Id(snapshot),
         (None, Some(tag), false) => SnapshotSelection::Tag(tag),
         _ => SnapshotSelection::Latest,
+    }
+}
+
+fn find_scope(
+    snapshots: Vec<String>,
+    tags: Vec<String>,
+    latest: bool,
+    all: bool,
+) -> SnapshotFindScope {
+    if !snapshots.is_empty() {
+        SnapshotFindScope::SnapshotIds(snapshots)
+    } else if !tags.is_empty() {
+        SnapshotFindScope::Tags(tags)
+    } else if all {
+        SnapshotFindScope::All
+    } else {
+        let _ = latest;
+        SnapshotFindScope::Latest
+    }
+}
+
+fn cli_find_match_reason(reason: fileferry_core::SnapshotFindMatchReason) -> CliFindMatchReason {
+    match reason {
+        fileferry_core::SnapshotFindMatchReason::Path => CliFindMatchReason::Path,
+        fileferry_core::SnapshotFindMatchReason::Name => CliFindMatchReason::Name,
+        fileferry_core::SnapshotFindMatchReason::Glob => CliFindMatchReason::Glob,
+        fileferry_core::SnapshotFindMatchReason::Tag => CliFindMatchReason::Tag,
+    }
+}
+
+fn display_find_match_reason(reason: &CliFindMatchReason) -> &'static str {
+    match reason {
+        CliFindMatchReason::Path => "path",
+        CliFindMatchReason::Name => "name",
+        CliFindMatchReason::Glob => "glob",
+        CliFindMatchReason::Tag => "tag",
     }
 }
 

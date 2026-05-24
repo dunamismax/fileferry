@@ -21,7 +21,7 @@ candidate.
 Implemented and tested in current main:
 
 - `ferry init`, `backup`, `restore`, `snapshots`, `ls`, `check`, `forget`,
-  `prune`, `completion`, and `version`.
+  `find`, `prune`, `completion`, and `version`.
 - Key add, marker-based key remove, limited unlock rotation, encrypted
   recovery export, and recovery import as a new external key slot. Full
   repository rekey and bootstrap-slot removal are not implemented.
@@ -106,7 +106,8 @@ Core product:
 - [x] Encrypted local and S3-compatible repository initialization.
 - [x] Encrypted, compressed, deduplicated backup snapshots.
 - [x] Restore by latest, snapshot id, tag, and path.
-- [x] `snapshots`, `ls`, `check`, `forget`, and recoverable two-phase `prune`.
+- [x] `snapshots`, `ls`, `find`, `check`, `forget`, and recoverable two-phase
+      `prune`.
 - [x] Key add/remove/rotate/export-recovery/import-recovery paths.
 - [x] Stable config profiles and environment variables.
 - [x] Shell completion generation.
@@ -141,9 +142,9 @@ Platform and release:
       release-artifacts workflow.
 - [x] Unix shell and PowerShell install paths are tested.
 
-Post-v1 or optional:
+Additional command surface:
 
-- [ ] `ferry find`.
+- [x] `ferry find`.
 - [ ] `ferry diff`.
 - [ ] `ferry repo`.
 - [ ] `ferry policy`.
@@ -168,6 +169,8 @@ FUSE mount, and compatibility with existing backup repository formats.
 - Key rotation currently rotates unlock access by adding a new slot and
   marker-removing selected externally added slots. It does not rewrite
   repository data with a new master key.
+- `ferry find` searches encrypted snapshot metadata after repository unlock.
+  It does not search file contents or read chunk data.
 - Command leases cover current mutation paths. They are not a full stale-lease
   repair system or broad concurrent-backup proof.
 - S3-compatible behavior must be described only to the level backed by current

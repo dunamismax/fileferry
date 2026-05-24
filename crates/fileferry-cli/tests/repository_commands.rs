@@ -4710,6 +4710,237 @@ fn backup_writes_committed_snapshot_that_snapshots_and_ls_can_discover() {
 }
 
 #[test]
+fn find_searches_snapshot_contents_by_path_name_glob_and_tag() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::create_dir(source.join("docs")).expect("create docs");
+    fs::write(source.join("docs").join("report.txt"), b"report").expect("write report");
+    fs::write(source.join("docs").join("notes.md"), b"notes").expect("write notes");
+    let first_backup = backup_source_with_tags(&repo_url, passphrase, &source, &["alpha"]);
+    let first_snapshot_id = first_backup["data"]["snapshot_id"]
+        .as_str()
+        .expect("first snapshot id")
+        .to_owned();
+
+    fs::write(source.join("docs").join("summary.txt"), b"summary").expect("write summary");
+    let second_backup = backup_source_with_tags(&repo_url, passphrase, &source, &["beta"]);
+    let second_snapshot_id = second_backup["data"]["snapshot_id"]
+        .as_str()
+        .expect("second snapshot id")
+        .to_owned();
+
+    let name_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "find",
+            "--name",
+            "summary.txt",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let name_find: Value = serde_json::from_slice(&name_output).expect("find name json");
+    assert_eq!(name_find["command"], "find");
+    assert_eq!(name_find["status"], "success");
+    assert_eq!(name_find["data"]["snapshots_searched"], 1);
+    assert_eq!(name_find["data"]["matches_count"], 1);
+    assert_eq!(
+        name_find["data"]["matches"][0]["snapshot_id"],
+        second_snapshot_id
+    );
+    assert_eq!(
+        name_find["data"]["matches"][0]["path"],
+        platform_relative_path("docs/summary.txt")
+    );
+    assert_eq!(name_find["data"]["matches"][0]["kind"], "regular_file");
+    assert_eq!(name_find["data"]["matches"][0]["size_bytes"], 7);
+    assert_eq!(
+        name_find["data"]["matches"][0]["match_reasons"],
+        json!(["name"])
+    );
+
+    let glob_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "find",
+            "--all",
+            "--glob",
+            "docs/*.txt",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let glob_find: Value = serde_json::from_slice(&glob_output).expect("find glob json");
+    assert_eq!(glob_find["data"]["snapshots_searched"], 2);
+    assert_eq!(glob_find["data"]["matches_count"], 3);
+    let glob_paths = glob_find["data"]["matches"]
+        .as_array()
+        .expect("matches array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["snapshot_id"]
+                    .as_str()
+                    .expect("snapshot id")
+                    .to_owned(),
+                entry["path"].as_str().expect("path").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(glob_paths.contains(&(
+        first_snapshot_id.clone(),
+        platform_relative_path("docs/report.txt")
+    )));
+    assert!(glob_paths.contains(&(
+        second_snapshot_id.clone(),
+        platform_relative_path("docs/report.txt")
+    )));
+    assert!(glob_paths.contains(&(
+        second_snapshot_id.clone(),
+        platform_relative_path("docs/summary.txt")
+    )));
+
+    let path_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "find",
+            "--snapshot",
+            &second_snapshot_id,
+            "--path",
+            "docs",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "file\t7\tpath\t{}",
+            platform_relative_path("docs/summary.txt")
+        )))
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let path_text = String::from_utf8(path_output).expect("path find utf8");
+    assert!(path_text.contains(&format!("dir\t-\tpath\t{}", platform_relative_path("docs"))));
+    assert!(path_text.contains(&format!(
+        "file\t6\tpath\t{}",
+        platform_relative_path("docs/report.txt")
+    )));
+    assert!(path_text.contains(&format!(
+        "file\t5\tpath\t{}",
+        platform_relative_path("docs/notes.md")
+    )));
+
+    let tag_jsonl_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "find", "--tag", "alpha"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = tag_jsonl_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let started: Value = serde_json::from_slice(lines[0]).expect("find started");
+    let completed: Value = serde_json::from_slice(lines[1]).expect("find completed");
+    assert_eq!(started["event"], "command_started");
+    assert_eq!(started["command"], "find");
+    assert_eq!(completed["event"], "command_completed");
+    assert_eq!(completed["command"], "find");
+    assert_eq!(completed["data"]["snapshots_searched"], 1);
+    assert_eq!(completed["data"]["matches_count"], 3);
+    assert!(
+        completed["data"]["matches"]
+            .as_array()
+            .expect("tag matches")
+            .iter()
+            .all(|entry| entry["snapshot_id"] == first_snapshot_id
+                && entry["match_reasons"] == json!(["tag"]))
+    );
+}
+
+#[test]
+fn find_no_match_and_wrong_password_are_structured_and_redacted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let no_match_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "find",
+            "--name",
+            "missing.txt",
+        ])
+        .assert()
+        .code(7)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let no_match: Value = serde_json::from_slice(&no_match_output).expect("no match json");
+    assert_eq!(no_match["command"], "find");
+    assert_eq!(no_match["status"], "failure");
+    assert_eq!(no_match["data"]["code"], "find_no_matches");
+    assert_eq!(no_match["data"]["exit_code"], 7);
+
+    let wrong_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-find-passphrase-canary")
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "find",
+            "--name",
+            "sample.txt",
+        ])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_text = String::from_utf8(wrong_output.clone()).expect("wrong utf8");
+    let wrong: Value = serde_json::from_slice(&wrong_output).expect("wrong json");
+    assert_eq!(wrong["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong["data"]["exit_code"], 4);
+    assert!(!wrong_text.contains("wrong-find-passphrase-canary"));
+}
+
+#[test]
 fn backup_active_lease_has_stable_locked_exit_code_and_writes_no_snapshot() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

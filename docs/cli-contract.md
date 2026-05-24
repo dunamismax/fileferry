@@ -168,6 +168,11 @@ ls
   data.path: snapshot-relative string
   data.entries: array of SnapshotEntry
 
+find
+  data.snapshots_searched: integer
+  data.matches_count: integer
+  data.matches: array of SnapshotFindMatch
+
 check
   data.repository_id: string
   data.checked_at_unix_seconds: integer
@@ -295,6 +300,17 @@ SnapshotEntry
   size_bytes: integer | null
   modified: TimestampValue
   metadata_status: "complete" | "partial" | "unsupported"
+
+SnapshotFindMatch
+  snapshot_id: string
+  created_at_unix_seconds: integer
+  tags: array of strings
+  path: snapshot-relative string
+  kind: "regular_file" | "directory" | "symlink" | "other"
+  size_bytes: integer | null
+  modified: TimestampValue
+  metadata_status: "complete" | "partial" | "unsupported"
+  match_reasons: array containing "path", "name", "glob", or "tag"
 
 TimestampValue
   status: "captured" | "unsupported" | "denied"
@@ -504,6 +520,14 @@ ls command_completed
   status: "success"
   data: Ls data schema above
 
+find command_started
+  status: "started"
+  data: null
+
+find command_completed
+  status: "success"
+  data: Find data schema above
+
 check command_started
   status: "started"
   data: null
@@ -575,7 +599,7 @@ Repository commands now resolve the repository backend through the same
 local/S3 target parser before command execution. S3-compatible URLs with
 embedded credentials, query strings, or fragments are rejected before use.
 S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`, `check`,
-`forget`, `prune`, and key-management commands use the explicit S3
+`find`, `forget`, `prune`, and key-management commands use the explicit S3
 environment contract above and redact repository URLs as `s3://<redacted>`.
 
 `ferry backup <SOURCE>...` opens an initialized local or S3-compatible
@@ -657,6 +681,20 @@ determines that the selected metadata is denied, unsupported, unrepresentable,
 or outside the destination system time range, restore reports a
 `metadata_warnings` item and exits with partial-success code `10`; JSON and
 JSONL modes keep those warnings on stdout.
+
+`ferry find` opens an initialized local or S3-compatible repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, decrypts committed snapshot
+manifests, and searches snapshot-relative entry metadata. It searches the
+latest snapshot by default, or accepts repeated `--snapshot <ID>`, repeated
+`--tag <TAG>`, `--latest`, or `--all` as mutually exclusive snapshot scopes.
+Entry predicates are repeated `--path <PATH>`, repeated `--name <NAME>`, and
+repeated `--glob <GLOB>`. `--path` matches the exact snapshot-relative path or
+its subtree. `--name` matches the final path segment exactly. `--glob` matches
+snapshot-relative paths with `*`, `?`, and `**` path segments. A tag-only find
+lists non-root entries from snapshots carrying the requested tag. Find does
+not search file contents and does not read chunk data. A find request with no
+entry predicate and no tag scope fails as invalid input. A well-formed find
+request with no matching entries fails with exit-code family `7`.
 
 `ferry check` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

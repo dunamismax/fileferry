@@ -263,6 +263,12 @@ pub enum CoreError {
     #[error("snapshot selection {selection} did not match any loaded snapshot")]
     SnapshotNotFound { selection: String },
 
+    #[error("find request is invalid: {reason}")]
+    InvalidFindRequest { reason: &'static str },
+
+    #[error("find request did not match any snapshot entries")]
+    FindNoMatches,
+
     #[error("forget policy did not select any snapshots to forget")]
     ForgetNoSnapshotsMatched,
 
@@ -5170,6 +5176,48 @@ pub struct SnapshotEntry {
     pub metadata_status: MetadataStatus,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotFindRequest {
+    pub scope: SnapshotFindScope,
+    pub paths: Vec<PathBuf>,
+    pub names: Vec<String>,
+    pub globs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SnapshotFindScope {
+    #[default]
+    Latest,
+    All,
+    SnapshotIds(Vec<String>),
+    Tags(Vec<String>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotFindResult {
+    pub snapshots_searched: usize,
+    pub matches_count: usize,
+    pub matches: Vec<SnapshotFindMatch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotFindMatch {
+    pub snapshot_id: String,
+    pub created_at_unix_seconds: u64,
+    pub tags: Vec<String>,
+    pub entry: SnapshotEntry,
+    pub match_reasons: Vec<SnapshotFindMatchReason>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotFindMatchReason {
+    Path,
+    Name,
+    Glob,
+    Tag,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CheckRepositoryOptions {
     pub read_data: CheckReadDataSelection,
@@ -5441,6 +5489,239 @@ pub fn list_snapshot_entries(
         path,
         entries,
     })
+}
+
+pub fn find_snapshot_entries(
+    manifests: &[SnapshotManifest],
+    request: &SnapshotFindRequest,
+) -> CoreResult<SnapshotFindResult> {
+    let normalized_paths = request
+        .paths
+        .iter()
+        .map(|path| normalize_restore_path(path))
+        .collect::<CoreResult<Vec<_>>>()?;
+    let normalized_globs = request
+        .globs
+        .iter()
+        .map(|glob| parse_snapshot_find_glob(glob))
+        .collect::<CoreResult<Vec<_>>>()?;
+    let has_entry_criteria =
+        !normalized_paths.is_empty() || !request.names.is_empty() || !normalized_globs.is_empty();
+    let tag_only_search =
+        matches!(request.scope, SnapshotFindScope::Tags(_)) && !has_entry_criteria;
+
+    if !has_entry_criteria && !tag_only_search {
+        return Err(CoreError::InvalidFindRequest {
+            reason: "provide --path, --name, --glob, or select snapshots by --tag",
+        });
+    }
+
+    let selected_manifests = select_find_manifests(manifests, &request.scope)?;
+    let mut matches = Vec::new();
+
+    for manifest in &selected_manifests {
+        for entry in &manifest.body.entries {
+            if entry.relative_path.as_os_str().is_empty() {
+                continue;
+            }
+
+            let mut reasons = Vec::new();
+            if tag_only_search {
+                reasons.push(SnapshotFindMatchReason::Tag);
+            }
+            if normalized_paths
+                .iter()
+                .any(|path| find_path_matches(path, &entry.relative_path))
+            {
+                reasons.push(SnapshotFindMatchReason::Path);
+            }
+            if request
+                .names
+                .iter()
+                .any(|name| find_name_matches(name, &entry.relative_path))
+            {
+                reasons.push(SnapshotFindMatchReason::Name);
+            }
+            if normalized_globs.iter().any(|glob| {
+                glob_segments_match(glob, &snapshot_path_segments(&entry.relative_path))
+            }) {
+                reasons.push(SnapshotFindMatchReason::Glob);
+            }
+
+            if reasons.is_empty() {
+                continue;
+            }
+
+            matches.push(SnapshotFindMatch {
+                snapshot_id: manifest.snapshot_id.clone(),
+                created_at_unix_seconds: manifest.body.created_at_unix_seconds,
+                tags: manifest.body.tags.clone(),
+                entry: snapshot_entry_from_manifest(entry),
+                match_reasons: reasons,
+            });
+        }
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .created_at_unix_seconds
+            .cmp(&left.created_at_unix_seconds)
+            .then_with(|| right.snapshot_id.cmp(&left.snapshot_id))
+            .then_with(|| left.entry.relative_path.cmp(&right.entry.relative_path))
+    });
+
+    if matches.is_empty() {
+        return Err(CoreError::FindNoMatches);
+    }
+
+    Ok(SnapshotFindResult {
+        snapshots_searched: selected_manifests.len(),
+        matches_count: matches.len(),
+        matches,
+    })
+}
+
+fn select_find_manifests<'a>(
+    manifests: &'a [SnapshotManifest],
+    scope: &SnapshotFindScope,
+) -> CoreResult<Vec<&'a SnapshotManifest>> {
+    let mut selected = match scope {
+        SnapshotFindScope::Latest => vec![select_snapshot(manifests, &SnapshotSelection::Latest)?],
+        SnapshotFindScope::All => manifests.iter().collect(),
+        SnapshotFindScope::SnapshotIds(snapshot_ids) => {
+            if snapshot_ids.is_empty() {
+                return Err(CoreError::InvalidFindRequest {
+                    reason: "at least one --snapshot value is required",
+                });
+            }
+
+            let mut selected = Vec::with_capacity(snapshot_ids.len());
+            for snapshot_id in snapshot_ids {
+                selected.push(select_snapshot(
+                    manifests,
+                    &SnapshotSelection::Id(snapshot_id.clone()),
+                )?);
+            }
+            selected
+        }
+        SnapshotFindScope::Tags(tags) => {
+            if tags.is_empty() {
+                return Err(CoreError::InvalidFindRequest {
+                    reason: "at least one --tag value is required",
+                });
+            }
+
+            let selected = manifests
+                .iter()
+                .filter(|manifest| {
+                    tags.iter()
+                        .any(|tag| manifest.body.tags.iter().any(|candidate| candidate == tag))
+                })
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                return Err(CoreError::SnapshotNotFound {
+                    selection: format!("tag:{}", tags.join(",")),
+                });
+            }
+            selected
+        }
+    };
+
+    selected.sort_by(|left, right| compare_snapshot_manifests(left, right));
+    selected.dedup_by(|left, right| left.snapshot_id == right.snapshot_id);
+
+    Ok(selected)
+}
+
+fn find_path_matches(query: &Path, candidate: &Path) -> bool {
+    candidate == query || candidate.starts_with(query)
+}
+
+fn find_name_matches(query: &str, candidate: &Path) -> bool {
+    candidate
+        .file_name()
+        .map(|name| name.to_string_lossy() == query)
+        .unwrap_or(false)
+}
+
+fn parse_snapshot_find_glob(pattern: &str) -> CoreResult<Vec<String>> {
+    if pattern.is_empty() {
+        return Err(CoreError::InvalidFindRequest {
+            reason: "glob pattern must not be empty",
+        });
+    }
+    if pattern.starts_with('/') || pattern.ends_with('/') {
+        return Err(CoreError::InvalidFindRequest {
+            reason: "glob pattern must be snapshot-relative",
+        });
+    }
+
+    pattern
+        .split('/')
+        .map(|segment| match segment {
+            "" | "." | ".." => Err(CoreError::InvalidFindRequest {
+                reason: "glob pattern segments must not be empty, ., or ..",
+            }),
+            value => Ok(value.to_owned()),
+        })
+        .collect()
+}
+
+fn snapshot_path_segments(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn glob_segments_match(pattern: &[String], candidate: &[String]) -> bool {
+    match pattern.split_first() {
+        None => candidate.is_empty(),
+        Some((first, rest)) if first == "**" => {
+            glob_segments_match(rest, candidate)
+                || (!candidate.is_empty() && glob_segments_match(pattern, &candidate[1..]))
+        }
+        Some((first, rest)) => candidate
+            .split_first()
+            .map(|(candidate_first, candidate_rest)| {
+                wildcard_segment_matches(first, candidate_first)
+                    && glob_segments_match(rest, candidate_rest)
+            })
+            .unwrap_or(false),
+    }
+}
+
+fn wildcard_segment_matches(pattern: &str, candidate: &str) -> bool {
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let candidate = candidate.chars().collect::<Vec<_>>();
+    let mut matches = vec![vec![false; candidate.len() + 1]; pattern.len() + 1];
+    matches[0][0] = true;
+
+    for pattern_index in 1..=pattern.len() {
+        if pattern[pattern_index - 1] == '*' {
+            matches[pattern_index][0] = matches[pattern_index - 1][0];
+        }
+    }
+
+    for pattern_index in 1..=pattern.len() {
+        for candidate_index in 1..=candidate.len() {
+            matches[pattern_index][candidate_index] = match pattern[pattern_index - 1] {
+                '*' => {
+                    matches[pattern_index - 1][candidate_index]
+                        || matches[pattern_index][candidate_index - 1]
+                }
+                '?' => matches[pattern_index - 1][candidate_index - 1],
+                literal => {
+                    literal == candidate[candidate_index - 1]
+                        && matches[pattern_index - 1][candidate_index - 1]
+                }
+            };
+        }
+    }
+
+    matches[pattern.len()][candidate.len()]
 }
 
 fn snapshot_order(left: &&SnapshotManifest, right: &&SnapshotManifest) -> std::cmp::Ordering {
@@ -10905,6 +11186,148 @@ mod tests {
         assert!(matches!(
             list_snapshot_entries(&manifest, "missing"),
             Err(CoreError::SnapshotPathNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn find_snapshot_entries_matches_path_name_glob_and_tag_scopes() {
+        let mut first = test_manifest("snap-a", 10, &["alpha"]);
+        first.body.entries = vec![
+            test_manifest_entry("", EntryKind::Directory, None),
+            test_manifest_entry("docs", EntryKind::Directory, None),
+            test_manifest_entry("docs/a.txt", EntryKind::RegularFile, Some(1)),
+            test_manifest_entry("docs/b.md", EntryKind::RegularFile, Some(2)),
+        ];
+        let mut second = test_manifest("snap-b", 20, &["beta"]);
+        second.body.entries = vec![
+            test_manifest_entry("", EntryKind::Directory, None),
+            test_manifest_entry("docs", EntryKind::Directory, None),
+            test_manifest_entry("docs/a.txt", EntryKind::RegularFile, Some(1)),
+            test_manifest_entry("docs/c.txt", EntryKind::RegularFile, Some(3)),
+        ];
+
+        let path_result = find_snapshot_entries(
+            &[first.clone(), second.clone()],
+            &SnapshotFindRequest {
+                scope: SnapshotFindScope::SnapshotIds(vec!["snap-b".to_owned()]),
+                paths: vec![PathBuf::from("docs")],
+                names: Vec::new(),
+                globs: Vec::new(),
+            },
+        )
+        .expect("path find");
+        assert_eq!(path_result.snapshots_searched, 1);
+        assert_eq!(
+            path_result
+                .matches
+                .iter()
+                .map(|found| found.entry.relative_path.as_path())
+                .collect::<Vec<_>>(),
+            vec![
+                Path::new("docs"),
+                Path::new("docs/a.txt"),
+                Path::new("docs/c.txt")
+            ]
+        );
+        assert_eq!(
+            path_result.matches[0].match_reasons,
+            vec![SnapshotFindMatchReason::Path]
+        );
+
+        let glob_result = find_snapshot_entries(
+            &[first.clone(), second.clone()],
+            &SnapshotFindRequest {
+                scope: SnapshotFindScope::All,
+                paths: Vec::new(),
+                names: Vec::new(),
+                globs: vec!["docs/*.txt".to_owned()],
+            },
+        )
+        .expect("glob find");
+        assert_eq!(glob_result.snapshots_searched, 2);
+        assert_eq!(glob_result.matches_count, 3);
+
+        let name_result = find_snapshot_entries(
+            &[first.clone(), second.clone()],
+            &SnapshotFindRequest {
+                scope: SnapshotFindScope::Latest,
+                paths: Vec::new(),
+                names: vec!["c.txt".to_owned()],
+                globs: Vec::new(),
+            },
+        )
+        .expect("name find");
+        assert_eq!(name_result.matches.len(), 1);
+        assert_eq!(name_result.matches[0].snapshot_id, "snap-b");
+        assert_eq!(
+            name_result.matches[0].entry.relative_path,
+            PathBuf::from("docs/c.txt")
+        );
+        assert_eq!(
+            name_result.matches[0].match_reasons,
+            vec![SnapshotFindMatchReason::Name]
+        );
+
+        let tag_result = find_snapshot_entries(
+            &[first, second],
+            &SnapshotFindRequest {
+                scope: SnapshotFindScope::Tags(vec!["alpha".to_owned()]),
+                paths: Vec::new(),
+                names: Vec::new(),
+                globs: Vec::new(),
+            },
+        )
+        .expect("tag find");
+        assert_eq!(tag_result.snapshots_searched, 1);
+        assert_eq!(tag_result.matches_count, 3);
+        assert!(
+            tag_result
+                .matches
+                .iter()
+                .all(|found| found.snapshot_id == "snap-a"
+                    && found.match_reasons == vec![SnapshotFindMatchReason::Tag])
+        );
+    }
+
+    #[test]
+    fn find_snapshot_entries_rejects_empty_queries_and_reports_no_matches() {
+        let manifest = test_manifest("snap-a", 10, &[]);
+
+        assert!(matches!(
+            find_snapshot_entries(
+                std::slice::from_ref(&manifest),
+                &SnapshotFindRequest {
+                    scope: SnapshotFindScope::Latest,
+                    paths: Vec::new(),
+                    names: Vec::new(),
+                    globs: Vec::new(),
+                },
+            ),
+            Err(CoreError::InvalidFindRequest { .. })
+        ));
+        assert!(matches!(
+            find_snapshot_entries(
+                std::slice::from_ref(&manifest),
+                &SnapshotFindRequest {
+                    scope: SnapshotFindScope::Latest,
+                    paths: Vec::new(),
+                    names: vec!["missing.txt".to_owned()],
+                    globs: Vec::new(),
+                },
+            ),
+            Err(CoreError::FindNoMatches)
+        ));
+        assert!(matches!(
+            find_snapshot_entries(
+                &[manifest],
+                &SnapshotFindRequest {
+                    scope: SnapshotFindScope::All,
+                    paths: Vec::new(),
+                    names: Vec::new(),
+                    globs: vec!["../*.txt".to_owned()],
+                },
+            ),
+            Err(CoreError::InvalidFindRequest { .. })
         ));
     }
 
