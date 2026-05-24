@@ -23,7 +23,8 @@ The current release candidate includes:
 - Encrypted local and S3-compatible repository initialization.
 - Encrypted, compressed, deduplicated backup snapshots.
 - Restore by latest snapshot, snapshot id, tag, and path.
-- `snapshots`, `ls`, `check`, `forget`, `prune`, and key-management commands.
+- `snapshots`, `ls`, `repo`, `check`, `forget`, `prune`, and
+  key-management commands.
 - JSON and JSONL machine output for the implemented command surface.
 - Config profiles and environment-variable precedence.
 - Format v0 repository compatibility fixtures for the documented current
@@ -105,6 +106,7 @@ ferry backup ~/Documents --tag laptop --jsonl
 ferry snapshots --json
 ferry find --all --glob 'Projects/**/*.rs'
 ferry diff --from-tag laptop --to-latest --path Projects
+ferry repo --verify --json
 ferry restore latest ~/restore-test
 ferry check --read-data-subset 5%
 ferry forget --keep-daily 14 --keep-weekly 8 --dry-run
@@ -161,15 +163,20 @@ This is release-candidate security engineering, not an external audit claim.
   rewrite repository data with a new master key.
 - The published `1.0.0-rc.1` artifacts include recovery export but not
   recovery import or `ferry find`. Current main adds recovery import as a new
-  external key slot, `ferry find` for encrypted snapshot-metadata search, and
-  `ferry diff` for manifest-level snapshot comparison; full repository rekey is
-  not implemented.
+  external key slot, `ferry find` for encrypted snapshot-metadata search,
+  `ferry diff` for manifest-level snapshot comparison, and `ferry repo` for
+  safe repository status plus opt-in encrypted metadata/state verification;
+  full repository rekey is not implemented.
 - `ferry find` searches decrypted snapshot metadata after repository unlock. It
   does not search file contents or read chunk data.
 - `ferry diff` compares decrypted snapshot manifests after repository unlock.
   It reports added, removed, changed, and unchanged entries, including regular
   file content-identity changes from manifest chunk references, but it does not
   read chunk data or compare file contents byte-by-byte.
+- `ferry repo` default output avoids decrypted snapshot contents, paths, tags,
+  and object keys. `ferry repo --verify` unlocks the repository and verifies
+  encrypted metadata, indexes, forget markers, leases, policy, upload, and
+  prune state without reading chunk data.
 - S3-compatible behavior is tested against the current abstraction and a
   private Backblaze B2 development bucket. It is not a blanket claim for every
   S3-compatible provider.

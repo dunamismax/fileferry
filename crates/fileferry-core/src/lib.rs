@@ -708,10 +708,44 @@ pub enum RepositoryFormatCompatibility {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepositoryFormatInspection {
+    pub repository_id: String,
     pub format_version: u16,
     pub latest_supported_format_version: u16,
     pub compatibility: RepositoryFormatCompatibility,
     pub features: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryObjectFamily {
+    Bootstrap,
+    KeySlot,
+    KeySlotRemoval,
+    Commit,
+    ForgetMarker,
+    Manifest,
+    Index,
+    Chunk,
+    Policy,
+    UploadState,
+    LeaseState,
+    PruneState,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepositoryObjectFamilySummary {
+    pub family: RepositoryObjectFamily,
+    pub objects: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct RepositoryAuxiliaryStateCheck {
+    pub policy_configs_checked: usize,
+    pub upload_states_checked: usize,
+    pub lease_states_checked: usize,
+    pub prune_plans_checked: usize,
+    pub prune_completions_checked: usize,
 }
 
 #[derive(Debug)]
@@ -1047,6 +1081,32 @@ pub async fn inspect_repository_format(
 ) -> CoreResult<RepositoryFormatInspection> {
     let bytes = read_repository_bootstrap_bytes(store).await?;
     inspect_repository_bootstrap_bytes(&bytes)
+}
+
+pub async fn inspect_repository_object_families(
+    store: &dyn ObjectStore,
+) -> CoreResult<Vec<RepositoryObjectFamilySummary>> {
+    let mut keys = store
+        .list_prefix(&ObjectKeyPrefix::root())
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    keys.sort();
+
+    let mut counts = BTreeMap::<RepositoryObjectFamily, usize>::new();
+    for family in REPOSITORY_OBJECT_FAMILIES {
+        counts.insert(*family, 0);
+    }
+    for key in keys {
+        *counts.entry(repository_object_family(&key)).or_default() += 1;
+    }
+
+    Ok(REPOSITORY_OBJECT_FAMILIES
+        .iter()
+        .map(|family| RepositoryObjectFamilySummary {
+            family: *family,
+            objects: counts.get(family).copied().unwrap_or(0),
+        })
+        .collect())
 }
 
 pub async fn create_repository(
@@ -1669,6 +1729,7 @@ struct RepositoryBootstrap {
 #[derive(Debug, Deserialize)]
 struct RepositoryBootstrapInspectionEnvelope {
     magic: String,
+    repository_id: Option<String>,
     format_version: Option<u16>,
     features: Option<Vec<String>>,
 }
@@ -1754,6 +1815,18 @@ fn inspect_repository_bootstrap_bytes(bytes: &[u8]) -> CoreResult<RepositoryForm
             reason: "repository format version is missing",
         });
     };
+    let Some(repository_id) = envelope.repository_id else {
+        return Err(CoreError::InvalidRepositoryBootstrap {
+            reason: "repository id is missing",
+        });
+    };
+    if repository_id.len() != REPOSITORY_ID_BYTES * 2
+        || !repository_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CoreError::InvalidRepositoryBootstrap {
+            reason: "repository id is invalid",
+        });
+    }
     let Some(features) = envelope.features else {
         return Err(CoreError::InvalidRepositoryBootstrap {
             reason: "repository feature list is missing",
@@ -1763,6 +1836,7 @@ fn inspect_repository_bootstrap_bytes(bytes: &[u8]) -> CoreResult<RepositoryForm
     let compatibility =
         repository_format_compatibility(format_version, latest_supported_format_version, &features);
     Ok(RepositoryFormatInspection {
+        repository_id,
         format_version,
         latest_supported_format_version,
         compatibility,
@@ -2519,6 +2593,65 @@ impl BackupPipeline {
             master_key,
         )?;
         Ok(policy)
+    }
+
+    pub async fn check_repository_auxiliary_state(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+    ) -> CoreResult<RepositoryAuxiliaryStateCheck> {
+        let policy_keys = listed_keys(store, POLICY_CONFIG_PREFIX).await?;
+        let mut policy_configs_checked = 0;
+        for key in policy_keys {
+            let policy_id = policy_config_id_from_object_key(&key)?;
+            self.read_repository_policy_config(store, master_key, &policy_id)
+                .await?;
+            policy_configs_checked += 1;
+        }
+
+        let upload_keys = listed_keys(store, UPLOAD_STATE_PREFIX).await?;
+        let mut upload_states_checked = 0;
+        for key in upload_keys {
+            let (writer_id, upload_id) = upload_state_ids_from_object_key(&key)?;
+            self.read_repository_upload_state(store, master_key, &writer_id, &upload_id)
+                .await?;
+            upload_states_checked += 1;
+        }
+
+        let lease_keys = listed_keys(store, LEASE_STATE_PREFIX).await?;
+        let mut lease_states_checked = 0;
+        for key in lease_keys {
+            let lease_id = lease_id_from_object_key(&key)?;
+            self.read_repository_lease_state(store, master_key, &lease_id)
+                .await?;
+            lease_states_checked += 1;
+        }
+
+        let prune_plan_keys = listed_keys(store, PRUNE_PLAN_PREFIX).await?;
+        let mut prune_plans_checked = 0;
+        for key in prune_plan_keys {
+            let plan_id = prune_plan_id_from_object_key(&key, PRUNE_PLAN_PREFIX)?;
+            self.read_prune_plan_state(store, master_key, &plan_id)
+                .await?;
+            prune_plans_checked += 1;
+        }
+
+        let prune_completion_keys = listed_keys(store, PRUNE_COMPLETION_PREFIX).await?;
+        let mut prune_completions_checked = 0;
+        for key in prune_completion_keys {
+            let plan_id = prune_plan_id_from_object_key(&key, PRUNE_COMPLETION_PREFIX)?;
+            self.read_prune_completion_state(store, master_key, &plan_id)
+                .await?;
+            prune_completions_checked += 1;
+        }
+
+        Ok(RepositoryAuxiliaryStateCheck {
+            policy_configs_checked,
+            upload_states_checked,
+            lease_states_checked,
+            prune_plans_checked,
+            prune_completions_checked,
+        })
     }
 
     pub async fn write_repository_upload_state(
@@ -5285,6 +5418,12 @@ pub struct CheckRepositoryOptions {
 }
 
 impl CheckRepositoryOptions {
+    pub const fn metadata_only() -> Self {
+        Self {
+            read_data: CheckReadDataSelection::MetadataOnly,
+        }
+    }
+
     pub const fn full() -> Self {
         Self {
             read_data: CheckReadDataSelection::Full,
@@ -5306,6 +5445,7 @@ impl Default for CheckRepositoryOptions {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckReadDataSelection {
+    MetadataOnly,
     Full,
     Subset(CheckReadDataSubset),
 }
@@ -5313,6 +5453,7 @@ pub enum CheckReadDataSelection {
 impl CheckReadDataSelection {
     fn mode(self) -> CheckReadDataMode {
         match self {
+            Self::MetadataOnly => CheckReadDataMode::MetadataOnly,
             Self::Full => CheckReadDataMode::Full,
             Self::Subset(_) => CheckReadDataMode::Subset,
         }
@@ -5320,7 +5461,7 @@ impl CheckReadDataSelection {
 
     fn subset_label(self) -> Option<String> {
         match self {
-            Self::Full => None,
+            Self::MetadataOnly | Self::Full => None,
             Self::Subset(subset) => Some(subset.label()),
         }
     }
@@ -8050,6 +8191,7 @@ fn select_check_chunk_ids(
     selection: CheckReadDataSelection,
 ) -> Vec<String> {
     let selected_count = match selection {
+        CheckReadDataSelection::MetadataOnly => 0,
         CheckReadDataSelection::Full => chunk_targets.len(),
         CheckReadDataSelection::Subset(subset) => subset.selected_count(chunk_targets.len()),
     };
@@ -8138,6 +8280,50 @@ fn subtract_keys(keys: &[ObjectKey], remove: &BTreeSet<ObjectKey>) -> Vec<Object
         .collect()
 }
 
+const REPOSITORY_OBJECT_FAMILIES: &[RepositoryObjectFamily] = &[
+    RepositoryObjectFamily::Bootstrap,
+    RepositoryObjectFamily::KeySlot,
+    RepositoryObjectFamily::KeySlotRemoval,
+    RepositoryObjectFamily::Commit,
+    RepositoryObjectFamily::ForgetMarker,
+    RepositoryObjectFamily::Manifest,
+    RepositoryObjectFamily::Index,
+    RepositoryObjectFamily::Chunk,
+    RepositoryObjectFamily::Policy,
+    RepositoryObjectFamily::UploadState,
+    RepositoryObjectFamily::LeaseState,
+    RepositoryObjectFamily::PruneState,
+    RepositoryObjectFamily::Other,
+];
+
+fn repository_object_family(key: &ObjectKey) -> RepositoryObjectFamily {
+    match prune_object_kind(key) {
+        PruneObjectKind::Bootstrap => RepositoryObjectFamily::Bootstrap,
+        PruneObjectKind::KeySlot => RepositoryObjectFamily::KeySlot,
+        PruneObjectKind::KeySlotRemoval => RepositoryObjectFamily::KeySlotRemoval,
+        PruneObjectKind::Commit => RepositoryObjectFamily::Commit,
+        PruneObjectKind::ForgetMarker => RepositoryObjectFamily::ForgetMarker,
+        PruneObjectKind::Manifest => RepositoryObjectFamily::Manifest,
+        PruneObjectKind::Index => RepositoryObjectFamily::Index,
+        PruneObjectKind::Chunk => RepositoryObjectFamily::Chunk,
+        PruneObjectKind::Policy => RepositoryObjectFamily::Policy,
+        PruneObjectKind::UploadState => RepositoryObjectFamily::UploadState,
+        PruneObjectKind::LeaseState => RepositoryObjectFamily::LeaseState,
+        PruneObjectKind::PruneState => RepositoryObjectFamily::PruneState,
+        PruneObjectKind::Other => RepositoryObjectFamily::Other,
+    }
+}
+
+async fn listed_keys(store: &dyn ObjectStore, prefix: &str) -> CoreResult<Vec<ObjectKey>> {
+    let prefix = ObjectKeyPrefix::new(prefix).map_err(|source| CoreError::ObjectKey { source })?;
+    let mut keys = store
+        .list_prefix(&prefix)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    keys.sort();
+    Ok(keys)
+}
+
 fn prune_object_kind(key: &ObjectKey) -> PruneObjectKind {
     let value = key.as_str();
     if value == "bootstrap" {
@@ -8191,9 +8377,50 @@ fn object_key_for_policy_config(policy_id: &str) -> CoreResult<ObjectKey> {
     object_key_for_id(POLICY_CONFIG_PREFIX, policy_id)
 }
 
+fn policy_config_id_from_object_key(key: &ObjectKey) -> CoreResult<String> {
+    let policy_id = two_level_object_id_from_key(key, POLICY_CONFIG_PREFIX, "policy config")?;
+    if !policy_config_id_is_valid(&policy_id) || object_key_for_policy_config(&policy_id)? != *key {
+        return Err(CoreError::InvalidPolicyConfig {
+            key: key.clone(),
+            reason: "policy config object key does not match policy id",
+        });
+    }
+    Ok(policy_id)
+}
+
 fn upload_state_object_key(writer_id: &str, upload_id: &str) -> CoreResult<ObjectKey> {
     ObjectKey::new(format!("{UPLOAD_STATE_PREFIX}/{writer_id}/{upload_id}"))
         .map_err(|source| CoreError::ObjectKey { source })
+}
+
+fn upload_state_ids_from_object_key(key: &ObjectKey) -> CoreResult<(String, String)> {
+    let Some(remainder) = key
+        .as_str()
+        .strip_prefix(&format!("{UPLOAD_STATE_PREFIX}/"))
+    else {
+        return Err(CoreError::InvalidUploadState {
+            key: key.clone(),
+            reason: "upload state object key is not under upload-state prefix",
+        });
+    };
+    let Some((writer_id, upload_id)) = remainder.split_once('/') else {
+        return Err(CoreError::InvalidUploadState {
+            key: key.clone(),
+            reason: "upload state object key is missing writer or upload id",
+        });
+    };
+    if writer_id.contains('/')
+        || upload_id.contains('/')
+        || !upload_state_id_is_valid(writer_id)
+        || !upload_state_id_is_valid(upload_id)
+        || upload_state_object_key(writer_id, upload_id)? != *key
+    {
+        return Err(CoreError::InvalidUploadState {
+            key: key.clone(),
+            reason: "upload state object key does not match writer and upload ids",
+        });
+    }
+    Ok((writer_id.to_owned(), upload_id.to_owned()))
 }
 
 fn lease_state_object_key(lease_id: &str) -> CoreResult<ObjectKey> {
@@ -8215,6 +8442,91 @@ fn lease_id_from_object_key(key: &ObjectKey) -> CoreResult<String> {
         });
     }
     Ok(lease_id.to_owned())
+}
+
+fn prune_plan_id_from_object_key(key: &ObjectKey, prefix: &'static str) -> CoreResult<String> {
+    let plan_id = two_level_object_id_from_key(key, prefix, "prune state")?;
+    let expected_key = if prefix == PRUNE_PLAN_PREFIX {
+        prune_plan_object_key(&plan_id)?
+    } else {
+        prune_completion_object_key(&plan_id)?
+    };
+    if !prune_plan_id_is_valid(&plan_id) || expected_key != *key {
+        return Err(invalid_two_level_object_key(
+            key,
+            prefix,
+            "prune state",
+            "prune state object key does not match plan id",
+        ));
+    }
+    Ok(plan_id)
+}
+
+fn two_level_object_id_from_key(
+    key: &ObjectKey,
+    prefix: &'static str,
+    family: &'static str,
+) -> CoreResult<String> {
+    let Some(remainder) = key.as_str().strip_prefix(&format!("{prefix}/")) else {
+        return Err(invalid_two_level_object_key(
+            key,
+            prefix,
+            family,
+            "object key is outside expected prefix",
+        ));
+    };
+    let Some((shard, id)) = remainder.split_once('/') else {
+        return Err(invalid_two_level_object_key(
+            key,
+            prefix,
+            family,
+            "object key is missing object id",
+        ));
+    };
+    if shard.len() != 2 || id.contains('/') {
+        return Err(invalid_two_level_object_key(
+            key,
+            prefix,
+            family,
+            "object key has invalid object id layout",
+        ));
+    }
+    if id.get(..2) != Some(shard) {
+        return Err(invalid_two_level_object_key(
+            key,
+            prefix,
+            family,
+            match family {
+                "policy config" => "policy config object shard does not match policy id",
+                "prune state" => "prune state object shard does not match plan id",
+                _ => "repository object shard does not match object id",
+            },
+        ));
+    }
+    Ok(id.to_owned())
+}
+
+fn invalid_two_level_object_key(
+    key: &ObjectKey,
+    prefix: &'static str,
+    family: &'static str,
+    reason: &'static str,
+) -> CoreError {
+    match family {
+        "policy config" => CoreError::InvalidPolicyConfig {
+            key: key.clone(),
+            reason,
+        },
+        "prune state" if prefix == PRUNE_COMPLETION_PREFIX => CoreError::InvalidPruneCompletion {
+            key: key.clone(),
+            reason,
+        },
+        "prune state" => CoreError::InvalidPrunePlan {
+            key: key.clone(),
+            reason,
+        },
+        _ => CoreError::InvalidRepositoryBootstrap { reason },
+    }
 }
 
 fn repository_lease_conflict(lease: RepositoryLeaseState) -> CoreError {

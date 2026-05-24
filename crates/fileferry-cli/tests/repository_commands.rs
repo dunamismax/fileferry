@@ -170,6 +170,10 @@ fn patterned_bytes(seed: usize, len: usize) -> Vec<u8> {
         .collect()
 }
 
+fn command_failure_json(output: &[u8]) -> Value {
+    serde_json::from_slice(output).expect("failure json")
+}
+
 #[test]
 fn init_creates_encrypted_local_repository_and_snapshots_lists_it() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -211,6 +215,356 @@ fn init_creates_encrypted_local_repository_and_snapshots_lists_it() {
             .expect("snapshot array")
             .len(),
         0
+    );
+}
+
+#[test]
+fn repo_reports_safe_status_without_unlock_and_verifies_metadata_on_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "repo-status-passphrase";
+
+    let uninitialized_output = fileferry()
+        .args(["--repo", &repo_url, "--json", "repo"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let uninitialized: Value =
+        serde_json::from_slice(&uninitialized_output).expect("uninitialized repo json");
+    assert_eq!(uninitialized["command"], "repo");
+    assert_eq!(uninitialized["status"], "success");
+    assert_eq!(uninitialized["data"]["initialized"], false);
+    assert!(uninitialized["data"]["repository_id"].is_null());
+    assert_eq!(uninitialized["data"]["verification"], Value::Null);
+    assert_eq!(
+        uninitialized["data"]["storage"]["repository_requirements_met"],
+        true
+    );
+
+    init_repo(&repo_url, passphrase);
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("do-not-leak-source-name.txt"), b"contents").expect("write source");
+    backup_source(&repo_url, passphrase, &source);
+
+    let status_output = fileferry()
+        .args(["--repo", &repo_url, "--json", "repo"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let status_text = String::from_utf8(status_output.clone()).expect("status utf8");
+    let status: Value = serde_json::from_slice(&status_output).expect("repo status json");
+    assert_eq!(status["data"]["initialized"], true);
+    assert_eq!(status["data"]["format"]["compatibility"], "current");
+    assert_eq!(status["data"]["verification"], Value::Null);
+    assert!(!status_text.contains("do-not-leak-source-name"));
+
+    let families = status["data"]["object_families"]
+        .as_array()
+        .expect("object family summaries");
+    assert!(
+        families
+            .iter()
+            .any(|family| family["family"] == "manifest" && family["objects"] == 1)
+    );
+    assert!(
+        families
+            .iter()
+            .any(|family| family["family"] == "chunk" && family["objects"].as_u64().unwrap() > 0)
+    );
+
+    let verify_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "repo", "--verify"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines = verify_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<Value>(line).expect("repo jsonl event"))
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["event"], "command_started");
+    assert_eq!(lines[1]["event"], "command_completed");
+    assert_eq!(lines[1]["data"]["verification"]["unlocked"], true);
+    assert_eq!(
+        lines[1]["data"]["verification"]["read_data_mode"],
+        "metadata_only"
+    );
+    assert_eq!(lines[1]["data"]["verification"]["chunk_objects_checked"], 0);
+    assert!(
+        lines[1]["data"]["verification"]["metadata_objects_checked"]
+            .as_u64()
+            .unwrap()
+            >= 3
+    );
+}
+
+#[test]
+fn repo_inspects_unsupported_format_and_features_without_unlock() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let passphrase = "repo-migration-passphrase";
+
+    let version_repo = temp.path().join("version-repo");
+    let version_repo_url = version_repo.display().to_string();
+    init_repo(&version_repo_url, passphrase);
+    let mut bootstrap: Value =
+        serde_json::from_slice(&fs::read(version_repo.join("bootstrap")).expect("bootstrap bytes"))
+            .expect("bootstrap json");
+    bootstrap["format_version"] = json!(999);
+    fs::write(
+        version_repo.join("bootstrap"),
+        serde_json::to_vec(&bootstrap).expect("unsupported version json"),
+    )
+    .expect("write unsupported version");
+    let version_output = fileferry()
+        .args(["--repo", &version_repo_url, "--json", "repo"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let version: Value = serde_json::from_slice(&version_output).expect("version repo json");
+    assert_eq!(version["data"]["initialized"], true);
+    assert_eq!(
+        version["data"]["format"]["compatibility"],
+        "unsupported_future"
+    );
+
+    let feature_repo = temp.path().join("feature-repo");
+    let feature_repo_url = feature_repo.display().to_string();
+    init_repo(&feature_repo_url, passphrase);
+    let mut bootstrap: Value =
+        serde_json::from_slice(&fs::read(feature_repo.join("bootstrap")).expect("bootstrap bytes"))
+            .expect("bootstrap json");
+    bootstrap["features"] = json!(["future-feature"]);
+    fs::write(
+        feature_repo.join("bootstrap"),
+        serde_json::to_vec(&bootstrap).expect("unsupported feature json"),
+    )
+    .expect("write unsupported feature");
+    let feature_output = fileferry()
+        .args(["--repo", &feature_repo_url, "--json", "repo"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let feature: Value = serde_json::from_slice(&feature_output).expect("feature repo json");
+    assert_eq!(
+        feature["data"]["format"]["compatibility"],
+        "unsupported_features"
+    );
+    assert_eq!(
+        feature["data"]["format"]["features"],
+        json!(["future-feature"])
+    );
+}
+
+#[test]
+fn repo_verify_wrong_password_and_core_corruption_are_structured_and_redacted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "repo-verify-passphrase";
+    init_repo(&repo_url, passphrase);
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), patterned_bytes(3, 700_000)).expect("write source");
+    backup_source(&repo_url, passphrase, &source);
+
+    let wrong_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-repo-passphrase-canary")
+        .args(["--repo", &repo_url, "--json", "repo", "--verify"])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_text = String::from_utf8(wrong_output.clone()).expect("wrong utf8");
+    let wrong = command_failure_json(&wrong_output);
+    assert_eq!(wrong["command"], "repo");
+    assert_eq!(wrong["data"]["code"], "repository_unlock_failed");
+    assert!(!wrong_text.contains("wrong-repo-passphrase-canary"));
+
+    let bootstrap_repo = temp.path().join("bootstrap-corrupt");
+    let bootstrap_repo_url = bootstrap_repo.display().to_string();
+    init_repo(&bootstrap_repo_url, passphrase);
+    fs::write(bootstrap_repo.join("bootstrap"), b"not-json").expect("corrupt bootstrap");
+    let bootstrap_output = fileferry()
+        .args(["--repo", &bootstrap_repo_url, "--json", "repo"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let bootstrap = command_failure_json(&bootstrap_output);
+    assert_eq!(
+        bootstrap["data"]["code"],
+        "repository_bootstrap_decode_failed"
+    );
+
+    let manifest_repo = temp.path().join("manifest-corrupt");
+    let manifest_repo_url = manifest_repo.display().to_string();
+    init_repo(&manifest_repo_url, passphrase);
+    backup_source(&manifest_repo_url, passphrase, &source);
+    let manifest_path = find_first_file(manifest_repo.join("objects/manifest"));
+    fs::write(&manifest_path, b"not encrypted manifest").expect("corrupt manifest");
+    let manifest_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &manifest_repo_url, "--json", "repo", "--verify"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let manifest = command_failure_json(&manifest_output);
+    assert_eq!(manifest["data"]["code"], "repository_object_decode_failed");
+    assert!(
+        manifest["data"]["object_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("objects/manifest/")
+    );
+
+    let index_repo = temp.path().join("index-corrupt");
+    let index_repo_url = index_repo.display().to_string();
+    init_repo(&index_repo_url, passphrase);
+    backup_source(&index_repo_url, passphrase, &source);
+    let index_path = find_first_file(index_repo.join("objects/index"));
+    fs::write(&index_path, b"not encrypted index").expect("corrupt index");
+    let index_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &index_repo_url, "--json", "repo", "--verify"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let index = command_failure_json(&index_output);
+    assert_eq!(index["data"]["code"], "repository_object_decode_failed");
+    assert!(
+        index["data"]["object_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("objects/index/")
+    );
+}
+
+#[test]
+fn repo_verify_checks_lease_and_prune_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let passphrase = "repo-aux-passphrase";
+
+    let lease_repo = temp.path().join("lease-repo");
+    let lease_repo_url = lease_repo.display().to_string();
+    init_repo(&lease_repo_url, passphrase);
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let store = LocalStore::new(&lease_repo);
+    let opened = runtime
+        .block_on(open_repository(
+            &store,
+            &SecretString::from(passphrase.to_owned()),
+        ))
+        .expect("open lease repo");
+    let pipeline =
+        BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id)).expect("pipeline");
+    let lease_id = "ab".repeat(32);
+    runtime
+        .block_on(pipeline.write_repository_lease_state(
+            &store,
+            &opened.master_key,
+            RepositoryLeaseStateRequest {
+                lease_id: lease_id.clone(),
+                writer_id: "cd".repeat(32),
+                command_kind: RepositoryLeaseCommandKind::RepositoryMaintenance,
+                acquired_at_unix_seconds: 10,
+                expires_at_unix_seconds: 20,
+            },
+        ))
+        .expect("write lease");
+    fs::write(
+        lease_repo.join("locks").join(&lease_id),
+        b"not encrypted lease",
+    )
+    .expect("corrupt lease");
+    let lease_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &lease_repo_url, "--json", "repo", "--verify"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lease = command_failure_json(&lease_output);
+    assert_eq!(
+        lease["data"]["code"],
+        "repository_lease_state_decode_failed"
+    );
+    assert!(
+        lease["data"]["object_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("locks/")
+    );
+
+    let prune_repo = temp.path().join("prune-repo");
+    let prune_repo_url = prune_repo.display().to_string();
+    init_repo(&prune_repo_url, passphrase);
+    let source = temp.path().join("prune-source");
+    fs::create_dir(&source).expect("create prune source");
+    fs::write(source.join("sample.txt"), b"first").expect("write first");
+    backup_source(&prune_repo_url, passphrase, &source);
+    fs::write(source.join("sample.txt"), b"second").expect("write second");
+    backup_source(&prune_repo_url, passphrase, &source);
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &prune_repo_url, "forget", "--keep-last", "1"])
+        .assert()
+        .success()
+        .stderr("");
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &prune_repo_url, "prune"])
+        .assert()
+        .success()
+        .stderr("");
+    let prune_plan_path = find_first_file(prune_repo.join("objects/prune-plan"));
+    fs::write(&prune_plan_path, b"not encrypted prune plan").expect("corrupt prune plan");
+    let prune_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &prune_repo_url, "--json", "repo", "--verify"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let prune = command_failure_json(&prune_output);
+    assert_eq!(prune["data"]["code"], "repository_prune_plan_decode_failed");
+    assert!(
+        prune["data"]["object_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("objects/prune-plan/")
     );
 }
 

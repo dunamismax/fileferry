@@ -183,6 +183,16 @@ diff
   data.unchanged_count: integer
   data.entries: array of SnapshotDiffEntry
 
+repo
+  data.repository_url: redacted string
+  data.backend: "local" | "s3_compatible"
+  data.initialized: boolean
+  data.repository_id: string | null
+  data.format: RepositoryFormatStatus | null
+  data.storage: RepositoryStorageStatus
+  data.object_families: array of RepositoryObjectFamilyStatus
+  data.verification: RepositoryVerificationStatus | null
+
 check
   data.repository_id: string
   data.checked_at_unix_seconds: integer
@@ -335,6 +345,42 @@ SnapshotDiffEntry
     "file_flags_status", "resource_forks_status",
     "windows_attributes_status", "sparse_extents_status", or
     "source_platform"
+
+RepositoryFormatStatus
+  format_version: integer
+  latest_supported_format_version: integer
+  compatibility: "current" | "unsupported_future" | "unsupported_legacy" |
+                 "unsupported_features"
+  features: array of strings
+
+RepositoryStorageStatus
+  conditional_create: boolean
+  atomic_visibility: boolean
+  strong_read_after_write: boolean
+  delete: "unsupported" | "best_effort" | "idempotent"
+  listing: "unsupported" | "prefix"
+  repository_requirements_met: boolean
+
+RepositoryObjectFamilyStatus
+  family: "bootstrap" | "key_slot" | "key_slot_removal" | "commit" |
+          "forget_marker" | "manifest" | "index" | "chunk" | "policy" |
+          "upload_state" | "lease_state" | "prune_state" | "other"
+  objects: integer
+  status: "empty" | "present" | "verified"
+
+RepositoryVerificationStatus
+  unlocked: boolean
+  key_slots: integer
+  metadata_objects_checked: integer
+  chunk_objects_checked: integer
+  bytes_read: integer
+  read_data_mode: "metadata_only"
+  forget_markers_checked: integer
+  policy_configs_checked: integer
+  upload_states_checked: integer
+  lease_states_checked: integer
+  prune_plans_checked: integer
+  prune_completions_checked: integer
 
 TimestampValue
   status: "captured" | "unsupported" | "denied"
@@ -560,6 +606,14 @@ diff command_completed
   status: "success"
   data: Diff data schema above
 
+repo command_started
+  status: "started"
+  data: null
+
+repo command_completed
+  status: "success"
+  data: Repo data schema above
+
 check command_started
   status: "started"
   data: null
@@ -631,8 +685,9 @@ Repository commands now resolve the repository backend through the same
 local/S3 target parser before command execution. S3-compatible URLs with
 embedded credentials, query strings, or fragments are rejected before use.
 S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`, `check`,
-`find`, `diff`, `forget`, `prune`, and key-management commands use the explicit S3
-environment contract above and redact repository URLs as `s3://<redacted>`.
+`find`, `diff`, `repo`, `forget`, `prune`, and key-management commands use
+the explicit S3 environment contract above and redact repository URLs as
+`s3://<redacted>`.
 
 `ferry backup <SOURCE>...` opens an initialized local or S3-compatible
 repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an
@@ -742,6 +797,21 @@ Diff does not read chunk objects or compare file contents byte-by-byte.
 `metadata_changes` is limited to metadata fields present in the decrypted
 manifest; unsupported or not-yet-restored platform metadata is reported only
 as status changes, not as value-level comparisons.
+
+`ferry repo` inspects local or S3-compatible repository status. Without
+`--verify`, it does not require a passphrase and reports only safe operational
+facts: initialized/uninitialized status, redacted repository URL, backend
+kind, format compatibility, repository id, passive storage capabilities, and
+object-family aggregate counts. It must not print decrypted snapshot paths,
+tags, source names, object keys, or per-snapshot/object shape in default
+output. Unsupported future format versions and unsupported feature flags are
+reported in the successful status document so operators can inspect a
+repository before unlock. `ferry repo --verify` requires
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, unlocks the repository, and
+authenticates committed manifests, chunk indexes, forget markers, policy
+config objects, upload state, lease state, and prune state. It uses
+metadata-only repository checking and does not read chunk data. The command
+does not repair repositories.
 
 `ferry check` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

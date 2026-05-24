@@ -3,12 +3,14 @@ use clap_complete::{Shell, generate};
 use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, BackupRequest, CheckReadDataSubset,
     CheckRepositoryOptions, CoreError, MetadataStatus, PruneRepositoryOptions,
-    RECOVERY_EXPORT_WARNING, RepositoryAeadAlgorithm, RestoreDestinationAction,
-    RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotFindRequest,
-    SnapshotFindScope, SnapshotSelection, add_repository_key_slot, create_repository,
-    diff_snapshot_entries, export_repository_recovery, find_snapshot_entries,
-    import_repository_recovery, list_snapshot_entries, open_repository, remove_repository_key_slot,
-    rotate_repository_key_slots, select_snapshot, snapshot_summaries,
+    RECOVERY_EXPORT_WARNING, RepositoryAeadAlgorithm, RepositoryFormatCompatibility,
+    RepositoryObjectFamily, RestoreDestinationAction, RestoreDestinationRequest,
+    RestoreOverwritePolicy, SnapshotEntry, SnapshotFindRequest, SnapshotFindScope,
+    SnapshotSelection, add_repository_key_slot, create_repository, diff_snapshot_entries,
+    export_repository_recovery, find_snapshot_entries, import_repository_recovery,
+    inspect_repository_format, inspect_repository_object_families, list_snapshot_entries,
+    open_repository, remove_repository_key_slot, rotate_repository_key_slots, select_snapshot,
+    snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
 use fileferry_platform::{EntryKind, MetadataValue, PlatformKind};
@@ -17,8 +19,8 @@ use fileferry_policy::{
     RetentionPolicy, RetentionSnapshot,
 };
 use fileferry_storage::{
-    LocalStore, ObjectKeyPrefix, ObjectStore, PolicyObjectStore, S3Store, S3StoreConfig,
-    StorageError, StoragePolicy,
+    DeleteCapability, ListingCapability, LocalStore, ObjectKeyPrefix, ObjectStore,
+    PolicyObjectStore, S3Store, S3StoreConfig, StorageCapabilities, StorageError, StoragePolicy,
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -244,6 +246,13 @@ pub enum Command {
         dry_run: bool,
     },
 
+    /// Inspect repository status without revealing backup shape by default.
+    Repo {
+        /// Unlock and verify encrypted metadata, indexes, leases, policy, upload, and prune state.
+        #[arg(long)]
+        verify: bool,
+    },
+
     /// Manage repository unlock keys.
     Key {
         #[command(subcommand)]
@@ -349,6 +358,7 @@ impl Command {
             Self::Check { .. } => "check",
             Self::Forget { .. } => "forget",
             Self::Prune { .. } => "prune",
+            Self::Repo { .. } => "repo",
             Self::Key {
                 command: KeyCommand::Add { .. },
             } => "key add",
@@ -863,6 +873,76 @@ struct InitData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct RepoData {
+    repository_url: String,
+    backend: CliBackendKind,
+    initialized: bool,
+    repository_id: Option<String>,
+    format: Option<RepoFormatData>,
+    storage: RepoStorageData,
+    object_families: Vec<RepoObjectFamilyData>,
+    verification: Option<RepoVerificationData>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct RepoFormatData {
+    format_version: u16,
+    latest_supported_format_version: u16,
+    compatibility: RepoFormatCompatibility,
+    features: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RepoFormatCompatibility {
+    Current,
+    UnsupportedFuture,
+    UnsupportedLegacy,
+    UnsupportedFeatures,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct RepoStorageData {
+    conditional_create: bool,
+    atomic_visibility: bool,
+    strong_read_after_write: bool,
+    delete: &'static str,
+    listing: &'static str,
+    repository_requirements_met: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct RepoObjectFamilyData {
+    family: &'static str,
+    objects: usize,
+    status: RepoObjectFamilyStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RepoObjectFamilyStatus {
+    Empty,
+    Present,
+    Verified,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct RepoVerificationData {
+    unlocked: bool,
+    key_slots: usize,
+    metadata_objects_checked: usize,
+    chunk_objects_checked: usize,
+    bytes_read: u64,
+    read_data_mode: fileferry_core::CheckReadDataMode,
+    forget_markers_checked: usize,
+    policy_configs_checked: usize,
+    upload_states_checked: usize,
+    lease_states_checked: usize,
+    prune_plans_checked: usize,
+    prune_completions_checked: usize,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct KeyAddData {
     repository_id: String,
     key_slot_id: String,
@@ -1268,6 +1348,10 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
         Command::Prune { dry_run } => {
             let config = resolve_config(&cli.globals)?;
             prune(mode, &config, dry_run)
+        }
+        Command::Repo { verify } => {
+            let config = resolve_config(&cli.globals)?;
+            repo(mode, &config, verify)
         }
         Command::Key {
             command: KeyCommand::Add { new_password_file },
@@ -2687,6 +2771,84 @@ fn prune(mode: OutputMode, config: &ResolvedConfig, dry_run: bool) -> Result<Out
     emit_prune_command(mode, data)
 }
 
+fn repo(mode: OutputMode, config: &ResolvedConfig, verify: bool) -> Result<Output, CliError> {
+    let repository = repository_store_for_command(
+        config,
+        "repo",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
+    let runtime = tokio_runtime()?;
+    let capabilities = repository.store.capabilities();
+    let families = runtime.block_on(inspect_repository_object_families(
+        repository.store.as_ref(),
+    ))?;
+    let inspection = match runtime.block_on(inspect_repository_format(repository.store.as_ref())) {
+        Ok(inspection) => Some(inspection),
+        Err(CoreError::RepositoryNotInitialized) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut verification = None;
+
+    if verify {
+        let passphrase = repository_passphrase()?;
+        let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+        let check = runtime.block_on(pipeline.check_repository_with_options(
+            repository.store.as_ref(),
+            &opened.master_key,
+            CheckRepositoryOptions::metadata_only(),
+        ))?;
+        let forget_markers_checked = runtime
+            .block_on(pipeline.read_forgotten_snapshot_ids(repository.store.as_ref()))?
+            .len();
+        let auxiliary = runtime.block_on(
+            pipeline
+                .check_repository_auxiliary_state(repository.store.as_ref(), &opened.master_key),
+        )?;
+        verification = Some(RepoVerificationData {
+            unlocked: true,
+            key_slots: opened.key_slots,
+            metadata_objects_checked: check.metadata_objects_checked,
+            chunk_objects_checked: check.chunk_objects_checked,
+            bytes_read: check.bytes_read,
+            read_data_mode: check.read_data_mode,
+            forget_markers_checked,
+            policy_configs_checked: auxiliary.policy_configs_checked,
+            upload_states_checked: auxiliary.upload_states_checked,
+            lease_states_checked: auxiliary.lease_states_checked,
+            prune_plans_checked: auxiliary.prune_plans_checked,
+            prune_completions_checked: auxiliary.prune_completions_checked,
+        });
+    }
+
+    let data = RepoData {
+        repository_url: redact_for_display(&repository.url),
+        backend: repository.backend,
+        initialized: inspection.is_some(),
+        repository_id: inspection
+            .as_ref()
+            .map(|inspection| inspection.repository_id.clone()),
+        format: inspection.as_ref().map(|inspection| RepoFormatData {
+            format_version: inspection.format_version,
+            latest_supported_format_version: inspection.latest_supported_format_version,
+            compatibility: repo_format_compatibility(inspection.compatibility),
+            features: inspection.features.clone(),
+        }),
+        storage: repo_storage_data(capabilities),
+        object_families: families
+            .iter()
+            .map(|summary| RepoObjectFamilyData {
+                family: repo_object_family_name(summary.family),
+                objects: summary.objects,
+                status: repo_object_family_status(summary.family, summary.objects, verify),
+            })
+            .collect(),
+        verification,
+    };
+
+    emit_command(mode, "repo", data, repo_human_output)
+}
+
 fn restore(
     mode: OutputMode,
     config: &ResolvedConfig,
@@ -3953,6 +4115,179 @@ fn emit_prune_command(
         stderr: String::new(),
         exit_code: 0,
     })
+}
+
+fn repo_human_output(data: &RepoData) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Repository {} at {}",
+        if data.initialized {
+            "initialized"
+        } else {
+            "uninitialized"
+        },
+        data.repository_url
+    ));
+    lines.push(format!("backend={}", data.backend));
+    if let Some(repository_id) = &data.repository_id {
+        lines.push(format!("repository_id={repository_id}"));
+    }
+    if let Some(format) = &data.format {
+        lines.push(format!(
+            "format_version={} latest_supported_format_version={} compatibility={}",
+            format.format_version,
+            format.latest_supported_format_version,
+            display_repo_format_compatibility(format.compatibility)
+        ));
+        if !format.features.is_empty() {
+            lines.push(format!("features={}", format.features.join(",")));
+        }
+    }
+    lines.push(format!(
+        "storage conditional_create={} atomic_visibility={} strong_read_after_write={} delete={} listing={} repository_requirements_met={}",
+        data.storage.conditional_create,
+        data.storage.atomic_visibility,
+        data.storage.strong_read_after_write,
+        data.storage.delete,
+        data.storage.listing,
+        data.storage.repository_requirements_met
+    ));
+    lines.push("object_families:".to_owned());
+    lines.extend(data.object_families.iter().map(|family| {
+        format!(
+            "  {} objects={} status={}",
+            family.family,
+            family.objects,
+            display_repo_object_family_status(family.status)
+        )
+    }));
+    if let Some(verification) = &data.verification {
+        lines.push(format!(
+            "verification unlocked={} key_slots={} metadata_objects_checked={} chunk_objects_checked={} read_data_mode={}",
+            verification.unlocked,
+            verification.key_slots,
+            verification.metadata_objects_checked,
+            verification.chunk_objects_checked,
+            display_check_read_data_mode(verification.read_data_mode)
+        ));
+        lines.push(format!(
+            "auxiliary_state forget_markers_checked={} policy_configs_checked={} upload_states_checked={} lease_states_checked={} prune_plans_checked={} prune_completions_checked={}",
+            verification.forget_markers_checked,
+            verification.policy_configs_checked,
+            verification.upload_states_checked,
+            verification.lease_states_checked,
+            verification.prune_plans_checked,
+            verification.prune_completions_checked
+        ));
+    }
+    lines.join("\n") + "\n"
+}
+
+fn repo_storage_data(capabilities: StorageCapabilities) -> RepoStorageData {
+    RepoStorageData {
+        conditional_create: capabilities.conditional_create,
+        atomic_visibility: capabilities.atomic_visibility,
+        strong_read_after_write: capabilities.strong_read_after_write,
+        delete: display_delete_capability(capabilities.delete),
+        listing: display_listing_capability(capabilities.listing),
+        repository_requirements_met: capabilities.delete == DeleteCapability::Idempotent
+            && capabilities.listing == ListingCapability::Prefix,
+    }
+}
+
+fn repo_format_compatibility(
+    compatibility: RepositoryFormatCompatibility,
+) -> RepoFormatCompatibility {
+    match compatibility {
+        RepositoryFormatCompatibility::Current => RepoFormatCompatibility::Current,
+        RepositoryFormatCompatibility::UnsupportedFuture => {
+            RepoFormatCompatibility::UnsupportedFuture
+        }
+        RepositoryFormatCompatibility::UnsupportedLegacy => {
+            RepoFormatCompatibility::UnsupportedLegacy
+        }
+        RepositoryFormatCompatibility::UnsupportedFeatures => {
+            RepoFormatCompatibility::UnsupportedFeatures
+        }
+    }
+}
+
+fn repo_object_family_name(family: RepositoryObjectFamily) -> &'static str {
+    match family {
+        RepositoryObjectFamily::Bootstrap => "bootstrap",
+        RepositoryObjectFamily::KeySlot => "key_slot",
+        RepositoryObjectFamily::KeySlotRemoval => "key_slot_removal",
+        RepositoryObjectFamily::Commit => "commit",
+        RepositoryObjectFamily::ForgetMarker => "forget_marker",
+        RepositoryObjectFamily::Manifest => "manifest",
+        RepositoryObjectFamily::Index => "index",
+        RepositoryObjectFamily::Chunk => "chunk",
+        RepositoryObjectFamily::Policy => "policy",
+        RepositoryObjectFamily::UploadState => "upload_state",
+        RepositoryObjectFamily::LeaseState => "lease_state",
+        RepositoryObjectFamily::PruneState => "prune_state",
+        RepositoryObjectFamily::Other => "other",
+    }
+}
+
+fn repo_object_family_status(
+    family: RepositoryObjectFamily,
+    objects: usize,
+    verified: bool,
+) -> RepoObjectFamilyStatus {
+    if objects == 0 {
+        return RepoObjectFamilyStatus::Empty;
+    }
+    if verified
+        && matches!(
+            family,
+            RepositoryObjectFamily::Bootstrap
+                | RepositoryObjectFamily::Commit
+                | RepositoryObjectFamily::ForgetMarker
+                | RepositoryObjectFamily::Manifest
+                | RepositoryObjectFamily::Index
+                | RepositoryObjectFamily::Policy
+                | RepositoryObjectFamily::UploadState
+                | RepositoryObjectFamily::LeaseState
+                | RepositoryObjectFamily::PruneState
+        )
+    {
+        RepoObjectFamilyStatus::Verified
+    } else {
+        RepoObjectFamilyStatus::Present
+    }
+}
+
+fn display_repo_format_compatibility(compatibility: RepoFormatCompatibility) -> &'static str {
+    match compatibility {
+        RepoFormatCompatibility::Current => "current",
+        RepoFormatCompatibility::UnsupportedFuture => "unsupported_future",
+        RepoFormatCompatibility::UnsupportedLegacy => "unsupported_legacy",
+        RepoFormatCompatibility::UnsupportedFeatures => "unsupported_features",
+    }
+}
+
+fn display_repo_object_family_status(status: RepoObjectFamilyStatus) -> &'static str {
+    match status {
+        RepoObjectFamilyStatus::Empty => "empty",
+        RepoObjectFamilyStatus::Present => "present",
+        RepoObjectFamilyStatus::Verified => "verified",
+    }
+}
+
+fn display_delete_capability(capability: DeleteCapability) -> &'static str {
+    match capability {
+        DeleteCapability::Unsupported => "unsupported",
+        DeleteCapability::BestEffort => "best_effort",
+        DeleteCapability::Idempotent => "idempotent",
+    }
+}
+
+fn display_listing_capability(capability: ListingCapability) -> &'static str {
+    match capability {
+        ListingCapability::Unsupported => "unsupported",
+        ListingCapability::Prefix => "prefix",
+    }
 }
 
 fn display_check_read_data_mode(mode: fileferry_core::CheckReadDataMode) -> &'static str {
