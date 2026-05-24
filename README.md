@@ -23,7 +23,7 @@ The current release candidate includes:
 - Encrypted local and S3-compatible repository initialization.
 - Encrypted, compressed, deduplicated backup snapshots.
 - Restore by latest snapshot, snapshot id, tag, and path.
-- `snapshots`, `ls`, `repo`, `check`, `forget`, `prune`, and
+- `snapshots`, `ls`, `check`, `forget`, `prune`, and
   key-management commands.
 - JSON and JSONL machine output for the implemented command surface.
 - Config profiles and environment-variable precedence.
@@ -109,6 +109,8 @@ ferry diff --from-tag laptop --to-latest --path Projects
 ferry repo --verify --json
 ferry restore latest ~/restore-test
 ferry check --read-data-subset 5%
+ferry policy set --keep-daily 14 --keep-weekly 8
+ferry policy show --json
 ferry forget --keep-daily 14 --keep-weekly 8 --dry-run
 ferry prune --dry-run
 ```
@@ -164,9 +166,11 @@ This is release-candidate security engineering, not an external audit claim.
 - The published `1.0.0-rc.1` artifacts include recovery export but not
   recovery import or `ferry find`. Current main adds recovery import as a new
   external key slot, `ferry find` for encrypted snapshot-metadata search,
-  `ferry diff` for manifest-level snapshot comparison, and `ferry repo` for
-  safe repository status plus opt-in encrypted metadata/state verification;
-  full repository rekey is not implemented.
+  `ferry diff` for manifest-level snapshot comparison, `ferry repo` for safe
+  repository status plus opt-in encrypted metadata/state verification, and
+  `ferry policy` for encrypted repository-local retention policy config
+  storage, display, and explicit deletion; full repository rekey is not
+  implemented.
 - `ferry find` searches decrypted snapshot metadata after repository unlock. It
   does not search file contents or read chunk data.
 - `ferry diff` compares decrypted snapshot manifests after repository unlock.
@@ -177,6 +181,8 @@ This is release-candidate security engineering, not an external audit claim.
   and object keys. `ferry repo --verify` unlocks the repository and verifies
   encrypted metadata, indexes, forget markers, leases, policy, upload, and
   prune state without reading chunk data.
+- `ferry policy` stores retention policy config in encrypted repository
+  objects. It does not automatically apply stored policies to `forget` yet.
 - S3-compatible behavior is tested against the current abstraction and a
   private Backblaze B2 development bucket. It is not a blanket claim for every
   S3-compatible provider.

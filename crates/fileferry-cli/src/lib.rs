@@ -4,7 +4,8 @@ use fileferry_core::{
     BackupPipeline, BackupPipelineConfig, BackupRequest, CheckReadDataSubset,
     CheckRepositoryOptions, CoreError, MetadataStatus, PruneRepositoryOptions,
     RECOVERY_EXPORT_WARNING, RepositoryAeadAlgorithm, RepositoryFormatCompatibility,
-    RepositoryObjectFamily, RestoreDestinationAction, RestoreDestinationRequest,
+    RepositoryObjectFamily, RepositoryPolicyConfigListItem, RepositoryPolicyConfigRequest,
+    RepositoryRetentionPolicyConfig, RestoreDestinationAction, RestoreDestinationRequest,
     RestoreOverwritePolicy, SnapshotEntry, SnapshotFindRequest, SnapshotFindScope,
     SnapshotSelection, add_repository_key_slot, create_repository, diff_snapshot_entries,
     export_repository_recovery, find_snapshot_entries, import_repository_recovery,
@@ -246,6 +247,12 @@ pub enum Command {
         dry_run: bool,
     },
 
+    /// Manage encrypted repository-local retention policies.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
+
     /// Inspect repository status without revealing backup shape by default.
     Repo {
         /// Unlock and verify encrypted metadata, indexes, leases, policy, upload, and prune state.
@@ -345,6 +352,54 @@ pub enum KeyCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommand {
+    /// Store an encrypted repository-local retention policy.
+    Set {
+        /// Keep the newest N snapshots.
+        #[arg(long = "keep-last", value_name = "N")]
+        keep_last: Option<u32>,
+
+        /// Keep the newest snapshot per hour for N hourly buckets.
+        #[arg(long = "keep-hourly", value_name = "N")]
+        keep_hourly: Option<u32>,
+
+        /// Keep the newest snapshot per day for N daily buckets.
+        #[arg(long = "keep-daily", value_name = "N")]
+        keep_daily: Option<u32>,
+
+        /// Keep the newest snapshot per week for N weekly buckets.
+        #[arg(long = "keep-weekly", value_name = "N")]
+        keep_weekly: Option<u32>,
+
+        /// Keep the newest snapshot per month for N monthly buckets.
+        #[arg(long = "keep-monthly", value_name = "N")]
+        keep_monthly: Option<u32>,
+
+        /// Keep the newest snapshot per year for N yearly buckets.
+        #[arg(long = "keep-yearly", value_name = "N")]
+        keep_yearly: Option<u32>,
+
+        /// Keep snapshots carrying this tag. May be repeated.
+        #[arg(long = "keep-tag")]
+        keep_tags: Vec<String>,
+    },
+
+    /// Show encrypted repository-local retention policies after unlock.
+    Show,
+
+    /// Delete one encrypted repository-local retention policy.
+    Delete {
+        /// Policy id to delete.
+        #[arg(value_parser = parse_policy_id)]
+        policy_id: String,
+
+        /// Report what would be deleted without deleting the policy object.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 impl Command {
     fn name(&self) -> &'static str {
         match self {
@@ -358,6 +413,15 @@ impl Command {
             Self::Check { .. } => "check",
             Self::Forget { .. } => "forget",
             Self::Prune { .. } => "prune",
+            Self::Policy {
+                command: PolicyCommand::Set { .. },
+            } => "policy set",
+            Self::Policy {
+                command: PolicyCommand::Show,
+            } => "policy show",
+            Self::Policy {
+                command: PolicyCommand::Delete { .. },
+            } => "policy delete",
             Self::Repo { .. } => "repo",
             Self::Key {
                 command: KeyCommand::Add { .. },
@@ -533,6 +597,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         CoreError::SnapshotNotFound { .. }
         | CoreError::FindNoMatches
         | CoreError::ForgetNoSnapshotsMatched
+        | CoreError::PolicyConfigNotFound { .. }
         | CoreError::KeySlotNotFound { .. }
         | CoreError::SnapshotPathNotFound { .. } => 7,
         CoreError::RepositoryBootstrapDecode { .. }
@@ -1188,7 +1253,7 @@ struct ForgetSnapshotItem {
     marker_object: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct RetentionPolicySummary {
     keep_last: Option<u32>,
     keep_hourly: Option<u32>,
@@ -1197,6 +1262,45 @@ struct RetentionPolicySummary {
     keep_monthly: Option<u32>,
     keep_yearly: Option<u32>,
     keep_tags: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct PolicySetData {
+    repository_id: String,
+    policy_id: String,
+    policy_object: String,
+    created_at_unix_seconds: u64,
+    retention: RetentionPolicySummary,
+    created: bool,
+    bytes_written: u64,
+    encrypted_at_rest: bool,
+    applied_to_forget: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct PolicyShowData {
+    repository_id: String,
+    policy_count: usize,
+    policies: Vec<PolicyItem>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct PolicyDeleteData {
+    repository_id: String,
+    policy_id: String,
+    policy_object: String,
+    created_at_unix_seconds: u64,
+    retention: RetentionPolicySummary,
+    dry_run: bool,
+    deleted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct PolicyItem {
+    policy_id: String,
+    policy_object: String,
+    created_at_unix_seconds: u64,
+    retention: RetentionPolicySummary,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -1348,6 +1452,42 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
         Command::Prune { dry_run } => {
             let config = resolve_config(&cli.globals)?;
             prune(mode, &config, dry_run)
+        }
+        Command::Policy {
+            command:
+                PolicyCommand::Set {
+                    keep_last,
+                    keep_hourly,
+                    keep_daily,
+                    keep_weekly,
+                    keep_monthly,
+                    keep_yearly,
+                    keep_tags,
+                },
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            let policy = retention_policy_from_args(
+                keep_last,
+                keep_hourly,
+                keep_daily,
+                keep_weekly,
+                keep_monthly,
+                keep_yearly,
+                keep_tags,
+            )?;
+            policy_set(mode, &config, policy)
+        }
+        Command::Policy {
+            command: PolicyCommand::Show,
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            policy_show(mode, &config)
+        }
+        Command::Policy {
+            command: PolicyCommand::Delete { policy_id, dry_run },
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            policy_delete(mode, &config, policy_id, dry_run)
         }
         Command::Repo { verify } => {
             let config = resolve_config(&cli.globals)?;
@@ -1596,6 +1736,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::InvalidPruneCompletion { .. } => "repository_prune_completion_invalid",
         CoreError::PolicyConfigDecode { .. } => "repository_policy_config_decode_failed",
         CoreError::InvalidPolicyConfig { .. } => "repository_policy_config_invalid",
+        CoreError::PolicyConfigNotFound { .. } => "repository_policy_config_not_found",
         CoreError::UploadStateDecode { .. } => "repository_upload_state_decode_failed",
         CoreError::InvalidUploadState { .. } => "repository_upload_state_invalid",
         CoreError::LeaseStateDecode { .. } => "repository_lease_state_decode_failed",
@@ -2771,6 +2912,147 @@ fn prune(mode: OutputMode, config: &ResolvedConfig, dry_run: bool) -> Result<Out
     emit_prune_command(mode, data)
 }
 
+fn policy_set(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    policy: RetentionPolicy,
+) -> Result<Output, CliError> {
+    let repository = repository_store_for_command(
+        config,
+        "policy set",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
+    let passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
+    let retention = repository_retention_policy_config(&policy);
+    let existing = runtime.block_on(
+        pipeline.list_repository_policy_configs(repository.store.as_ref(), &opened.master_key),
+    )?;
+
+    let data = if let Some(existing) = existing
+        .iter()
+        .find(|item| item.state.body.retention == retention)
+    {
+        PolicySetData {
+            repository_id: existing.state.repository_id.clone(),
+            policy_id: existing.state.policy_id.clone(),
+            policy_object: existing.policy_object.as_str().to_owned(),
+            created_at_unix_seconds: existing.state.body.created_at_unix_seconds,
+            retention: RetentionPolicySummary::from_repository_policy(
+                &existing.state.body.retention,
+            ),
+            created: false,
+            bytes_written: 0,
+            encrypted_at_rest: true,
+            applied_to_forget: false,
+        }
+    } else {
+        let result = runtime.block_on(pipeline.write_repository_policy_config(
+            repository.store.as_ref(),
+            &opened.master_key,
+            RepositoryPolicyConfigRequest {
+                created_at_unix_seconds: unix_seconds_now()?,
+                retention,
+            },
+        ))?;
+        let state = runtime.block_on(pipeline.read_repository_policy_config(
+            repository.store.as_ref(),
+            &opened.master_key,
+            &result.policy_id,
+        ))?;
+        PolicySetData {
+            repository_id: result.repository_id,
+            policy_id: result.policy_id,
+            policy_object: result.policy_object.as_str().to_owned(),
+            created_at_unix_seconds: state.body.created_at_unix_seconds,
+            retention: RetentionPolicySummary::from_repository_policy(&state.body.retention),
+            created: result.created,
+            bytes_written: result.bytes_written,
+            encrypted_at_rest: true,
+            applied_to_forget: false,
+        }
+    };
+
+    emit_command(mode, "policy set", data, |data| {
+        format!(
+            "Stored policy {}\ncreated={} policy_object={} encrypted_at_rest=true applied_to_forget=false\n",
+            data.policy_id, data.created, data.policy_object
+        )
+    })
+}
+
+fn policy_show(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, CliError> {
+    let repository = repository_store_for_command(
+        config,
+        "policy show",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
+    let passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
+    let policies = runtime.block_on(
+        pipeline.list_repository_policy_configs(repository.store.as_ref(), &opened.master_key),
+    )?;
+    if policies.is_empty() {
+        return Err(CoreError::PolicyConfigNotFound { policy_id: None }.into());
+    }
+    let policies = policies.iter().map(policy_item).collect::<Vec<_>>();
+    let data = PolicyShowData {
+        repository_id: opened.repository_id,
+        policy_count: policies.len(),
+        policies,
+    };
+
+    emit_command(mode, "policy show", data, policy_show_human_output)
+}
+
+fn policy_delete(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    policy_id: String,
+    dry_run: bool,
+) -> Result<Output, CliError> {
+    let repository = repository_store_for_command(
+        config,
+        "policy delete",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
+    let passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+    let result = runtime.block_on(pipeline.delete_repository_policy_config(
+        repository.store.as_ref(),
+        &opened.master_key,
+        &policy_id,
+        dry_run,
+    ))?;
+    let data = PolicyDeleteData {
+        repository_id: result.repository_id,
+        policy_id: result.policy_id,
+        policy_object: result.policy_object.as_str().to_owned(),
+        created_at_unix_seconds: result.state.body.created_at_unix_seconds,
+        retention: RetentionPolicySummary::from_repository_policy(&result.state.body.retention),
+        dry_run,
+        deleted: result.deleted,
+    };
+
+    emit_command(mode, "policy delete", data, |data| {
+        let action = if data.dry_run {
+            "Would delete"
+        } else {
+            "Deleted"
+        };
+        format!(
+            "{} policy {}\npolicy_object={} deleted={}\n",
+            action, data.policy_id, data.policy_object, data.deleted
+        )
+    })
+}
+
 fn repo(mode: OutputMode, config: &ResolvedConfig, verify: bool) -> Result<Output, CliError> {
     let repository = repository_store_for_command(
         config,
@@ -3503,6 +3785,13 @@ fn parse_key_slot_id(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+fn parse_policy_id(value: &str) -> Result<String, String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("policy id must be 64 hexadecimal characters".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
 fn retention_policy_from_args(
     keep_last: Option<u32>,
     keep_hourly: Option<u32>,
@@ -3522,6 +3811,27 @@ fn retention_policy_from_args(
         keep_tags,
     }
     .validate()
+}
+
+fn repository_retention_policy_config(policy: &RetentionPolicy) -> RepositoryRetentionPolicyConfig {
+    RepositoryRetentionPolicyConfig {
+        keep_last: policy.keep_last.map(RetentionCount::get),
+        keep_hourly: policy.keep_hourly.map(RetentionCount::get),
+        keep_daily: policy.keep_daily.map(RetentionCount::get),
+        keep_weekly: policy.keep_weekly.map(RetentionCount::get),
+        keep_monthly: policy.keep_monthly.map(RetentionCount::get),
+        keep_yearly: policy.keep_yearly.map(RetentionCount::get),
+        keep_tags: policy.keep_tags.clone(),
+    }
+}
+
+fn policy_item(item: &RepositoryPolicyConfigListItem) -> PolicyItem {
+    PolicyItem {
+        policy_id: item.state.policy_id.clone(),
+        policy_object: item.policy_object.as_str().to_owned(),
+        created_at_unix_seconds: item.state.body.created_at_unix_seconds,
+        retention: RetentionPolicySummary::from_repository_policy(&item.state.body.retention),
+    }
 }
 
 fn forget_data(
@@ -3594,6 +3904,18 @@ impl RetentionPolicySummary {
             keep_weekly: policy.keep_weekly.map(RetentionCount::get),
             keep_monthly: policy.keep_monthly.map(RetentionCount::get),
             keep_yearly: policy.keep_yearly.map(RetentionCount::get),
+            keep_tags: policy.keep_tags.clone(),
+        }
+    }
+
+    fn from_repository_policy(policy: &RepositoryRetentionPolicyConfig) -> Self {
+        Self {
+            keep_last: policy.keep_last,
+            keep_hourly: policy.keep_hourly,
+            keep_daily: policy.keep_daily,
+            keep_weekly: policy.keep_weekly,
+            keep_monthly: policy.keep_monthly,
+            keep_yearly: policy.keep_yearly,
             keep_tags: policy.keep_tags.clone(),
         }
     }
@@ -4115,6 +4437,48 @@ fn emit_prune_command(
         stderr: String::new(),
         exit_code: 0,
     })
+}
+
+fn policy_show_human_output(data: &PolicyShowData) -> String {
+    let mut lines = vec![format!(
+        "Repository {} has {} policy config(s)",
+        data.repository_id, data.policy_count
+    )];
+    lines.extend(data.policies.iter().map(|policy| {
+        format!(
+            "{} created_at={} {}",
+            policy.policy_id,
+            policy.created_at_unix_seconds,
+            display_retention_policy_summary(&policy.retention)
+        )
+    }));
+    lines.join("\n") + "\n"
+}
+
+fn display_retention_policy_summary(policy: &RetentionPolicySummary) -> String {
+    let mut rules = Vec::new();
+    if let Some(value) = policy.keep_last {
+        rules.push(format!("keep_last={value}"));
+    }
+    if let Some(value) = policy.keep_hourly {
+        rules.push(format!("keep_hourly={value}"));
+    }
+    if let Some(value) = policy.keep_daily {
+        rules.push(format!("keep_daily={value}"));
+    }
+    if let Some(value) = policy.keep_weekly {
+        rules.push(format!("keep_weekly={value}"));
+    }
+    if let Some(value) = policy.keep_monthly {
+        rules.push(format!("keep_monthly={value}"));
+    }
+    if let Some(value) = policy.keep_yearly {
+        rules.push(format!("keep_yearly={value}"));
+    }
+    if !policy.keep_tags.is_empty() {
+        rules.push(format!("keep_tags={}", policy.keep_tags.join(",")));
+    }
+    rules.join(" ")
 }
 
 fn repo_human_output(data: &RepoData) -> String {

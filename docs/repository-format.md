@@ -254,8 +254,8 @@ if stored in plaintext.
 
 Current implementation status:
 
-- `fileferry-core` can write and read one encrypted policy/config object under
-  `objects/policy/<prefix>/<policy-id>`.
+- `fileferry-core` can write, list, read, and delete encrypted policy/config
+  objects under `objects/policy/<prefix>/<policy-id>`.
 - The current decrypted object contains `schema_version`, `magic`,
   `format_version`, `repository_id`, `policy_id`, and a `body` with
   `created_at_unix_seconds` and retention keep rules.
@@ -271,8 +271,15 @@ Current implementation status:
   `policy-config` with the exact object name. Moving ciphertext to another
   object name or reading it as another object kind fails authentication.
 - A repeated write of the same policy body is recognized as an idempotent
-  already-present result. The current API is core-only; no CLI policy command
-  is claimed by this fixture slice.
+  already-present result. `ferry policy set` also treats an existing object
+  with the same retention body as an idempotent CLI result instead of writing
+  another timestamped policy body. `ferry policy show` lists authenticated
+  policy/config objects after repository unlock. `ferry policy delete
+  <POLICY_ID>` authenticates the selected policy object before deleting it and
+  supports `--dry-run`.
+- Stored policy configs are not automatically applied by `ferry forget` yet;
+  current selection semantics are explicit by policy id for show/delete and by
+  retention body for idempotent set.
 - One policy/config fixture covers the current encrypted policy object framing
   and decrypted fields listed in the fixture-status section. Future config
   fields, policy selection semantics, or migration behavior require a new

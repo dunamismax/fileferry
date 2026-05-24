@@ -99,6 +99,31 @@ fn file_count_under(path: &Path) -> usize {
     count
 }
 
+fn raw_repository_bytes_contain(path: &Path, needle: &[u8]) -> bool {
+    if !path.exists() {
+        return false;
+    }
+
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(path).expect("read directory") {
+            let entry = entry.expect("directory entry");
+            let path = entry.path();
+            let file_type = entry.file_type().expect("entry type");
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                let bytes = fs::read(&path).expect("read repository file");
+                if bytes.windows(needle.len()).any(|window| window == needle) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 fn expected_restore_metadata_planned_fields(
     entries_with_file_or_directory_metadata: usize,
 ) -> usize {
@@ -2524,6 +2549,232 @@ fn forget_no_match_and_invalid_policy_have_stable_exit_codes() {
     assert_eq!(invalid_tag["status"], "failure");
     assert_eq!(invalid_tag["data"]["code"], "retention_policy_tag_invalid");
     assert_eq!(invalid_tag["data"]["exit_code"], 2);
+}
+
+#[test]
+fn policy_set_show_and_delete_manage_encrypted_repository_policy_configs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "policy-passphrase-canary";
+    let secret_tag = "policy-secret-tag-canary";
+    init_repo(&repo_url, passphrase);
+
+    let set_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-last",
+            "7",
+            "--keep-daily",
+            "14",
+            "--keep-tag",
+            secret_tag,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let set_text = String::from_utf8(set_output.clone()).expect("set json utf8");
+    let set: Value = serde_json::from_slice(&set_output).expect("policy set json");
+    assert_eq!(set["command"], "policy set");
+    assert_eq!(set["status"], "success");
+    assert_eq!(set["data"]["created"], true);
+    assert_eq!(set["data"]["encrypted_at_rest"], true);
+    assert_eq!(set["data"]["applied_to_forget"], false);
+    assert_eq!(set["data"]["retention"]["keep_last"], 7);
+    assert_eq!(set["data"]["retention"]["keep_daily"], 14);
+    assert_eq!(set["data"]["retention"]["keep_tags"], json!([secret_tag]));
+    assert!(!set_text.contains(passphrase));
+    let policy_id = set["data"]["policy_id"].as_str().expect("policy id");
+    let policy_object = set["data"]["policy_object"]
+        .as_str()
+        .expect("policy object");
+    assert_eq!(policy_id.len(), 64);
+    assert!(repo.join(policy_object).is_file());
+    assert!(!raw_repository_bytes_contain(&repo, secret_tag.as_bytes()));
+
+    let policy_files_before_idempotent_set = file_count_under(&repo.join("objects/policy"));
+    let idempotent_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-last",
+            "7",
+            "--keep-daily",
+            "14",
+            "--keep-tag",
+            secret_tag,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let idempotent: Value =
+        serde_json::from_slice(&idempotent_output).expect("idempotent policy json");
+    assert_eq!(idempotent["data"]["policy_id"], policy_id);
+    assert_eq!(idempotent["data"]["created"], false);
+    assert_eq!(
+        file_count_under(&repo.join("objects/policy")),
+        policy_files_before_idempotent_set
+    );
+
+    let show_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "policy", "show"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let show: Value = serde_json::from_slice(&show_output).expect("policy show json");
+    assert_eq!(show["command"], "policy show");
+    assert_eq!(show["data"]["policy_count"], 1);
+    assert_eq!(show["data"]["policies"][0]["policy_id"], policy_id);
+    assert_eq!(
+        show["data"]["policies"][0]["retention"]["keep_tags"],
+        json!([secret_tag])
+    );
+
+    let wrong_password_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-policy-passphrase")
+        .args(["--repo", &repo_url, "--json", "policy", "show"])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_password: Value =
+        serde_json::from_slice(&wrong_password_output).expect("wrong password json");
+    assert_eq!(wrong_password["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong_password["data"]["exit_code"], 4);
+
+    let dry_run_delete_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "delete",
+            policy_id,
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let dry_run_delete: Value =
+        serde_json::from_slice(&dry_run_delete_output).expect("dry-run delete json");
+    assert_eq!(dry_run_delete["data"]["dry_run"], true);
+    assert_eq!(dry_run_delete["data"]["deleted"], false);
+    assert!(repo.join(policy_object).is_file());
+
+    let delete_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "policy", "delete", policy_id])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let delete: Value = serde_json::from_slice(&delete_output).expect("delete json");
+    assert_eq!(delete["command"], "policy delete");
+    assert_eq!(delete["data"]["deleted"], true);
+    assert!(!repo.join(policy_object).exists());
+
+    let missing_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "policy", "show"])
+        .assert()
+        .code(7)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let missing: Value = serde_json::from_slice(&missing_output).expect("missing policy json");
+    assert_eq!(
+        missing["data"]["code"],
+        "repository_policy_config_not_found"
+    );
+    assert_eq!(missing["data"]["exit_code"], 7);
+
+    let invalid_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-last",
+            "0",
+        ])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let invalid: Value = serde_json::from_slice(&invalid_output).expect("invalid policy json");
+    assert_eq!(invalid["data"]["code"], "retention_policy_count_invalid");
+    assert_eq!(invalid["data"]["exit_code"], 2);
+}
+
+#[test]
+fn policy_jsonl_reports_ordered_started_and_completed_events() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "policy",
+            "set",
+            "--keep-weekly",
+            "8",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let events = String::from_utf8(output)
+        .expect("jsonl utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl event"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["event"], "command_started");
+    assert_eq!(events[0]["command"], "policy set");
+    assert_eq!(events[1]["event"], "command_completed");
+    assert_eq!(events[1]["command"], "policy set");
+    assert_eq!(events[1]["data"]["retention"]["keep_weekly"], 8);
 }
 
 #[test]

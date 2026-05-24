@@ -21,7 +21,7 @@ candidate.
 Implemented and tested in current main:
 
 - `ferry init`, `backup`, `restore`, `snapshots`, `ls`, `find`, `diff`,
-  `repo`, `check`, `forget`, `prune`, `completion`, and `version`.
+  `repo`, `check`, `forget`, `prune`, `policy`, `completion`, and `version`.
 - Key add, marker-based key remove, limited unlock rotation, encrypted
   recovery export, and recovery import as a new external key slot. Full
   repository rekey and bootstrap-slot removal are not implemented.
@@ -147,7 +147,7 @@ Additional command surface:
 - [x] `ferry find`.
 - [x] `ferry diff`.
 - [x] `ferry repo` safe status and opt-in metadata/state verification.
-- [ ] `ferry policy`.
+- [x] `ferry policy`.
 - [ ] `ferry doctor`.
 - [x] Recovery import.
 - [ ] Full repository rekey.
@@ -177,6 +177,8 @@ FUSE mount, and compatibility with existing backup repository formats.
 - `ferry repo` is inspection and metadata/state verification only. It does not
   repair repositories, verify chunk data, or expose decrypted snapshot shape in
   default output.
+- `ferry policy` manages encrypted repository-local policy config objects. It
+  does not automatically apply stored policies to `forget` yet.
 - Command leases cover current mutation paths. They are not a full stale-lease
   repair system or broad concurrent-backup proof.
 - S3-compatible behavior must be described only to the level backed by current

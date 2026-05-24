@@ -73,6 +73,7 @@ fn top_level_help_lists_stable_global_flags_and_commands() {
                 .and(predicates::str::contains("diff"))
                 .and(predicates::str::contains("check"))
                 .and(predicates::str::contains("forget"))
+                .and(predicates::str::contains("policy"))
                 .and(predicates::str::contains("version")),
         )
         .stderr("");

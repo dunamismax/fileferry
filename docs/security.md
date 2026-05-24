@@ -319,6 +319,17 @@ format versions, rejects repository identity mismatches, rejects invalid
 retention shape, and treats an already-present matching policy body as an
 idempotent write result.
 
+`ferry policy set`, `ferry policy show`, and `ferry policy delete` expose the
+encrypted policy/config object path through the CLI for initialized local and
+S3-compatible repositories. Each command unlocks the repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` before decrypted policy
+content is read or presented. `policy set` writes only encrypted authenticated
+policy/config objects, and repeated CLI sets of the same retention body return
+the existing encrypted object instead of writing another timestamped policy
+body. `policy delete` authenticates the selected encrypted policy object before
+deleting it and supports `--dry-run`. Stored policy configs are not
+automatically applied by `forget` yet.
+
 Current upload-state fixture coverage includes one initialized repository with
 one encrypted upload-state object. Focused tests prove that current code
 authenticates and validates the fixture, rejects malformed encrypted framing and

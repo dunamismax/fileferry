@@ -192,8 +192,8 @@ conditional create because Backblaze returns `501 NotImplemented` for the
 
 `ferry init`, `ferry backup`, `ferry snapshots`, `ferry ls`, `ferry find`,
 `ferry diff`, `ferry repo`, `ferry restore`, `ferry check`, `ferry forget`,
-`ferry prune`, and `ferry key ...` commands accept S3-compatible repository
-URLs in this form:
+`ferry prune`, `ferry policy ...`, and `ferry key ...` commands accept
+S3-compatible repository URLs in this form:
 
 ```sh
 FILEFERRY_PASSWORD='test-passphrase' \
@@ -264,11 +264,12 @@ Backblaze round-trip, data-path, retention/key-management, and prune test
 gates.
 `ferry init`, `ferry backup`, `ferry snapshots`, `ferry ls`, `ferry find`,
 `ferry diff`, `ferry repo`, `ferry restore`, `ferry check`, `ferry forget`,
-`ferry prune`, and `ferry key ...` commands use S3-compatible encrypted
-repositories through the same core repository pipeline as the local backend.
+`ferry prune`, `ferry policy ...`, and `ferry key ...` commands use
+S3-compatible encrypted repositories through the same core repository pipeline
+as the local backend.
 Common retry, timeout, backoff, and concurrency behavior exists in the policy
 wrapper, and a basic destructive capability probe now exists for exact store
 configurations. Before broader S3 provider support is claimed, FileFerry still
 needs live evidence for providers beyond the current Backblaze B2 path,
-live-S3 `ferry find`, `ferry diff`, and `ferry repo` drill coverage, partial
-upload behavior, and multipart cleanup guidance.
+live-S3 `ferry find`, `ferry diff`, `ferry repo`, and `ferry policy` drill
+coverage, partial upload behavior, and multipart cleanup guidance.

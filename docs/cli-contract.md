@@ -237,6 +237,31 @@ prune
   data.deleted_bytes: integer
   data.missing_bytes: integer
 
+policy set
+  data.repository_id: string
+  data.policy_id: string
+  data.policy_object: repository object key string
+  data.created_at_unix_seconds: integer
+  data.retention: RetentionPolicySummary
+  data.created: boolean
+  data.bytes_written: integer
+  data.encrypted_at_rest: boolean
+  data.applied_to_forget: boolean
+
+policy show
+  data.repository_id: string
+  data.policy_count: integer
+  data.policies: array of PolicyConfigItem
+
+policy delete
+  data.repository_id: string
+  data.policy_id: string
+  data.policy_object: repository object key string
+  data.created_at_unix_seconds: integer
+  data.retention: RetentionPolicySummary
+  data.dry_run: boolean
+  data.deleted: boolean
+
 key add
   data.repository_id: string
   data.key_slot_id: string
@@ -414,6 +439,12 @@ RetentionPolicySummary
   keep_monthly: integer | null
   keep_yearly: integer | null
   keep_tags: array of strings
+
+PolicyConfigItem
+  policy_id: string
+  policy_object: repository object key string
+  created_at_unix_seconds: integer
+  retention: RetentionPolicySummary
 
 ForgetSnapshotItem
   snapshot_id: string
@@ -639,6 +670,30 @@ check command_failed
   data.finding: CheckFinding, present when the check failure maps to a
     repository integrity finding
 
+policy set command_started
+  status: "started"
+  data: null
+
+policy set command_completed
+  status: "success"
+  data: PolicySet data schema above
+
+policy show command_started
+  status: "started"
+  data: null
+
+policy show command_completed
+  status: "success"
+  data: PolicyShow data schema above
+
+policy delete command_started
+  status: "started"
+  data: null
+
+policy delete command_completed
+  status: "success"
+  data: PolicyDelete data schema above
+
 key add command_started
   status: "started"
   data: null
@@ -685,9 +740,9 @@ Repository commands now resolve the repository backend through the same
 local/S3 target parser before command execution. S3-compatible URLs with
 embedded credentials, query strings, or fragments are rejected before use.
 S3-compatible `init`, `backup`, `snapshots`, `ls`, `restore`, `check`,
-`find`, `diff`, `repo`, `forget`, `prune`, and key-management commands use
-the explicit S3 environment contract above and redact repository URLs as
-`s3://<redacted>`.
+`find`, `diff`, `repo`, `forget`, `prune`, `policy`, and key-management
+commands use the explicit S3 environment contract above and redact repository
+URLs as `s3://<redacted>`.
 
 `ferry backup <SOURCE>...` opens an initialized local or S3-compatible
 repository with `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an
@@ -864,6 +919,23 @@ forget no currently visible snapshots fails with exit code `7` and
 item-level reasons, dry-run status, and marker objects written. JSONL output
 emits `load_snapshots`, `evaluate_policy`, `write_forget_state`, and
 `complete` progress phases.
+
+`ferry policy set` opens an initialized local or S3-compatible repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` and writes one encrypted
+repository-local retention policy config object under `objects/policy/`.
+Supported rules match the retention rule flags accepted by `forget`:
+`--keep-last`, `--keep-hourly`, `--keep-daily`, `--keep-weekly`,
+`--keep-monthly`, `--keep-yearly`, and repeated `--keep-tag`. Count values
+must be greater than zero, and at least one keep rule is required. Repeating
+the same retention body through the CLI is idempotent and reports the existing
+policy object instead of writing another object. Different retention bodies can
+coexist as separate encrypted policy configs. `ferry policy show` unlocks the
+repository and displays the stored policy configs; if none exist, it fails with
+exit code `7` and `repository_policy_config_not_found`. `ferry policy delete
+<POLICY_ID>` authenticates the selected policy config before deletion and
+supports `--dry-run`; missing policy ids fail with exit code `7`. Stored
+policies are repository-local config only in this slice and are not
+automatically applied by `forget` yet.
 
 `ferry prune` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` and deletes only objects

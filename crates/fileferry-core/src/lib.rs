@@ -327,6 +327,9 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("policy config was not found")]
+    PolicyConfigNotFound { policy_id: Option<String> },
+
     #[error("upload state {key} could not be decoded")]
     UploadStateDecode {
         key: ObjectKey,
@@ -903,6 +906,21 @@ pub struct RepositoryPolicyConfigWriteResult {
     pub policy_object: ObjectKey,
     pub created: bool,
     pub bytes_written: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryPolicyConfigListItem {
+    pub policy_object: ObjectKey,
+    pub state: RepositoryPolicyConfigState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryPolicyConfigDeleteResult {
+    pub repository_id: String,
+    pub policy_id: String,
+    pub policy_object: ObjectKey,
+    pub state: RepositoryPolicyConfigState,
+    pub deleted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -2593,6 +2611,61 @@ impl BackupPipeline {
             master_key,
         )?;
         Ok(policy)
+    }
+
+    pub async fn list_repository_policy_configs(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+    ) -> CoreResult<Vec<RepositoryPolicyConfigListItem>> {
+        let policy_keys = listed_keys(store, POLICY_CONFIG_PREFIX).await?;
+        let mut policies = Vec::with_capacity(policy_keys.len());
+        for policy_object in policy_keys {
+            let policy_id = policy_config_id_from_object_key(&policy_object)?;
+            let state = self
+                .read_repository_policy_config(store, master_key, &policy_id)
+                .await?;
+            policies.push(RepositoryPolicyConfigListItem {
+                policy_object,
+                state,
+            });
+        }
+        Ok(policies)
+    }
+
+    pub async fn delete_repository_policy_config(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        policy_id: &str,
+        dry_run: bool,
+    ) -> CoreResult<RepositoryPolicyConfigDeleteResult> {
+        let policy_object = object_key_for_policy_config(policy_id)?;
+        if !store
+            .exists(&policy_object)
+            .await
+            .map_err(|source| CoreError::Storage { source })?
+        {
+            return Err(CoreError::PolicyConfigNotFound {
+                policy_id: Some(policy_id.to_owned()),
+            });
+        }
+        let state = self
+            .read_repository_policy_config(store, master_key, policy_id)
+            .await?;
+        if !dry_run {
+            store
+                .delete(&policy_object)
+                .await
+                .map_err(|source| CoreError::Storage { source })?;
+        }
+        Ok(RepositoryPolicyConfigDeleteResult {
+            repository_id: self.config.repository_id.clone(),
+            policy_id: policy_id.to_owned(),
+            policy_object,
+            state,
+            deleted: !dry_run,
+        })
     }
 
     pub async fn check_repository_auxiliary_state(
