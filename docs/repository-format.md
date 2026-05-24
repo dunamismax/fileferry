@@ -276,14 +276,15 @@ Current implementation status:
   another timestamped policy body. `ferry policy show` lists authenticated
   policy/config objects after repository unlock. `ferry policy delete
   <POLICY_ID>` authenticates the selected policy object before deleting it and
-  supports `--dry-run`.
-- Stored policy configs are not automatically applied by `ferry forget` yet;
-  current selection semantics are explicit by policy id for show/delete and by
-  retention body for idempotent set.
+  supports `--dry-run`. `ferry forget --policy <POLICY_ID>` authenticates and
+  applies exactly the selected encrypted policy config after repository unlock.
+- Stored policy configs are never selected implicitly by `ferry forget`.
+  Current selection semantics are explicit by policy id for forget, show, and
+  delete, and by retention body for idempotent set.
 - One policy/config fixture covers the current encrypted policy object framing
   and decrypted fields listed in the fixture-status section. Future config
-  fields, policy selection semantics, or migration behavior require a new
-  schema/format decision and fixtures.
+  fields, additional policy selection semantics, or migration behavior require
+  a new schema/format decision and fixtures.
 
 ## Commit Markers And Upload State
 

@@ -35,7 +35,8 @@ Implemented and tested in current main:
   directory modified timestamps, regular-file and directory Unix mode bits
   where representable, and Unix ownership verification without `chown`.
 - Full repository check plus deterministic count/percentage data subsets.
-- Marker-only `forget` and recoverable two-phase `prune`.
+- Marker-only `forget`, including explicit encrypted stored-policy application
+  by policy id, and recoverable two-phase `prune`.
 - Encrypted command leases for current mutation paths.
 - CLI exit-code families, JSON envelopes, JSONL event ordering, and
   stdout/stderr separation documented and regression-tested for the
@@ -181,8 +182,9 @@ FUSE mount, and compatibility with existing backup repository formats.
 - `ferry doctor` is diagnostic-only. It reports safe health summaries by
   default, can opt into chunk-data reads or aggregate object-family counts, and
   does not repair repositories or expose decrypted snapshot shape.
-- `ferry policy` manages encrypted repository-local policy config objects. It
-  does not automatically apply stored policies to `forget` yet.
+- `ferry policy` manages encrypted repository-local policy config objects.
+  `ferry forget --policy <POLICY_ID>` applies one selected stored policy
+  explicitly; stored policies are not chosen implicitly.
 - Command leases cover current mutation paths. They are not a full stale-lease
   repair system or broad concurrent-backup proof.
 - S3-compatible behavior must be described only to the level backed by current

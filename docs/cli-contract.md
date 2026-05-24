@@ -222,6 +222,8 @@ check
 
 forget
   data.dry_run: boolean
+  data.policy_source: "inline" | "stored"
+  data.policy_id: string | null
   data.snapshots_matched: integer
   data.snapshots_forgotten: integer
   data.retained_snapshots: integer
@@ -968,13 +970,21 @@ plan but writes no forget markers or lease state. The
 implemented keep rules are `--keep-last <N>`, `--keep-hourly <N>`,
 `--keep-daily <N>`,
 `--keep-weekly <N>`, `--keep-monthly <N>`, `--keep-yearly <N>`, and repeatable
-`--keep-tag <TAG>`. Count values must be greater than zero. A policy that would
-forget no currently visible snapshots fails with exit code `7` and
-`forget_no_snapshots_matched`; invalid or empty policies fail with exit code
-`2`. JSON output reports candidate, kept, and forgotten snapshot items,
-item-level reasons, dry-run status, and marker objects written. JSONL output
-emits `load_snapshots`, `evaluate_policy`, `write_forget_state`, and
-`complete` progress phases.
+`--keep-tag <TAG>`. Count values must be greater than zero. Alternatively,
+`--policy <POLICY_ID>` authenticates and applies exactly one encrypted
+repository-local policy config by id after repository unlock. Inline retention
+flags and `--policy` are mutually exclusive; mixed selection fails with exit
+code `2` and `forget_policy_selection_invalid`. Forget never chooses a stored
+policy implicitly, including when one or more policy config objects exist.
+Missing policy ids fail with exit code `7` and
+`repository_policy_config_not_found`; malformed, tampered, or invalid selected
+policy objects fail closed as repository integrity failures. A policy that
+would forget no currently visible snapshots fails with exit code `7` and
+`forget_no_snapshots_matched`; invalid or empty inline policies fail with exit
+code `2`. JSON output reports policy source and id, candidate, kept, and
+forgotten snapshot items, item-level reasons, dry-run status, and marker
+objects written. JSONL output emits `load_snapshots`, `evaluate_policy`,
+`write_forget_state`, and `complete` progress phases.
 
 `ferry policy set` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` and writes one encrypted
@@ -990,8 +1000,8 @@ repository and displays the stored policy configs; if none exist, it fails with
 exit code `7` and `repository_policy_config_not_found`. `ferry policy delete
 <POLICY_ID>` authenticates the selected policy config before deletion and
 supports `--dry-run`; missing policy ids fail with exit code `7`. Stored
-policies are repository-local config only in this slice and are not
-automatically applied by `forget` yet.
+policies are applied to forget only through explicit
+`ferry forget --policy <POLICY_ID>` selection and are not chosen implicitly.
 
 `ferry prune` opens an initialized local or S3-compatible repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE` and deletes only objects

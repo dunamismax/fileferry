@@ -327,8 +327,10 @@ content is read or presented. `policy set` writes only encrypted authenticated
 policy/config objects, and repeated CLI sets of the same retention body return
 the existing encrypted object instead of writing another timestamped policy
 body. `policy delete` authenticates the selected encrypted policy object before
-deleting it and supports `--dry-run`. Stored policy configs are not
-automatically applied by `forget` yet.
+deleting it and supports `--dry-run`. `ferry forget --policy <POLICY_ID>`
+authenticates and applies exactly that encrypted policy config after repository
+unlock. Inline forget retention flags and `--policy` are mutually exclusive,
+and forget does not choose a stored policy implicitly.
 
 `ferry doctor` exposes a diagnostic path for initialized local and
 S3-compatible repositories. For current initialized repositories it unlocks

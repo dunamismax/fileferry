@@ -2500,6 +2500,311 @@ fn forget_jsonl_reports_progress_and_completion_envelope() {
 }
 
 #[test]
+fn forget_stored_policy_dry_run_jsonl_and_real_marker_write() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "stored-policy-passphrase-canary";
+    let secret_tag = "stored-policy-secret-tag-canary";
+    init_repo(&repo_url, passphrase);
+
+    let keep_source = temp.path().join("keep-source");
+    let drop_source = temp.path().join("drop-source");
+    fs::create_dir(&keep_source).expect("create keep source");
+    fs::create_dir(&drop_source).expect("create drop source");
+    fs::write(keep_source.join("keep.txt"), b"keep").expect("write keep");
+    fs::write(drop_source.join("drop.txt"), b"drop").expect("write drop");
+    backup_source_with_tags(&repo_url, passphrase, &keep_source, &[secret_tag]);
+    backup_source_with_tags(&repo_url, passphrase, &drop_source, &["drop"]);
+
+    let set_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-tag",
+            secret_tag,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let set: Value = serde_json::from_slice(&set_output).expect("policy set json");
+    let policy_id = set["data"]["policy_id"].as_str().expect("policy id");
+    assert!(!raw_repository_bytes_contain(&repo, secret_tag.as_bytes()));
+
+    let dry_run_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--dry-run",
+            "--policy",
+            policy_id,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let dry_run_text = String::from_utf8(dry_run_output.clone()).expect("dry-run json utf8");
+    let dry_run: Value = serde_json::from_slice(&dry_run_output).expect("forget dry-run json");
+    assert_eq!(dry_run["data"]["dry_run"], true);
+    assert_eq!(dry_run["data"]["policy_source"], "stored");
+    assert_eq!(dry_run["data"]["policy_id"], policy_id);
+    assert_eq!(
+        dry_run["data"]["policy_summary"]["keep_tags"],
+        json!([secret_tag])
+    );
+    assert_eq!(dry_run["data"]["snapshots_forgotten"], 1);
+    assert_eq!(dry_run["data"]["retained_snapshots"], 1);
+    assert_eq!(dry_run["data"]["marker_objects_written"], 0);
+    assert_eq!(
+        dry_run["data"]["kept_snapshots"][0]["reasons"],
+        json!([format!("keep-tag:{secret_tag}")])
+    );
+    assert!(!dry_run_text.contains(passphrase));
+    assert_eq!(file_count_under(&repo.join("forgets")), 0);
+
+    let jsonl_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "forget",
+            "--dry-run",
+            "--policy",
+            policy_id,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let events = String::from_utf8(jsonl_output)
+        .expect("jsonl utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl event"))
+        .collect::<Vec<_>>();
+    assert_eq!(events.first().unwrap()["event"], "command_started");
+    assert_eq!(events.last().unwrap()["event"], "command_completed");
+    assert_eq!(events.last().unwrap()["data"]["policy_source"], "stored");
+    assert_eq!(events.last().unwrap()["data"]["policy_id"], policy_id);
+
+    let real_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo", &repo_url, "--json", "forget", "--policy", policy_id,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let real: Value = serde_json::from_slice(&real_output).expect("real forget json");
+    assert_eq!(real["data"]["dry_run"], false);
+    assert_eq!(real["data"]["policy_source"], "stored");
+    assert_eq!(real["data"]["policy_id"], policy_id);
+    assert_eq!(real["data"]["marker_objects_written"], 1);
+    assert!(
+        real["data"]["forgotten_snapshots"][0]["marker_object"]
+            .as_str()
+            .expect("marker object")
+            .starts_with("forgets/")
+    );
+    assert_eq!(file_count_under(&repo.join("forgets")), 1);
+    assert!(!raw_repository_bytes_contain(&repo, secret_tag.as_bytes()));
+}
+
+#[test]
+fn forget_stored_policy_failures_are_explicit_and_stable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let first_source = temp.path().join("first-source");
+    let second_source = temp.path().join("second-source");
+    fs::create_dir(&first_source).expect("create first source");
+    fs::create_dir(&second_source).expect("create second source");
+    fs::write(first_source.join("first.txt"), b"first").expect("write first");
+    fs::write(second_source.join("second.txt"), b"second").expect("write second");
+    backup_source_with_tags(&repo_url, passphrase, &first_source, &["first"]);
+    backup_source_with_tags(&repo_url, passphrase, &second_source, &["second"]);
+
+    let keep_last_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-last",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let keep_last: Value = serde_json::from_slice(&keep_last_output).expect("policy set json");
+    let keep_last_policy_id = keep_last["data"]["policy_id"].as_str().expect("policy id");
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-tag",
+            "first",
+        ])
+        .assert()
+        .success()
+        .stderr("");
+
+    let implicit_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "forget", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let implicit: Value =
+        serde_json::from_slice(&implicit_output).expect("implicit selection failure json");
+    assert_eq!(implicit["data"]["code"], "retention_policy_empty");
+    assert_eq!(implicit["data"]["exit_code"], 2);
+
+    let mixed_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--dry-run",
+            "--policy",
+            keep_last_policy_id,
+            "--keep-last",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let mixed: Value = serde_json::from_slice(&mixed_output).expect("mixed policy failure json");
+    assert_eq!(mixed["data"]["code"], "forget_policy_selection_invalid");
+    assert_eq!(mixed["data"]["exit_code"], 2);
+
+    let missing_policy_id = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let missing_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--dry-run",
+            "--policy",
+            missing_policy_id,
+        ])
+        .assert()
+        .code(7)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let missing: Value = serde_json::from_slice(&missing_output).expect("missing policy json");
+    assert_eq!(
+        missing["data"]["code"],
+        "repository_policy_config_not_found"
+    );
+    assert_eq!(missing["data"]["exit_code"], 7);
+
+    let wrong_password_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-passphrase")
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--dry-run",
+            "--policy",
+            keep_last_policy_id,
+        ])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_password: Value =
+        serde_json::from_slice(&wrong_password_output).expect("wrong password json");
+    assert_eq!(wrong_password["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong_password["data"]["exit_code"], 4);
+
+    fs::write(
+        repo.join(
+            keep_last["data"]["policy_object"]
+                .as_str()
+                .expect("policy object"),
+        ),
+        b"not encrypted policy",
+    )
+    .expect("corrupt policy");
+    let tampered_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--dry-run",
+            "--policy",
+            keep_last_policy_id,
+        ])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let tampered: Value = serde_json::from_slice(&tampered_output).expect("tampered json");
+    assert_eq!(
+        tampered["data"]["code"],
+        "repository_policy_config_decode_failed"
+    );
+    assert_eq!(tampered["data"]["exit_code"], 6);
+    assert!(
+        tampered["data"]["object_key"]
+            .as_str()
+            .expect("object key")
+            .starts_with("objects/policy/")
+    );
+    assert_eq!(file_count_under(&repo.join("forgets")), 0);
+}
+
+#[test]
 fn forget_active_lease_has_stable_locked_exit_code_and_writes_no_markers() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

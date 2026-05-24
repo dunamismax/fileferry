@@ -112,7 +112,7 @@ ferry restore latest ~/restore-test
 ferry check --read-data-subset 5%
 ferry policy set --keep-daily 14 --keep-weekly 8
 ferry policy show --json
-ferry forget --keep-daily 14 --keep-weekly 8 --dry-run
+ferry forget --policy <POLICY_ID> --dry-run
 ferry prune --dry-run
 ```
 
@@ -168,10 +168,11 @@ This is release-candidate security engineering, not an external audit claim.
   recovery import or `ferry find`. Current main adds recovery import as a new
   external key slot, `ferry find` for encrypted snapshot-metadata search,
   `ferry diff` for manifest-level snapshot comparison, `ferry repo` for safe
-  repository status plus opt-in encrypted metadata/state verification, and
+  repository status plus opt-in encrypted metadata/state verification,
   `ferry policy` for encrypted repository-local retention policy config
-  storage, display, and explicit deletion, plus `ferry doctor` for safe
-  repository diagnostics; full repository rekey is not implemented.
+  storage, display, explicit deletion, and explicit application by policy id
+  through `ferry forget --policy`, plus `ferry doctor` for safe repository
+  diagnostics; full repository rekey is not implemented.
 - `ferry find` searches decrypted snapshot metadata after repository unlock. It
   does not search file contents or read chunk data.
 - `ferry diff` compares decrypted snapshot manifests after repository unlock.
@@ -188,7 +189,8 @@ This is release-candidate security engineering, not an external audit claim.
   Aggregate object-family counts require `--show-object-counts`. Doctor does
   not repair repositories.
 - `ferry policy` stores retention policy config in encrypted repository
-  objects. It does not automatically apply stored policies to `forget` yet.
+  objects. Stored policies are applied to `forget` only when a policy id is
+  supplied explicitly with `ferry forget --policy <POLICY_ID>`.
 - S3-compatible behavior is tested against the current abstraction and a
   private Backblaze B2 development bucket. It is not a blanket claim for every
   S3-compatible provider.

@@ -230,6 +230,14 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
 
+        /// Apply this encrypted repository-local policy id.
+        #[arg(
+            long = "policy",
+            value_name = "POLICY_ID",
+            value_parser = parse_policy_id
+        )]
+        policy_id: Option<String>,
+
         /// Keep the newest N snapshots.
         #[arg(long = "keep-last", value_name = "N")]
         keep_last: Option<u32>,
@@ -478,6 +486,9 @@ pub enum CliError {
     #[error(transparent)]
     Policy(#[from] PolicyError),
 
+    #[error("forget --policy is mutually exclusive with explicit retention keep flags")]
+    InvalidForgetPolicySelection,
+
     #[error("JSON serialization failed")]
     Json(#[from] serde_json::Error),
 
@@ -492,6 +503,7 @@ impl CliError {
             Self::Repository(error) => error.exit_code(),
             Self::Core(error) => core_exit_code(error),
             Self::Policy(_) => 2,
+            Self::InvalidForgetPolicySelection => 2,
             Self::Json(_) | Self::Completion(_) => 1,
         }
     }
@@ -1287,6 +1299,8 @@ struct CliDiffEntry {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 struct ForgetData {
     dry_run: bool,
+    policy_source: ForgetPolicySource,
+    policy_id: Option<String>,
     snapshots_matched: usize,
     snapshots_forgotten: usize,
     retained_snapshots: usize,
@@ -1297,6 +1311,13 @@ struct ForgetData {
     forgotten_snapshots: Vec<ForgetSnapshotItem>,
     forgotten_snapshot_ids: Vec<String>,
     policy_summary: RetentionPolicySummary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ForgetPolicySource {
+    Inline,
+    Stored,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1499,6 +1520,7 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
         }
         Command::Forget {
             dry_run,
+            policy_id,
             keep_last,
             keep_hourly,
             keep_daily,
@@ -1508,16 +1530,33 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             keep_tags,
         } => {
             let config = resolve_config(&cli.globals)?;
-            let policy = retention_policy_from_args(
-                keep_last,
-                keep_hourly,
-                keep_daily,
-                keep_weekly,
-                keep_monthly,
-                keep_yearly,
-                keep_tags,
-            )?;
-            forget(mode, &config, policy, dry_run)
+            if policy_id.is_some()
+                && retention_args_present(
+                    keep_last,
+                    keep_hourly,
+                    keep_daily,
+                    keep_weekly,
+                    keep_monthly,
+                    keep_yearly,
+                    &keep_tags,
+                )
+            {
+                return Err(CliError::InvalidForgetPolicySelection);
+            }
+            let inline_policy = if policy_id.is_some() {
+                None
+            } else {
+                Some(retention_policy_from_args(
+                    keep_last,
+                    keep_hourly,
+                    keep_daily,
+                    keep_weekly,
+                    keep_monthly,
+                    keep_yearly,
+                    keep_tags,
+                )?)
+            };
+            forget(mode, &config, inline_policy, policy_id, dry_run)
         }
         Command::Prune { dry_run } => {
             let config = resolve_config(&cli.globals)?;
@@ -1805,6 +1844,7 @@ fn failure_code(error: &CliError) -> &'static str {
             PolicyError::InvalidCount { .. } => "retention_policy_count_invalid",
             PolicyError::InvalidTag { .. } => "retention_policy_tag_invalid",
         },
+        CliError::InvalidForgetPolicySelection => "forget_policy_selection_invalid",
         CliError::Json(_) => "json_serialization_failed",
         CliError::Completion(_) => "completion_generation_failed",
     }
@@ -1964,6 +2004,7 @@ fn failure_path(error: &CliError) -> Option<String> {
         },
         CliError::Core(error) => core_failure_path(error),
         CliError::Policy(_) => None,
+        CliError::InvalidForgetPolicySelection => None,
         CliError::Json(_) | CliError::Completion(_) => None,
     }
 }
@@ -3084,7 +3125,8 @@ fn doctor_check_options(
 fn forget(
     mode: OutputMode,
     config: &ResolvedConfig,
-    policy: RetentionPolicy,
+    inline_policy: Option<RetentionPolicy>,
+    policy_id: Option<String>,
     dry_run: bool,
 ) -> Result<Output, CliError> {
     let repository = repository_store_for_command(
@@ -3096,6 +3138,21 @@ fn forget(
     let runtime = tokio_runtime()?;
     let opened = runtime.block_on(open_repository(repository.store.as_ref(), &passphrase))?;
     let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+    let (policy, policy_source, applied_policy_id) = if let Some(policy_id) = policy_id {
+        let state = runtime.block_on(pipeline.read_repository_policy_config(
+            repository.store.as_ref(),
+            &opened.master_key,
+            &policy_id,
+        ))?;
+        let policy = retention_policy_from_repository_config(&state.body.retention)?;
+        (policy, ForgetPolicySource::Stored, Some(state.policy_id))
+    } else {
+        (
+            inline_policy.expect("inline forget policy is parsed unless --policy is present"),
+            ForgetPolicySource::Inline,
+            None,
+        )
+    };
     let manifests = runtime.block_on(
         pipeline.read_committed_snapshot_manifests(repository.store.as_ref(), &opened.master_key),
     )?;
@@ -3132,7 +3189,14 @@ fn forget(
             .map(|write| (write.snapshot_id, (write.marker_object, write.created)))
             .collect()
     };
-    let data = forget_data(policy, plan, dry_run, marker_writes);
+    let data = forget_data(
+        policy,
+        policy_source,
+        applied_policy_id,
+        plan,
+        dry_run,
+        marker_writes,
+    );
 
     emit_forget_command(mode, data)
 }
@@ -4062,6 +4126,24 @@ fn retention_policy_from_args(
     .validate()
 }
 
+fn retention_args_present(
+    keep_last: Option<u32>,
+    keep_hourly: Option<u32>,
+    keep_daily: Option<u32>,
+    keep_weekly: Option<u32>,
+    keep_monthly: Option<u32>,
+    keep_yearly: Option<u32>,
+    keep_tags: &[String],
+) -> bool {
+    keep_last.is_some()
+        || keep_hourly.is_some()
+        || keep_daily.is_some()
+        || keep_weekly.is_some()
+        || keep_monthly.is_some()
+        || keep_yearly.is_some()
+        || !keep_tags.is_empty()
+}
+
 fn repository_retention_policy_config(policy: &RetentionPolicy) -> RepositoryRetentionPolicyConfig {
     RepositoryRetentionPolicyConfig {
         keep_last: policy.keep_last.map(RetentionCount::get),
@@ -4072,6 +4154,21 @@ fn repository_retention_policy_config(policy: &RetentionPolicy) -> RepositoryRet
         keep_yearly: policy.keep_yearly.map(RetentionCount::get),
         keep_tags: policy.keep_tags.clone(),
     }
+}
+
+fn retention_policy_from_repository_config(
+    policy: &RepositoryRetentionPolicyConfig,
+) -> Result<RetentionPolicy, PolicyError> {
+    RetentionPolicy {
+        keep_last: policy.keep_last.map(RetentionCount::new).transpose()?,
+        keep_hourly: policy.keep_hourly.map(RetentionCount::new).transpose()?,
+        keep_daily: policy.keep_daily.map(RetentionCount::new).transpose()?,
+        keep_weekly: policy.keep_weekly.map(RetentionCount::new).transpose()?,
+        keep_monthly: policy.keep_monthly.map(RetentionCount::new).transpose()?,
+        keep_yearly: policy.keep_yearly.map(RetentionCount::new).transpose()?,
+        keep_tags: policy.keep_tags.clone(),
+    }
+    .validate()
 }
 
 fn policy_item(item: &RepositoryPolicyConfigListItem) -> PolicyItem {
@@ -4085,6 +4182,8 @@ fn policy_item(item: &RepositoryPolicyConfigListItem) -> PolicyItem {
 
 fn forget_data(
     policy: RetentionPolicy,
+    policy_source: ForgetPolicySource,
+    policy_id: Option<String>,
     plan: RetentionPlan,
     dry_run: bool,
     marker_writes: BTreeMap<String, (String, bool)>,
@@ -4115,6 +4214,8 @@ fn forget_data(
 
     ForgetData {
         dry_run,
+        policy_source,
+        policy_id,
         snapshots_matched: candidate_snapshots.len(),
         snapshots_forgotten: forgotten_snapshots.len(),
         retained_snapshots: kept_snapshots.len(),
@@ -4167,6 +4268,13 @@ impl RetentionPolicySummary {
             keep_yearly: policy.keep_yearly,
             keep_tags: policy.keep_tags.clone(),
         }
+    }
+}
+
+fn forget_policy_source_name(source: ForgetPolicySource) -> &'static str {
+    match source {
+        ForgetPolicySource::Inline => "inline",
+        ForgetPolicySource::Stored => "stored",
     }
 }
 
@@ -4695,9 +4803,11 @@ fn emit_forget_command(mode: OutputMode, data: ForgetData) -> Result<Output, Cli
                 "Marked forgotten"
             };
             format!(
-                "{} {} snapshot(s)\nretained_snapshots={} candidate_snapshots={} marker_objects_written={} object_deletion=false\n",
+                "{} {} snapshot(s)\npolicy_source={} policy_id={} retained_snapshots={} candidate_snapshots={} marker_objects_written={} object_deletion=false\n",
                 action,
                 data.snapshots_forgotten,
+                forget_policy_source_name(data.policy_source),
+                data.policy_id.as_deref().unwrap_or("none"),
                 data.retained_snapshots,
                 data.snapshots_matched,
                 data.marker_objects_written

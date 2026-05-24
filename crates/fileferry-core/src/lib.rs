@@ -2602,6 +2602,11 @@ impl BackupPipeline {
             CoreError::ObjectDecode { key, source } | CoreError::MetadataDecode { key, source } => {
                 CoreError::PolicyConfigDecode { key, source }
             }
+            CoreError::Storage {
+                source: StorageError::ObjectNotFound { .. },
+            } => CoreError::PolicyConfigNotFound {
+                policy_id: Some(policy_id.to_owned()),
+            },
             other => other,
         })?;
         validate_policy_config(
