@@ -1155,7 +1155,7 @@ fn key_export_recovery_writes_encrypted_package_without_leaking_secrets() {
     assert_eq!(exported["data"]["key_slots"], 1);
     assert_eq!(exported["data"]["kdf"]["algorithm"], "argon2id_v19");
     assert_eq!(exported["data"]["aead"], "xchacha20_poly1305");
-    assert_eq!(exported["data"]["recovery_import_implemented"], false);
+    assert_eq!(exported["data"]["recovery_import_implemented"], true);
     assert_eq!(exported["data"]["raw_master_key_exported"], false);
     assert_eq!(exported["data"]["reencrypted_repository_objects"], false);
     assert!(export_path.is_file());
@@ -1183,6 +1183,242 @@ fn key_export_recovery_writes_encrypted_package_without_leaking_secrets() {
     assert!(export_json["recovery_key"]["wrapped_master_key"].is_array());
     assert!(export_json["master_key_check"].is_string());
     assert!(!export_text.contains(passphrase));
+}
+
+#[test]
+fn key_import_recovery_adds_unlock_slot_without_leaking_secrets() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let export_path = temp.path().join("recovery.fileferry-key");
+    let recovery_passphrase = "recovery-passphrase";
+    let imported_passphrase = "imported-passphrase";
+    init_repo(&repo_url, recovery_passphrase);
+    let bootstrap_before = fs::read(repo.join("bootstrap")).expect("bootstrap before");
+    fileferry()
+        .env("FILEFERRY_PASSWORD", recovery_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "key",
+            "export-recovery",
+            "--output",
+            export_path.to_str().expect("export path"),
+        ])
+        .assert()
+        .success()
+        .stderr("");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", recovery_passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", imported_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "key",
+            "import-recovery",
+            "--input",
+            export_path.to_str().expect("export path"),
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let output_text = String::from_utf8(output.clone()).expect("import utf8");
+    let imported: Value = serde_json::from_slice(&output).expect("import json");
+    assert_eq!(imported["command"], "key import-recovery");
+    assert_eq!(imported["status"], "success");
+    assert_eq!(imported["data"]["key_slots"], 2);
+    assert_eq!(imported["data"]["kdf"]["algorithm"], "argon2id_v19");
+    assert_eq!(imported["data"]["aead"], "xchacha20_poly1305");
+    assert_eq!(imported["data"]["raw_master_key_exported"], false);
+    assert_eq!(imported["data"]["reencrypted_repository_objects"], false);
+    assert!(imported["data"]["added_key_slot_id"].as_str().is_some());
+    assert!(!output_text.contains(recovery_passphrase));
+    assert!(!output_text.contains(imported_passphrase));
+    assert!(!output_text.contains(&repo_url));
+    assert_eq!(
+        fs::read(repo.join("bootstrap")).expect("bootstrap after"),
+        bootstrap_before
+    );
+    assert_eq!(file_count_under(&repo.join("key-slots")), 1);
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", imported_passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("");
+}
+
+#[test]
+fn key_import_recovery_supports_jsonl() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let export_path = temp.path().join("recovery.fileferry-key");
+    let recovery_passphrase = "recovery-passphrase";
+    let imported_passphrase = "imported-passphrase";
+    init_repo(&repo_url, recovery_passphrase);
+    fileferry()
+        .env("FILEFERRY_PASSWORD", recovery_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "key",
+            "export-recovery",
+            "--output",
+            export_path.to_str().expect("export path"),
+        ])
+        .assert()
+        .success()
+        .stderr("");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", recovery_passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", imported_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "key",
+            "import-recovery",
+            "--input",
+            export_path.to_str().expect("export path"),
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let started: Value = serde_json::from_slice(lines[0]).expect("started event");
+    let completed: Value = serde_json::from_slice(lines[1]).expect("completed event");
+    assert_eq!(started["event"], "command_started");
+    assert_eq!(started["command"], "key import-recovery");
+    assert_eq!(completed["event"], "command_completed");
+    assert_eq!(completed["command"], "key import-recovery");
+    assert_eq!(completed["data"]["raw_master_key_exported"], false);
+}
+
+#[test]
+fn key_import_recovery_failures_are_structured_without_writing_key_slots() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let other_repo = temp.path().join("other-repo");
+    let repo_url = repo.display().to_string();
+    let other_repo_url = other_repo.display().to_string();
+    let export_path = temp.path().join("recovery.fileferry-key");
+    let tampered_path = temp.path().join("tampered.fileferry-key");
+    let recovery_passphrase = "recovery-passphrase";
+    let other_passphrase = recovery_passphrase;
+    let imported_passphrase = "imported-passphrase";
+    init_repo(&repo_url, recovery_passphrase);
+    init_repo(&other_repo_url, other_passphrase);
+    fileferry()
+        .env("FILEFERRY_PASSWORD", recovery_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "key",
+            "export-recovery",
+            "--output",
+            export_path.to_str().expect("export path"),
+        ])
+        .assert()
+        .success()
+        .stderr("");
+
+    let wrong_output = fileferry()
+        .env("FILEFERRY_PASSWORD", "wrong-recovery-passphrase")
+        .env("FILEFERRY_NEW_PASSWORD", imported_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "key",
+            "import-recovery",
+            "--input",
+            export_path.to_str().expect("export path"),
+        ])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let wrong_text = String::from_utf8(wrong_output.clone()).expect("wrong import utf8");
+    let wrong: Value = serde_json::from_slice(&wrong_output).expect("wrong import json");
+    assert_eq!(wrong["data"]["code"], "repository_unlock_failed");
+    assert_eq!(wrong["data"]["exit_code"], 4);
+    assert!(!wrong_text.contains("wrong-recovery-passphrase"));
+    assert!(!wrong_text.contains(imported_passphrase));
+    assert_eq!(file_count_under(&repo.join("key-slots")), 0);
+
+    let mismatch_output = fileferry()
+        .env("FILEFERRY_PASSWORD", recovery_passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", imported_passphrase)
+        .args([
+            "--repo",
+            &other_repo_url,
+            "--json",
+            "key",
+            "import-recovery",
+            "--input",
+            export_path.to_str().expect("export path"),
+        ])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let mismatch: Value = serde_json::from_slice(&mismatch_output).expect("mismatch import json");
+    assert_eq!(
+        mismatch["data"]["code"],
+        "repository_recovery_export_invalid"
+    );
+    assert_eq!(mismatch["data"]["exit_code"], 6);
+    assert_eq!(file_count_under(&other_repo.join("key-slots")), 0);
+
+    let mut tampered: Value =
+        serde_json::from_slice(&fs::read(&export_path).expect("read export")).expect("export json");
+    tampered["recovery_key"]["wrapped_master_key"][0] = json!(0);
+    fs::write(
+        &tampered_path,
+        serde_json::to_vec_pretty(&tampered).expect("tampered export json"),
+    )
+    .expect("write tampered export");
+    let tampered_output = fileferry()
+        .env("FILEFERRY_PASSWORD", recovery_passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", imported_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "key",
+            "import-recovery",
+            "--input",
+            tampered_path.to_str().expect("tampered path"),
+        ])
+        .assert()
+        .code(4)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let tampered_failure: Value =
+        serde_json::from_slice(&tampered_output).expect("tampered import json");
+    assert_eq!(tampered_failure["data"]["code"], "repository_unlock_failed");
+    assert_eq!(file_count_under(&repo.join("key-slots")), 0);
 }
 
 #[test]
@@ -3116,6 +3352,15 @@ fn s3_data_path_commands_require_s3_environment_before_password() {
                 recovery.display().to_string(),
             ],
         ),
+        (
+            "key import-recovery",
+            vec![
+                "key".to_owned(),
+                "import-recovery".to_owned(),
+                "--input".to_owned(),
+                recovery.display().to_string(),
+            ],
+        ),
     ];
 
     for (command_name, command_args) in cases {
@@ -3948,6 +4193,7 @@ fn s3_retention_key_management_live_integration_when_env_is_enabled() {
     let added_passphrase = "s3-added-passphrase";
     let old_passphrase = "s3-old-passphrase";
     let rotated_passphrase = "s3-rotated-passphrase";
+    let imported_passphrase = "s3-imported-passphrase";
     let temp = tempfile::tempdir().expect("tempdir");
     let keep_source = temp.path().join("keep-source");
     let drop_source = temp.path().join("drop-source");
@@ -4165,6 +4411,39 @@ fn s3_retention_key_management_live_integration_when_env_is_enabled() {
     assert_eq!(export["data"]["reencrypted_repository_objects"], false);
     assert!(recovery.is_file());
     assert!(!export_text.contains(rotated_passphrase));
+
+    let import_output = s3_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+        .env("FILEFERRY_PASSWORD", rotated_passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", imported_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "key",
+            "import-recovery",
+            "--input",
+            recovery.to_str().expect("recovery path"),
+        ])
+        .output()
+        .expect("run import recovery");
+    let import_output = assert_redacted_s3_output(import_output, 0, &sensitive_values);
+    let import_text = String::from_utf8(import_output.clone()).expect("import utf8");
+    let import: Value = serde_json::from_slice(&import_output).expect("import json");
+    assert_eq!(import["command"], "key import-recovery");
+    assert_eq!(import["data"]["raw_master_key_exported"], false);
+    assert_eq!(import["data"]["reencrypted_repository_objects"], false);
+    assert!(!import_text.contains(rotated_passphrase));
+    assert!(!import_text.contains(imported_passphrase));
+
+    let imported_context = S3LiveCommandContext {
+        passphrase: imported_passphrase,
+        ..s3_context
+    };
+    run_s3_json_command(
+        &imported_context,
+        ["--repo", &repo_url, "--json", "snapshots"],
+        0,
+    );
 
     let cleanup_store = s3_cleanup_store(
         &bucket,

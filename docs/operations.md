@@ -162,9 +162,10 @@ Evidence added or retained:
   failure ordering, a gated live S3 data-path drill for init, backup,
   snapshots, ls, restore, check, and missing referenced manifests, and a
   gated live S3 retention/key-management drill for forget, key add, key
-  remove, key rotate, and key export-recovery, plus a gated live S3 prune
-  drill for dry-run, sweep, durable prune state, snapshots, and unique-prefix
-  cleanup. CLI unit coverage maps restore destination reserved-name and
+  remove, key rotate, key export-recovery, and key import-recovery, plus a
+  gated live S3 prune drill for dry-run, sweep, durable prune state, snapshots,
+  and unique-prefix cleanup. CLI unit coverage maps restore destination
+  reserved-name and
   case-collision guardrails to stable JSON failure codes.
 
 The non-gated evidence uses local and in-memory object stores. Current

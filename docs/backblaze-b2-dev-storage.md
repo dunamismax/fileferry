@@ -82,9 +82,10 @@ cargo test -p fileferry-cli s3_retention_key_management_live_integration_when_en
 The retention/key-management test creates a unique `cli-retention-key-...`
 repository prefix under `FILEFERRY_S3_TEST_PREFIX`, runs `ferry init`,
 `backup`, `forget`, `snapshots`, `key add`, `key remove`, `key rotate`, and
-`key export-recovery`, verifies removed key slots no longer unlock the
-repository, writes the recovery export only to a local temporary file, and
-deletes only objects under that unique repository prefix.
+`key export-recovery`, and `key import-recovery`, verifies removed key slots no
+longer unlock the repository, verifies the imported recovery key slot can
+unlock the repository, writes the recovery export only to a local temporary
+file, and deletes only objects under that unique repository prefix.
 
 The CLI S3 prune integration test uses the same variables, plus its own opt-in
 gate:

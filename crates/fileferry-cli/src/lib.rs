@@ -5,9 +5,9 @@ use fileferry_core::{
     CheckRepositoryOptions, CoreError, MetadataStatus, PruneRepositoryOptions,
     RECOVERY_EXPORT_WARNING, RepositoryAeadAlgorithm, RestoreDestinationAction,
     RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry, SnapshotSelection,
-    add_repository_key_slot, create_repository, export_repository_recovery, list_snapshot_entries,
-    open_repository, remove_repository_key_slot, rotate_repository_key_slots, select_snapshot,
-    snapshot_summaries,
+    add_repository_key_slot, create_repository, export_repository_recovery,
+    import_repository_recovery, list_snapshot_entries, open_repository, remove_repository_key_slot,
+    rotate_repository_key_slots, select_snapshot, snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
 use fileferry_platform::{EntryKind, MetadataValue, PlatformKind};
@@ -260,6 +260,17 @@ pub enum KeyCommand {
         #[arg(long = "output", value_name = "FILE")]
         output: PathBuf,
     },
+
+    /// Import an encrypted recovery package as a new unlock key slot.
+    ImportRecovery {
+        /// Encrypted recovery export file to import.
+        #[arg(long = "input", value_name = "FILE")]
+        input: PathBuf,
+
+        /// File containing the new passphrase to add.
+        #[arg(long = "new-password-file", value_name = "FILE")]
+        new_password_file: Option<PathBuf>,
+    },
 }
 
 impl Command {
@@ -285,6 +296,9 @@ impl Command {
             Self::Key {
                 command: KeyCommand::ExportRecovery { .. },
             } => "key export-recovery",
+            Self::Key {
+                command: KeyCommand::ImportRecovery { .. },
+            } => "key import-recovery",
             Self::Restore { .. } => "restore",
             Self::Version => "version",
         }
@@ -373,6 +387,13 @@ pub enum RepositoryError {
         source: io::Error,
     },
 
+    #[error("recovery export input {path} could not be read: {source}")]
+    RecoveryInputRead {
+        path: Redacted,
+        #[source]
+        source: io::Error,
+    },
+
     #[error("repository URL {value} is not supported by this command yet")]
     UnsupportedRepository { value: Redacted },
 
@@ -419,7 +440,7 @@ impl RepositoryError {
             | Self::InvalidS3RepositoryUrl { .. }
             | Self::MissingS3Environment { .. }
             | Self::InvalidS3Config { .. } => 2,
-            Self::RecoveryOutputWrite { .. } => 5,
+            Self::RecoveryOutputWrite { .. } | Self::RecoveryInputRead { .. } => 5,
             Self::UnsupportedRepository { .. } | Self::UnsupportedRepositoryBackend { .. } => 9,
             Self::Runtime { .. } => 1,
         }
@@ -822,6 +843,20 @@ struct KeyRecoveryExportData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct KeyRecoveryImportData {
+    repository_id: String,
+    export_id: String,
+    source: String,
+    added_key_slot_id: String,
+    key_slots: usize,
+    created_at_unix_seconds: u64,
+    kdf: KdfSummary,
+    aead: &'static str,
+    raw_master_key_exported: bool,
+    reencrypted_repository_objects: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct KdfSummary {
     algorithm: &'static str,
     memory_cost_kib: u32,
@@ -1105,6 +1140,16 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             let config = resolve_config(&cli.globals)?;
             key_export_recovery(mode, &config, output)
         }
+        Command::Key {
+            command:
+                KeyCommand::ImportRecovery {
+                    input,
+                    new_password_file,
+                },
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            key_import_recovery(mode, &config, input, new_password_file)
+        }
         Command::Restore {
             snapshot,
             tag,
@@ -1250,6 +1295,7 @@ fn failure_code(error: &CliError) -> &'static str {
             RepositoryError::RecoveryOutputExists { .. } => "recovery_output_exists",
             RepositoryError::InvalidRecoveryOutput { .. } => "recovery_output_invalid",
             RepositoryError::RecoveryOutputWrite { .. } => "recovery_output_write_failed",
+            RepositoryError::RecoveryInputRead { .. } => "recovery_input_read_failed",
             RepositoryError::UnsupportedRepository { .. } => "repository_url_unsupported",
             RepositoryError::UnsupportedRepositoryBackend { .. } => {
                 "repository_backend_unsupported"
@@ -1418,7 +1464,8 @@ fn failure_path(error: &CliError) -> Option<String> {
             | RepositoryError::NewPasswordFileRead { path, .. }
             | RepositoryError::RecoveryOutputExists { path }
             | RepositoryError::InvalidRecoveryOutput { path, .. }
-            | RepositoryError::RecoveryOutputWrite { path, .. } => Some(path.to_string()),
+            | RepositoryError::RecoveryOutputWrite { path, .. }
+            | RepositoryError::RecoveryInputRead { path, .. } => Some(path.to_string()),
             _ => None,
         },
         CliError::Core(error) => core_failure_path(error),
@@ -2018,15 +2065,61 @@ fn key_export_recovery(
             RepositoryAeadAlgorithm::XChaCha20Poly1305 => "xchacha20_poly1305",
         },
         warning: RECOVERY_EXPORT_WARNING,
-        recovery_import_implemented: false,
+        recovery_import_implemented: true,
         raw_master_key_exported: false,
         reencrypted_repository_objects: false,
     };
 
     emit_command(mode, "key export-recovery", data, |data| {
         format!(
-            "Exported encrypted recovery package {} for repository {}\ndestination={}\nwarning={}\nrecovery_import_implemented=false\nraw_master_key_exported=false\nreencrypted_repository_objects=false\n",
+            "Exported encrypted recovery package {} for repository {}\ndestination={}\nwarning={}\nrecovery_import_implemented=true\nraw_master_key_exported=false\nreencrypted_repository_objects=false\n",
             data.export_id, data.repository_id, data.destination, data.warning
+        )
+    })
+}
+
+fn key_import_recovery(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    input: PathBuf,
+    new_password_file: Option<PathBuf>,
+) -> Result<Output, CliError> {
+    let repository = repository_store_for_command(
+        config,
+        "key import-recovery",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
+    let recovery_passphrase = repository_passphrase()?;
+    let new_passphrase = new_repository_passphrase(new_password_file.as_deref())?;
+    let recovery_export_bytes = read_recovery_export_file(&input)?;
+    let runtime = tokio_runtime()?;
+    let result = runtime.block_on(import_repository_recovery(
+        repository.store.as_ref(),
+        &recovery_export_bytes,
+        &recovery_passphrase,
+        &new_passphrase,
+        KdfParams::default(),
+    ))?;
+    let source = redact_for_display(&input.display().to_string());
+    let data = KeyRecoveryImportData {
+        repository_id: result.repository_id,
+        export_id: result.export_id,
+        source,
+        added_key_slot_id: result.added_key_slot_id,
+        key_slots: result.key_slots,
+        created_at_unix_seconds: result.created_at_unix_seconds,
+        kdf: KdfSummary::from(result.kdf),
+        aead: match result.aead {
+            RepositoryAeadAlgorithm::XChaCha20Poly1305 => "xchacha20_poly1305",
+        },
+        raw_master_key_exported: false,
+        reencrypted_repository_objects: false,
+    };
+
+    emit_command(mode, "key import-recovery", data, |data| {
+        format!(
+            "Imported encrypted recovery package {} for repository {}\nsource={}\nadded_key_slot_id={}\nkey_slots={}\nraw_master_key_exported=false\nreencrypted_repository_objects=false\n",
+            data.export_id, data.repository_id, data.source, data.added_key_slot_id, data.key_slots
         )
     })
 }
@@ -2760,6 +2853,13 @@ fn write_recovery_export_file(path: &Path, bytes: &[u8]) -> Result<(), Repositor
             path: Redacted::new(path.display().to_string()),
             source,
         })
+}
+
+fn read_recovery_export_file(path: &Path) -> Result<Vec<u8>, RepositoryError> {
+    fs::read(path).map_err(|source| RepositoryError::RecoveryInputRead {
+        path: Redacted::new(path.display().to_string()),
+        source,
+    })
 }
 
 fn tokio_runtime() -> Result<tokio::runtime::Runtime, RepositoryError> {

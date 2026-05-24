@@ -252,6 +252,18 @@ key export-recovery
   data.raw_master_key_exported: boolean
   data.reencrypted_repository_objects: boolean
 
+key import-recovery
+  data.repository_id: string
+  data.export_id: string
+  data.source: redacted string
+  data.added_key_slot_id: string
+  data.key_slots: integer
+  data.created_at_unix_seconds: integer
+  data.kdf: KdfSummary
+  data.aead: "xchacha20_poly1305"
+  data.raw_master_key_exported: boolean
+  data.reencrypted_repository_objects: boolean
+
 version
   data.command: "ferry"
   data.version: semantic-version string from the package version
@@ -424,6 +436,7 @@ key add: load_bootstrap, derive_key, write_key_slot, complete
 key remove: load_bootstrap, verify_remaining_unlock, remove_key_slot, complete
 key rotate: load_bootstrap, derive_key, write_key_slot, retire_old_slots, complete
 key export-recovery: load_bootstrap, create_export, complete
+key import-recovery: load_bootstrap, read_export, write_key_slot, complete
 ```
 
 Implemented command events:
@@ -797,14 +810,30 @@ does not already exist. The export is encrypted and authenticated with
 Argon2id v1.3 and
 XChaCha20-Poly1305 using associated data documented in `docs/security.md`.
 The current implementation protects the export with the current repository
-passphrase; recovery import is not implemented, and the command does not
-export raw master-key material, create a new master key, rewrite repository
-objects, or re-encrypt repository objects. Wrong passphrases fail with exit
-code `4`; an existing destination fails with exit code `2`; malformed
-repository key state fails as an integrity failure with exit code `6`. Output
-includes the repository id, export id, redacted destination, visible key-slot
-count, creation time, KDF parameters, AEAD algorithm, warning text,
-`recovery_import_implemented: false`, `raw_master_key_exported: false`, and
+passphrase and does not export raw master-key material, create a new master
+key, rewrite repository objects, or re-encrypt repository objects. Wrong
+passphrases fail with exit code `4`; an existing destination fails with exit
+code `2`; malformed repository key state fails as an integrity failure with
+exit code `6`. Output includes the repository id, export id, redacted
+destination, visible key-slot count, creation time, KDF parameters, AEAD
+algorithm, warning text, `recovery_import_implemented: true`,
+`raw_master_key_exported: false`, and `reencrypted_repository_objects: false`.
+
+`ferry key import-recovery --input <FILE>` opens an initialized local or
+S3-compatible repository, reads an encrypted recovery export from the input
+file, opens the target repository with the same passphrase from
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, decrypts the package with
+that passphrase, and writes one new external key slot for the new passphrase
+from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`FILEFERRY_NEW_PASSWORD_FILE`. The package repository id must match the target
+repository bootstrap, and the package master-key check must verify against the
+opened repository master key before any key-slot write. Wrong
+repository/package passphrases fail with exit code `4`; malformed, tampered,
+unsupported, or repository-mismatched recovery packages fail closed as
+integrity failures with exit code `6`; unreadable input files fail with exit
+code `5`. Output includes the repository id, export id, redacted input source,
+added key-slot id, visible key-slot count, package creation time, KDF
+parameters, AEAD algorithm, `raw_master_key_exported: false`, and
 `reencrypted_repository_objects: false`.
 
 ## Local Backend Failure Evidence

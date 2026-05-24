@@ -216,9 +216,8 @@ local repositories. It unlocks the repository with `FILEFERRY_PASSWORD` or
 and writes that package to a destination file that must not already exist.
 
 The current recovery package is password-protected by the same current
-repository passphrase used to run the command. It is intended as an encrypted,
-offline copy of unlock material for future recovery-import work, not as a
-plaintext key export and not as recovery from a lost passphrase.
+repository passphrase used to run the command. It is an encrypted, offline
+copy of unlock material for later recovery import, not a plaintext key export.
 
 The recovery export format records:
 
@@ -249,10 +248,36 @@ The command never prints raw master keys, recovery plaintext, passphrases, or
 repository URLs with credentials in human output, JSON, JSONL, logs, errors,
 or debug output. Output reports the repository id, export id, redacted
 destination, KDF summary, AEAD algorithm, warning text,
-`recovery_import_implemented: false`, `raw_master_key_exported: false`, and
+`recovery_import_implemented: true`, `raw_master_key_exported: false`, and
 `reencrypted_repository_objects: false`.
 
-Recovery import is not implemented.
+## Recovery Import
+
+`ferry key import-recovery --input <FILE>` is implemented for initialized
+local and S3-compatible repositories. It reads a standalone encrypted recovery
+package, opens the target repository with the same passphrase from
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, decrypts the package with
+that passphrase, verifies that the package repository id matches the target
+repository bootstrap, verifies the package master-key check against the opened
+repository master key, and writes one new immutable external key slot for the
+new passphrase from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`FILEFERRY_NEW_PASSWORD_FILE`.
+
+Before writing the imported key slot, current code acquires encrypted
+`locks/<lease-id>` command lease state using the recovered repository master
+key. Another active readable lease rejects the command as a locked repository,
+and malformed lease state fails closed before the key-slot object is written.
+
+Recovery import fails closed for malformed recovery-export JSON, unsupported
+format versions, wrong repository/package passphrases, packages from a
+different repository, tampered wrapped-master-key ciphertext, tampered
+master-key checks, malformed repository key-slot state, and malformed lease
+state. The current import design intentionally requires a passphrase that
+unlocks the target repository because format v0 bootstrap-only repositories do
+not contain an independent public master-key check. It does not create a new
+repository master key, does not rewrite chunks, manifests, indexes, snapshot
+commit markers, forget markers, policy/config objects, or existing key slots,
+and does not print raw master-key material.
 
 Current format-fixture coverage includes one standalone encrypted recovery
 export package. Focused tests verify that current code can parse and authenticate
@@ -449,8 +474,8 @@ The `fileferry-crypto` crate currently includes focused tests for:
 - Redacted `Debug` output for master keys.
 - Secret-leakage canaries for config parse diagnostics, password-missing
   diagnostics, S3 repository URL rejection, S3 endpoint validation, S3 config
-  debug output, key-management passphrase failures, recovery export output, and
-  live-S3 integration output when those opt-in tests are run.
+  debug output, key-management passphrase failures, recovery export/import
+  output, and live-S3 integration output when those opt-in tests are run.
 
 The broader adversarial test matrix still needs format migration failures once
 format fixtures and migrations exist.

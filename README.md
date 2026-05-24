@@ -157,8 +157,9 @@ This is release-candidate security engineering, not an external audit claim.
   restored by this version.
 - Key rotation rotates unlock access by adding/removing key slots. It does not
   rewrite repository data with a new master key.
-- Recovery export exists; recovery import and full repository rekey are not
-  implemented.
+- The published `1.0.0-rc.1` artifacts include recovery export but not
+  recovery import. Current main adds recovery import as a new external key slot;
+  full repository rekey is not implemented.
 - S3-compatible behavior is tested against the current abstraction and a
   private Backblaze B2 development bucket. It is not a blanket claim for every
   S3-compatible provider.

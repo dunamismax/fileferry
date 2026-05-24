@@ -234,10 +234,11 @@ The retention/key-management test runs only when
 variables plus `FILEFERRY_S3_TEST_PREFIX` are set. It appends a unique
 `cli-retention-key-...` suffix, initializes that repository prefix, runs
 backup, forget, snapshots, key add, key remove, key rotate, and
-key export-recovery through the `ferry` binary, verifies removed key slots no
-longer unlock the repository, and then deletes objects under only that unique
-repository prefix. The recovery export is written to a local temporary file;
-it is not stored in S3.
+key export-recovery, and key import-recovery through the `ferry` binary,
+verifies removed key slots no longer unlock the repository, verifies the
+imported recovery key slot can unlock the repository, and then deletes objects
+under only that unique repository prefix. The recovery export is written to a
+local temporary file; it is not stored in S3.
 
 The S3 prune test runs only when `FILEFERRY_S3_PRUNE_INTEGRATION=1` and the
 same S3 environment variables plus `FILEFERRY_S3_TEST_PREFIX` are set. It

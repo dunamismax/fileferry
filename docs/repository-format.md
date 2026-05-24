@@ -87,17 +87,29 @@ Current implementation status:
   `locks/<lease-id>` command lease state before key-slot mutation writes.
   Active readable leases reject the command as locked, and malformed lease
   state fails closed before key-slot objects or removal markers are written.
-- `ferry key export-recovery --output <FILE>` for initialized local
-  repositories writes a standalone encrypted JSON recovery package outside the
-  repository. The destination file must not already exist. The package
-  contains only the minimum plaintext needed to identify and decrypt the
-  package later: schema version, magic, format version, export type,
-  repository id, random export id, creation time, warning text, KDF
+- `ferry key export-recovery --output <FILE>` for initialized local and
+  S3-compatible repositories writes a standalone encrypted JSON recovery
+  package outside the repository. The destination file must not already exist.
+  The package contains only the minimum plaintext needed to identify and
+  decrypt the package later: schema version, magic, format version, export
+  type, repository id, random export id, creation time, warning text, KDF
   parameters and salt, AEAD algorithm and nonce, encrypted master-key bytes,
   and a keyed master-key check. The current implementation encrypts the
-  package with the current repository passphrase, does not implement recovery
-  import, does not export raw master-key material, and does not rewrite
-  repository objects.
+  package with the current repository passphrase, does not export raw
+  master-key material, and does not rewrite repository objects.
+- `ferry key import-recovery --input <FILE>` for initialized local and
+  S3-compatible repositories reads a standalone encrypted recovery package,
+  opens the target repository with the same passphrase, decrypts the package
+  with that passphrase, verifies that the package repository id matches the
+  target repository bootstrap, verifies the package master-key check against
+  the opened repository master key, and writes one new immutable
+  `key-slots/<key-slot-id>` object for the supplied new passphrase. It uses
+  the same external key-slot layout as `ferry key add`, acquires encrypted
+  `locks/<lease-id>` command lease state before writing the new key-slot
+  object, does not create a new repository master key, and does not rewrite
+  encrypted repository objects. The target-repository unlock requirement is
+  deliberate for format v0 because bootstrap-only repositories do not contain
+  an independent public master-key check.
 - `ferry snapshots` and `ferry ls` read the bootstrap, unlock the master key
   from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, then authenticate
   encrypted manifests before returning snapshot metadata.
@@ -557,6 +569,8 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
   `format_version`, `export_type`, `repository_id`, `export_id`,
   `created_at_unix_seconds`, `warning`, `aead`, each nested recovery-key KDF
   field, salt, nonce, wrapped master-key bytes, and `master_key_check`.
+  Current readers accept the legacy pre-import warning text in the frozen
+  fixture as well as the current warning text written by new exports.
 - `snapshot-data/commits/<snapshot-id>`: `schema_version`, `snapshot_id`, and
   `manifest_object`.
 - `snapshot-data/objects/manifest/<prefix>/<snapshot-id>`: encrypted-object
@@ -620,14 +634,15 @@ For the bootstrap/key-slot fixture slice, the compatibility-facing fields are:
   rejected as invalid bootstrap metadata.
 
 The fixture passphrases are test-only unlock inputs. They are not production
-secrets and do not imply recovery import. Tests prove current code can read the
-bootstrap/key-slot fixture, reject malformed bootstrap JSON, reject unsupported
-bootstrap versions, reject a tampered external key-slot master-key check, reject
-a tampered key-slot removal marker check, and fail closed when a removed
-key-slot passphrase is used. Tests also prove current code can verify the
-recovery export fixture, reject malformed recovery-export JSON, reject
-unsupported recovery-export format versions, reject tampered recovery-export
-ciphertext, and reject a tampered recovery-export master-key check. The
+secrets. Tests prove current code can read the bootstrap/key-slot fixture,
+reject malformed bootstrap JSON, reject unsupported bootstrap versions, reject
+a tampered external key-slot master-key check, reject a tampered key-slot
+removal marker check, and fail closed when a removed key-slot passphrase is
+used. Tests also prove current code can verify the recovery export fixture,
+reject malformed recovery-export JSON, reject unsupported recovery-export
+format versions, reject tampered recovery-export ciphertext, reject a tampered
+recovery-export master-key check, and import valid recovery exports as new
+external key slots only after repository-id and master-key checks pass. The
 snapshot-data fixture tests prove current code can unlock the fixture, read
 committed manifests, authenticate and validate the encrypted manifest and
 index, run full repository check across referenced chunks, restore selected

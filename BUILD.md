@@ -18,13 +18,13 @@ verification recipes, GitHub Actions CI, release packaging automation, and the
 v0 repository format documentation/fixtures needed for the current release
 candidate.
 
-Implemented and tested at the current release-candidate level:
+Implemented and tested in current main:
 
 - `ferry init`, `backup`, `restore`, `snapshots`, `ls`, `check`, `forget`,
   `prune`, `completion`, and `version`.
-- Key add, marker-based key remove, limited unlock rotation, and encrypted
-  recovery export. Recovery import, full repository rekey, and bootstrap-slot
-  removal are not implemented.
+- Key add, marker-based key remove, limited unlock rotation, encrypted
+  recovery export, and recovery import as a new external key slot. Full
+  repository rekey and bootstrap-slot removal are not implemented.
 - Encrypted local and S3-compatible repositories through the shared object
   storage pipeline.
 - Encrypted, compressed, deduplicated snapshot creation.
@@ -40,8 +40,8 @@ Implemented and tested at the current release-candidate level:
   stdout/stderr separation documented and regression-tested for the
   implemented command surface.
 - Secret-leakage canaries for current human, JSON, JSONL, config parse, S3
-  repository URL, S3 endpoint, key-management, recovery export, and opt-in
-  live-S3 integration output paths.
+  repository URL, S3 endpoint, key-management, recovery export/import, and
+  opt-in live-S3 integration output paths.
 - S3-compatible hardening evidence for capability probe, retry policy, prefix
   listing surprises, missing objects, permission denial, prune resume, and
   missing-candidate handling.
@@ -107,7 +107,7 @@ Core product:
 - [x] Encrypted, compressed, deduplicated backup snapshots.
 - [x] Restore by latest, snapshot id, tag, and path.
 - [x] `snapshots`, `ls`, `check`, `forget`, and recoverable two-phase `prune`.
-- [x] Key add/remove/rotate/export-recovery paths.
+- [x] Key add/remove/rotate/export-recovery/import-recovery paths.
 - [x] Stable config profiles and environment variables.
 - [x] Shell completion generation.
 - [x] Format v0 freeze decision completed.
@@ -148,7 +148,7 @@ Post-v1 or optional:
 - [ ] `ferry repo`.
 - [ ] `ferry policy`.
 - [ ] `ferry doctor`.
-- [ ] Recovery import.
+- [x] Recovery import.
 - [ ] Full repository rekey.
 - [ ] Broader storage providers.
 
