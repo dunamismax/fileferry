@@ -13,8 +13,10 @@ use fileferry_crypto::{
 };
 use fileferry_platform::{
     CaseBehavior, EntryKind, EntryMetadata, MetadataExtensions, MetadataFieldSummary,
-    MetadataValue, PlatformError, PlatformKind, Timestamp, capture_metadata, current_platform,
-    path_facts, probe_case_behavior,
+    MetadataRestoreError, MetadataRestoreTarget, MetadataValue, PlatformError, PlatformKind,
+    Timestamp, apply_modified_timestamp, apply_unix_mode, capture_metadata, current_platform,
+    path_facts, probe_case_behavior, read_unix_owner, supports_unix_mode_restore,
+    supports_unix_owner_observation, system_time_from_timestamp,
 };
 use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, StorageError};
 use secrecy::SecretString;
@@ -24,7 +26,7 @@ use std::{
     fs, io,
     path::Component,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
+    time::{SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -6641,7 +6643,7 @@ impl BackupPipeline {
                     &file.relative_path,
                     file.source_platform,
                     &file.modified,
-                    RestoredMetadataTarget::RegularFile,
+                    MetadataRestoreTarget::RegularFile,
                     &mut metadata_outcomes,
                 );
                 plan_unrestored_created_timestamp(
@@ -6678,7 +6680,7 @@ impl BackupPipeline {
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.modified,
-                    RestoredMetadataTarget::Directory,
+                    MetadataRestoreTarget::Directory,
                     &mut metadata_outcomes,
                 );
                 plan_unrestored_created_timestamp(
@@ -8247,7 +8249,7 @@ impl RestoreMetadataFieldOutcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RestoreMetadataOutcomeStatus {
     Planned,
     Applied,
@@ -8837,12 +8839,6 @@ fn write_restored_file(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RestoredMetadataTarget {
-    RegularFile,
-    Directory,
-}
-
 const RESTORABLE_UNIX_MODE_BITS: u32 = 0o777;
 const UNRESTORED_UNIX_SPECIAL_MODE_BITS: u32 = 0o7000;
 
@@ -8851,22 +8847,32 @@ fn apply_restored_modified_timestamp(
     relative_path: &Path,
     source_platform: PlatformKind,
     modified: &MetadataValue<Timestamp>,
-    target: RestoredMetadataTarget,
+    target: MetadataRestoreTarget,
     outcomes: &mut RestoreMetadataOutcomes,
 ) {
-    let Some(modified_time) =
-        restored_modified_time_or_record(relative_path, source_platform, modified, outcomes)
+    let Some(timestamp) =
+        restored_modified_timestamp_or_record(relative_path, source_platform, modified, outcomes)
     else {
         return;
     };
 
-    match set_restored_modified_timestamp(destination_path, target, modified_time) {
+    match apply_modified_timestamp(destination_path, target, timestamp) {
         Ok(()) => outcomes.record(RestoreMetadataFieldOutcome::applied(
             relative_path,
             "portable",
             "modified",
             source_platform,
         )),
+        Err(MetadataRestoreError::TimestampOutOfRange) => {
+            outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+                relative_path,
+                "portable",
+                "modified",
+                source_platform,
+                RestoreMetadataOutcomeStatus::Unrepresentable,
+                "modified timestamp is outside the supported system time range".to_owned(),
+            ));
+        }
         Err(source) => outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
             relative_path,
             "portable",
@@ -8884,7 +8890,7 @@ fn plan_restored_modified_timestamp(
     modified: &MetadataValue<Timestamp>,
     outcomes: &mut RestoreMetadataOutcomes,
 ) {
-    if restored_modified_time_or_record(relative_path, source_platform, modified, outcomes)
+    if restored_modified_timestamp_or_record(relative_path, source_platform, modified, outcomes)
         .is_some()
     {
         outcomes.record(RestoreMetadataFieldOutcome::planned(
@@ -8909,7 +8915,7 @@ fn apply_restored_unix_mode(
 
     warn_unrestored_unix_mode_bits(relative_path, source_platform, mode, outcomes);
 
-    if !destination_supports_unix_mode() {
+    if !supports_unix_mode_restore() {
         outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
             relative_path,
             "unix",
@@ -8921,7 +8927,7 @@ fn apply_restored_unix_mode(
         return;
     }
 
-    match set_restored_unix_mode(destination_path, mode & RESTORABLE_UNIX_MODE_BITS) {
+    match apply_unix_mode(destination_path, mode & RESTORABLE_UNIX_MODE_BITS) {
         Ok(()) => outcomes.record(RestoreMetadataFieldOutcome::applied(
             relative_path,
             "unix",
@@ -8951,7 +8957,7 @@ fn plan_restored_unix_mode(
 
     warn_unrestored_unix_mode_bits(relative_path, source_platform, mode, outcomes);
 
-    if !destination_supports_unix_mode() {
+    if !supports_unix_mode_restore() {
         outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
             relative_path,
             "unix",
@@ -8981,12 +8987,12 @@ fn verify_restored_unix_owner(
         return;
     };
 
-    if !destination_supports_unix_owner() {
+    if !supports_unix_owner_observation() {
         warn_unix_owner_unrepresentable(relative_path, source_platform, outcomes);
         return;
     }
 
-    let actual_owner = match read_restored_unix_owner(destination_path) {
+    let actual_owner = match read_unix_owner(destination_path) {
         Ok(owner) => owner,
         Err(source) => {
             warn_unix_owner_field(
@@ -9062,7 +9068,7 @@ fn plan_restored_unix_owner(
         return;
     }
 
-    if destination_supports_unix_owner() {
+    if supports_unix_owner_observation() {
         outcomes.record(RestoreMetadataFieldOutcome::planned(
             relative_path,
             "unix",
@@ -9365,14 +9371,14 @@ fn warn_unrestored_unix_mode_bits(
     ));
 }
 
-fn restored_modified_time_or_record(
+fn restored_modified_timestamp_or_record(
     relative_path: &Path,
     source_platform: PlatformKind,
     modified: &MetadataValue<Timestamp>,
     outcomes: &mut RestoreMetadataOutcomes,
-) -> Option<SystemTime> {
+) -> Option<Timestamp> {
     let timestamp = match modified {
-        MetadataValue::Captured(timestamp) => timestamp,
+        MetadataValue::Captured(timestamp) => *timestamp,
         MetadataValue::Unsupported => {
             outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
                 relative_path,
@@ -9397,7 +9403,7 @@ fn restored_modified_time_or_record(
         }
     };
 
-    let Some(modified_time) = system_time_from_timestamp(*timestamp) else {
+    if system_time_from_timestamp(timestamp).is_none() {
         outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
             relative_path,
             "portable",
@@ -9409,91 +9415,7 @@ fn restored_modified_time_or_record(
         return None;
     };
 
-    Some(modified_time)
-}
-
-fn system_time_from_timestamp(timestamp: Timestamp) -> Option<SystemTime> {
-    if timestamp.nanoseconds >= 1_000_000_000 {
-        return None;
-    }
-
-    if timestamp.seconds >= 0 {
-        UNIX_EPOCH
-            .checked_add(Duration::from_secs(timestamp.seconds as u64))?
-            .checked_add(Duration::from_nanos(u64::from(timestamp.nanoseconds)))
-    } else {
-        UNIX_EPOCH
-            .checked_sub(Duration::from_secs(timestamp.seconds.unsigned_abs()))?
-            .checked_add(Duration::from_nanos(u64::from(timestamp.nanoseconds)))
-    }
-}
-
-fn set_restored_modified_timestamp(
-    destination_path: &Path,
-    target: RestoredMetadataTarget,
-    modified_time: SystemTime,
-) -> io::Result<()> {
-    let file = match target {
-        RestoredMetadataTarget::RegularFile => {
-            fs::OpenOptions::new().write(true).open(destination_path)?
-        }
-        RestoredMetadataTarget::Directory => fs::File::open(destination_path)?,
-    };
-    file.set_times(fs::FileTimes::new().set_modified(modified_time))
-}
-
-#[cfg(unix)]
-const fn destination_supports_unix_mode() -> bool {
-    true
-}
-
-#[cfg(not(unix))]
-const fn destination_supports_unix_mode() -> bool {
-    false
-}
-
-#[cfg(unix)]
-const fn destination_supports_unix_owner() -> bool {
-    true
-}
-
-#[cfg(not(unix))]
-const fn destination_supports_unix_owner() -> bool {
-    false
-}
-
-#[cfg(unix)]
-fn read_restored_unix_owner(destination_path: &Path) -> io::Result<RestoredUnixOwner> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = fs::symlink_metadata(destination_path)?;
-    Ok(RestoredUnixOwner {
-        uid: metadata.uid(),
-        gid: metadata.gid(),
-    })
-}
-
-#[cfg(not(unix))]
-fn read_restored_unix_owner(_destination_path: &Path) -> io::Result<RestoredUnixOwner> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "unix ownership is not available on this platform",
-    ))
-}
-
-#[cfg(unix)]
-fn set_restored_unix_mode(destination_path: &Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(destination_path, fs::Permissions::from_mode(mode))
-}
-
-#[cfg(not(unix))]
-fn set_restored_unix_mode(_destination_path: &Path, _mode: u32) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "unix mode is not supported on this platform",
-    ))
+    Some(timestamp)
 }
 
 #[cfg(unix)]
@@ -10851,6 +10773,13 @@ mod tests {
 
     fn applied_metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
         if cfg!(unix) { entries * 4 } else { entries }
+    }
+
+    fn restored_unix_owner(owner: fileferry_platform::UnixOwner) -> RestoredUnixOwner {
+        RestoredUnixOwner {
+            uid: owner.uid,
+            gid: owner.gid,
+        }
     }
 
     #[cfg(unix)]
@@ -14651,20 +14580,18 @@ mod tests {
             seconds: 1_700_000_000,
             nanoseconds: 0,
         };
-        let expected_time = system_time_from_timestamp(expected).expect("expected system time");
-        set_restored_modified_timestamp(&file, RestoredMetadataTarget::RegularFile, expected_time)
+        apply_modified_timestamp(&file, MetadataRestoreTarget::RegularFile, expected)
             .expect("set source file mtime");
-        let directory_mtime_configured = match set_restored_modified_timestamp(
-            &docs,
-            RestoredMetadataTarget::Directory,
-            expected_time,
-        ) {
-            Ok(()) => true,
-            Err(source) if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied => {
-                false
-            }
-            Err(source) => panic!("set source directory mtime: {source}"),
-        };
+        let directory_mtime_configured =
+            match apply_modified_timestamp(&docs, MetadataRestoreTarget::Directory, expected) {
+                Ok(()) => true,
+                Err(MetadataRestoreError::Apply { source, .. })
+                    if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied =>
+                {
+                    false
+                }
+                Err(source) => panic!("set source directory mtime: {source}"),
+            };
 
         let pipeline = small_test_pipeline();
         let store = FakeObjectStore::new();
@@ -14762,18 +14689,16 @@ mod tests {
             seconds: 1_600_000_000,
             nanoseconds: 0,
         };
-        let expected_time = system_time_from_timestamp(expected).expect("expected system time");
-        let directory_mtime_configured = match set_restored_modified_timestamp(
-            &docs,
-            RestoredMetadataTarget::Directory,
-            expected_time,
-        ) {
-            Ok(()) => true,
-            Err(source) if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied => {
-                false
-            }
-            Err(source) => panic!("set source directory mtime: {source}"),
-        };
+        let directory_mtime_configured =
+            match apply_modified_timestamp(&docs, MetadataRestoreTarget::Directory, expected) {
+                Ok(()) => true,
+                Err(MetadataRestoreError::Apply { source, .. })
+                    if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied =>
+                {
+                    false
+                }
+                Err(source) => panic!("set source directory mtime: {source}"),
+            };
         if !directory_mtime_configured {
             return;
         }
@@ -15213,6 +15138,70 @@ mod tests {
     }
 
     #[test]
+    fn platform_extension_restore_planning_records_every_selected_field() {
+        let mut outcomes = RestoreMetadataOutcomes::default();
+        let selected = MetadataValue::Captured(MetadataFieldSummary { count: 1 });
+        let extensions = MetadataExtensions {
+            xattrs: selected.clone(),
+            acls: selected.clone(),
+            file_flags: selected.clone(),
+            resource_forks: selected.clone(),
+            windows_attributes: selected.clone(),
+            sparse_extents: selected,
+        };
+
+        plan_unrestored_platform_extensions(
+            Path::new("sample.txt"),
+            PlatformKind::Linux,
+            &extensions,
+            &mut outcomes,
+        );
+
+        assert_eq!(outcomes.metadata_planned(), 6);
+        assert_eq!(outcomes.fields.len(), 6);
+        let fields = outcomes
+            .fields
+            .iter()
+            .map(|outcome| (outcome.namespace, outcome.field, outcome.status))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            fields,
+            BTreeSet::from([
+                (
+                    "linux",
+                    "xattrs",
+                    RestoreMetadataOutcomeStatus::NotYetImplemented,
+                ),
+                (
+                    "linux",
+                    "acls",
+                    RestoreMetadataOutcomeStatus::NotYetImplemented
+                ),
+                (
+                    "linux",
+                    "file_flags",
+                    RestoreMetadataOutcomeStatus::NotYetImplemented,
+                ),
+                (
+                    "linux",
+                    "resource_forks",
+                    RestoreMetadataOutcomeStatus::NotYetImplemented,
+                ),
+                (
+                    "linux",
+                    "windows_attributes",
+                    RestoreMetadataOutcomeStatus::NotYetImplemented,
+                ),
+                (
+                    "linux",
+                    "sparse_extents",
+                    RestoreMetadataOutcomeStatus::NotYetImplemented,
+                ),
+            ])
+        );
+    }
+
+    #[test]
     fn metadata_status_counts_resource_fork_denial_as_partial() {
         let mut entry = test_manifest_entry("sample.txt", EntryKind::RegularFile, Some(6));
         entry.metadata.extensions.resource_forks =
@@ -15301,7 +15290,7 @@ mod tests {
             Path::new("sample.txt"),
             current_platform(),
             &MetadataValue::Unsupported,
-            RestoredMetadataTarget::RegularFile,
+            MetadataRestoreTarget::RegularFile,
             &mut outcomes,
         );
 
@@ -15334,7 +15323,7 @@ mod tests {
             Path::new("denied.txt"),
             current_platform(),
             &MetadataValue::Denied("permission denied".to_owned()),
-            RestoredMetadataTarget::RegularFile,
+            MetadataRestoreTarget::RegularFile,
             &mut outcomes,
         );
         apply_restored_modified_timestamp(
@@ -15345,7 +15334,7 @@ mod tests {
                 seconds: 0,
                 nanoseconds: 1_000_000_000,
             }),
-            RestoredMetadataTarget::RegularFile,
+            MetadataRestoreTarget::RegularFile,
             &mut outcomes,
         );
 
@@ -15553,7 +15542,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("sample.txt");
         fs::write(&path, b"sample").expect("write sample");
-        let owner = read_restored_unix_owner(&path).expect("read owner");
+        let owner = restored_unix_owner(read_unix_owner(&path).expect("read owner"));
         let mut outcomes = RestoreMetadataOutcomes::default();
 
         verify_restored_unix_owner(
@@ -15575,7 +15564,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("sample.txt");
         fs::write(&path, b"sample").expect("write sample");
-        let actual = read_restored_unix_owner(&path).expect("read owner");
+        let actual = restored_unix_owner(read_unix_owner(&path).expect("read owner"));
         let expected = RestoredUnixOwner {
             uid: actual.uid.wrapping_add(1),
             gid: actual.gid.wrapping_add(1),

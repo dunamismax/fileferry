@@ -6,6 +6,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
+    time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,6 +21,19 @@ pub enum PlatformError {
 
     #[error("symlink target for {path} could not be read")]
     SymlinkTargetRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MetadataRestoreError {
+    #[error("timestamp is outside the supported system time range")]
+    TimestampOutOfRange,
+
+    #[error("metadata could not be applied: {source}")]
+    Apply {
         path: PathBuf,
         #[source]
         source: io::Error,
@@ -59,6 +73,18 @@ pub enum PlatformKind {
 pub enum CaseBehavior {
     CaseSensitive,
     CaseInsensitive,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataRestoreTarget {
+    RegularFile,
+    Directory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnixOwner {
+    pub uid: u32,
+    pub gid: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -281,6 +307,94 @@ pub fn probe_case_behavior(directory: impl AsRef<Path>) -> io::Result<CaseBehavi
     fs::remove_file(&lower)?;
 
     Ok(behavior)
+}
+
+pub fn apply_modified_timestamp(
+    path: impl AsRef<Path>,
+    target: MetadataRestoreTarget,
+    timestamp: Timestamp,
+) -> Result<(), MetadataRestoreError> {
+    let path = path.as_ref();
+    let modified_time =
+        system_time_from_timestamp(timestamp).ok_or(MetadataRestoreError::TimestampOutOfRange)?;
+    let file = match target {
+        MetadataRestoreTarget::RegularFile => fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|source| MetadataRestoreError::Apply {
+                path: path.to_path_buf(),
+                source,
+            })?,
+        MetadataRestoreTarget::Directory => {
+            fs::File::open(path).map_err(|source| MetadataRestoreError::Apply {
+                path: path.to_path_buf(),
+                source,
+            })?
+        }
+    };
+    file.set_times(fs::FileTimes::new().set_modified(modified_time))
+        .map_err(|source| MetadataRestoreError::Apply {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+pub const fn supports_unix_mode_restore() -> bool {
+    cfg!(unix)
+}
+
+pub const fn supports_unix_owner_observation() -> bool {
+    cfg!(unix)
+}
+
+#[cfg(unix)]
+pub fn apply_unix_mode(path: impl AsRef<Path>, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+pub fn apply_unix_mode(_path: impl AsRef<Path>, _mode: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "unix mode is not supported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+pub fn read_unix_owner(path: impl AsRef<Path>) -> io::Result<UnixOwner> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(path)?;
+    Ok(UnixOwner {
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+    })
+}
+
+#[cfg(not(unix))]
+pub fn read_unix_owner(_path: impl AsRef<Path>) -> io::Result<UnixOwner> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "unix ownership is not available on this platform",
+    ))
+}
+
+pub fn system_time_from_timestamp(timestamp: Timestamp) -> Option<SystemTime> {
+    if timestamp.nanoseconds >= 1_000_000_000 {
+        return None;
+    }
+
+    if timestamp.seconds >= 0 {
+        UNIX_EPOCH
+            .checked_add(Duration::from_secs(timestamp.seconds as u64))?
+            .checked_add(Duration::from_nanos(u64::from(timestamp.nanoseconds)))
+    } else {
+        UNIX_EPOCH
+            .checked_sub(Duration::from_secs(timestamp.seconds.unsigned_abs()))?
+            .checked_add(Duration::from_nanos(u64::from(timestamp.nanoseconds)))
+    }
 }
 
 fn metadata_value_from_time(result: io::Result<SystemTime>) -> MetadataValue<Timestamp> {
@@ -816,6 +930,88 @@ mod tests {
             behavior,
             CaseBehavior::CaseSensitive | CaseBehavior::CaseInsensitive
         ));
+    }
+
+    #[test]
+    fn converts_valid_timestamp_to_system_time_and_rejects_invalid_nanoseconds() {
+        let timestamp = Timestamp {
+            seconds: 1_700_000_000,
+            nanoseconds: 123,
+        };
+
+        assert!(system_time_from_timestamp(timestamp).is_some());
+        assert_eq!(
+            system_time_from_timestamp(Timestamp {
+                seconds: 0,
+                nanoseconds: 1_000_000_000,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn applies_modified_timestamp_for_regular_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"sample").expect("write sample");
+        let expected = Timestamp {
+            seconds: 1_700_000_000,
+            nanoseconds: 0,
+        };
+
+        apply_modified_timestamp(&path, MetadataRestoreTarget::RegularFile, expected)
+            .expect("apply modified timestamp");
+
+        assert_eq!(
+            capture_metadata(&path).expect("metadata").modified,
+            MetadataValue::Captured(expected)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_modified_timestamp_before_applying() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"sample").expect("write sample");
+
+        let error = apply_modified_timestamp(
+            &path,
+            MetadataRestoreTarget::RegularFile,
+            Timestamp {
+                seconds: 0,
+                nanoseconds: 1_000_000_000,
+            },
+        )
+        .expect_err("invalid timestamp");
+
+        assert!(matches!(error, MetadataRestoreError::TimestampOutOfRange));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn applies_unix_mode_and_reads_unix_owner_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"sample").expect("write sample");
+
+        assert!(supports_unix_mode_restore());
+        assert!(supports_unix_owner_observation());
+        apply_unix_mode(&path, 0o640).expect("apply unix mode");
+
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o640
+        );
+        let owner = read_unix_owner(&path).expect("read unix owner");
+        assert_eq!(
+            owner,
+            UnixOwner {
+                uid: owner.uid,
+                gid: owner.gid
+            }
+        );
     }
 
     #[test]

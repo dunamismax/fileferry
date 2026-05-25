@@ -160,12 +160,12 @@ warning logic.
 - [x] Derive `metadata_planned`, `metadata_applied`, and
       `metadata_warnings` from those outcomes instead of hand-maintained field
       counts.
-- [ ] Move platform-specific representation/apply probes toward
+- [x] Move platform-specific representation/apply probes toward
       `fileferry-platform` where practical, keeping CLI presentation out of
       library crates.
-- [ ] Preserve the existing JSON/JSONL `RestoreMetadataWarning` shape unless a
+- [x] Preserve the existing JSON/JSONL `RestoreMetadataWarning` shape unless a
       deliberate CLI contract revision is made.
-- [ ] Add regression tests proving a new metadata field cannot be selected and
+- [x] Add regression tests proving a new metadata field cannot be selected and
       silently ignored.
 
 ### Phase 3 - Portable Timestamp Completion
