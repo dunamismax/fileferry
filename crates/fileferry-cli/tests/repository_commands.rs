@@ -1863,6 +1863,439 @@ fn key_rotate_active_lease_has_stable_locked_exit_code_and_writes_no_slot_or_mar
 }
 
 #[test]
+fn key_rekey_rewrites_repository_and_rejects_old_unlocks_without_leaking_secrets() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "rekey-old-passphrase-canary";
+    let added_passphrase = "rekey-added-passphrase-canary";
+    let new_passphrase = "rekey-new-passphrase-canary";
+    let secret_name = "rekey-secret-source-name-canary.txt";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join(secret_name), b"rekey payload").expect("write source");
+    backup_source(&repo_url, passphrase, &source);
+
+    let add_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", added_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "add"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let add: Value = serde_json::from_slice(&add_output).expect("key add json");
+    assert_eq!(add["data"]["key_slots"], 2);
+
+    let rekey_output = fileferry()
+        .env("FILEFERRY_PASSWORD", added_passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", new_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "rekey"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let rekey_text = String::from_utf8(rekey_output.clone()).expect("rekey utf8");
+    let rekey: Value = serde_json::from_slice(&rekey_output).expect("key rekey json");
+    assert_eq!(rekey["command"], "key rekey");
+    assert_eq!(rekey["status"], "success");
+    assert_eq!(rekey["data"]["old_key_slots"], 2);
+    assert_eq!(rekey["data"]["new_key_slots"], 1);
+    assert_eq!(rekey["data"]["snapshots_rewritten"], 1);
+    assert_eq!(rekey["data"]["commits_rewritten"], 1);
+    assert_eq!(rekey["data"]["manifests_rewritten"], 1);
+    assert!(
+        rekey["data"]["chunks_rewritten"]
+            .as_u64()
+            .expect("chunks rewritten")
+            > 0
+    );
+    assert_eq!(rekey["data"]["old_key_slots_retired"], 1);
+    assert_eq!(rekey["data"]["old_key_slot_objects_deleted"], 1);
+    assert_eq!(rekey["data"]["old_unlocks_retained"], false);
+    assert_eq!(rekey["data"]["raw_master_key_exported"], false);
+    assert_eq!(rekey["data"]["reencrypted_repository_objects"], true);
+    assert_eq!(rekey["data"]["recovery_state"], "started");
+    assert_eq!(rekey["data"]["kdf"]["algorithm"], "argon2id_v19");
+    assert!(!rekey_text.contains(passphrase));
+    assert!(!rekey_text.contains(added_passphrase));
+    assert!(!rekey_text.contains(new_passphrase));
+    assert_eq!(file_count_under(&repo.join("key-slots")), 0);
+    assert_eq!(file_count_under(&repo.join("objects/rekey")), 0);
+    assert!(!raw_repository_bytes_contain(&repo, passphrase.as_bytes()));
+    assert!(!raw_repository_bytes_contain(
+        &repo,
+        added_passphrase.as_bytes()
+    ));
+    assert!(!raw_repository_bytes_contain(
+        &repo,
+        new_passphrase.as_bytes()
+    ));
+    assert!(!raw_repository_bytes_contain(&repo, secret_name.as_bytes()));
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", new_passphrase)
+        .args(["--repo", &repo_url, "--json", "check"])
+        .assert()
+        .success()
+        .stderr("");
+    fileferry()
+        .env("FILEFERRY_PASSWORD", new_passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("");
+
+    for retired_passphrase in [passphrase, added_passphrase] {
+        let old_unlock_output = fileferry()
+            .env("FILEFERRY_PASSWORD", retired_passphrase)
+            .args(["--repo", &repo_url, "--json", "snapshots"])
+            .assert()
+            .code(4)
+            .stderr("")
+            .get_output()
+            .stdout
+            .clone();
+        let old_unlock: Value =
+            serde_json::from_slice(&old_unlock_output).expect("old unlock json");
+        assert_eq!(old_unlock["data"]["code"], "repository_unlock_failed");
+    }
+
+    let destination = temp.path().join("restore");
+    let restore_output = fileferry()
+        .env("FILEFERRY_PASSWORD", new_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "restore",
+            "--path",
+            secret_name,
+            destination.to_str().expect("destination path"),
+        ])
+        .output()
+        .expect("run restore");
+    let restore_code = restore_output.status.code().unwrap_or(-1);
+    assert!(
+        restore_code == 0 || restore_code == 10,
+        "unexpected restore exit code {restore_code}\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&restore_output.stdout),
+        String::from_utf8_lossy(&restore_output.stderr)
+    );
+    assert!(restore_output.stderr.is_empty());
+    let restore: Value =
+        serde_json::from_slice(&restore_output.stdout).expect("restore after rekey json");
+    assert_eq!(restore["command"], "restore");
+    assert_eq!(restore["status"], "success");
+    assert_eq!(
+        fs::read(destination.join(secret_name)).expect("restored file"),
+        b"rekey payload"
+    );
+}
+
+#[test]
+fn key_rekey_supports_jsonl_and_new_password_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let new_passphrase = "new-passphrase";
+    let new_password_file = temp.path().join("new-password.txt");
+    fs::write(&new_password_file, format!("{new_passphrase}\n")).expect("write new password");
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "key",
+            "rekey",
+            "--new-password-file",
+            new_password_file.to_str().expect("new password file path"),
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let output_text = String::from_utf8(output.clone()).expect("jsonl utf8");
+    assert!(!output_text.contains(passphrase));
+    assert!(!output_text.contains(new_passphrase));
+    let events = output_text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl event"))
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 8);
+    assert_eq!(events[0]["event"], "command_started");
+    assert_eq!(events[0]["command"], "key rekey");
+    let phases = events[1..7]
+        .iter()
+        .map(|event| event["data"]["phase"].as_str().expect("phase"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        phases,
+        vec![
+            "load_bootstrap",
+            "derive_new_master_key",
+            "rewrite_objects",
+            "switch_bootstrap",
+            "cleanup_old_objects",
+            "complete"
+        ]
+    );
+    assert!(
+        events[1..7]
+            .iter()
+            .all(|event| event["event"] == "progress" && event["command"] == "key rekey")
+    );
+    assert_eq!(events[7]["event"], "command_completed");
+    assert_eq!(events[7]["command"], "key rekey");
+    assert_eq!(events[7]["data"]["snapshots_rewritten"], 1);
+    assert_eq!(events[7]["data"]["old_unlocks_retained"], false);
+}
+
+#[test]
+fn key_rekey_malformed_state_has_stable_integrity_exit_code() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let new_passphrase = "new-passphrase";
+    init_repo(&repo_url, passphrase);
+    let state_id = "a".repeat(64);
+    let state_path = repo.join("objects/rekey/aa").join(&state_id);
+    fs::create_dir_all(state_path.parent().expect("state parent")).expect("create rekey dir");
+    fs::write(&state_path, b"not-json").expect("write malformed rekey state");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", new_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "rekey"])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failed: Value = serde_json::from_slice(&output).expect("malformed rekey json");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(
+        failed["data"]["code"],
+        "repository_rekey_state_decode_failed"
+    );
+    assert_eq!(failed["data"]["exit_code"], 6);
+    assert_eq!(
+        failed["data"]["object_key"],
+        format!("objects/rekey/aa/{state_id}")
+    );
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("");
+}
+
+#[test]
+fn key_rekey_active_lease_has_stable_locked_exit_code_and_writes_no_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    let new_passphrase = "new-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let store = LocalStore::new(&repo);
+    let opened = runtime
+        .block_on(open_repository(&store, &SecretString::from(passphrase)))
+        .expect("open repository");
+    let pipeline =
+        BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id)).expect("pipeline");
+    runtime
+        .block_on(pipeline.write_repository_lease_state(
+            &store,
+            &opened.master_key,
+            RepositoryLeaseStateRequest {
+                lease_id: "f6".repeat(32),
+                writer_id: "a7".repeat(32),
+                command_kind: RepositoryLeaseCommandKind::Backup,
+                acquired_at_unix_seconds: 1,
+                expires_at_unix_seconds: 4_000_000_000,
+            },
+        ))
+        .expect("write active lease");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", new_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "rekey"])
+        .assert()
+        .code(3)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failed: Value = serde_json::from_slice(&output).expect("locked rekey json");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(failed["data"]["code"], "repository_locked");
+    assert_eq!(failed["data"]["exit_code"], 3);
+    assert_eq!(file_count_under(&repo.join("objects/rekey")), 0);
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("");
+}
+
+#[test]
+fn key_rekey_preserves_stored_policy_for_explicit_forget() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "policy-rekey-passphrase-canary";
+    let new_passphrase = "policy-rekey-new-passphrase-canary";
+    let keep_tag = "policy-rekey-keep-tag-canary";
+    init_repo(&repo_url, passphrase);
+
+    let keep_source = temp.path().join("keep-source");
+    let drop_source = temp.path().join("drop-source");
+    fs::create_dir(&keep_source).expect("create keep source");
+    fs::create_dir(&drop_source).expect("create drop source");
+    fs::write(keep_source.join("keep.txt"), b"keep").expect("write keep");
+    fs::write(drop_source.join("drop.txt"), b"drop").expect("write drop");
+    backup_source_with_tags(&repo_url, passphrase, &keep_source, &[keep_tag]);
+    backup_source_with_tags(&repo_url, passphrase, &drop_source, &["drop"]);
+
+    let set_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-tag",
+            keep_tag,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let set: Value = serde_json::from_slice(&set_output).expect("policy set json");
+    let old_policy_id = set["data"]["policy_id"].as_str().expect("old policy id");
+
+    fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .env("FILEFERRY_NEW_PASSWORD", new_passphrase)
+        .args(["--repo", &repo_url, "--json", "key", "rekey"])
+        .assert()
+        .success()
+        .stderr("");
+
+    let show_output = fileferry()
+        .env("FILEFERRY_PASSWORD", new_passphrase)
+        .args(["--repo", &repo_url, "--json", "policy", "show"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let show: Value = serde_json::from_slice(&show_output).expect("policy show json");
+    assert_eq!(show["data"]["policy_count"], 1);
+    let new_policy_id = show["data"]["policies"][0]["policy_id"]
+        .as_str()
+        .expect("new policy id");
+    assert_ne!(new_policy_id, old_policy_id);
+    assert_eq!(
+        show["data"]["policies"][0]["retention"]["keep_tags"],
+        json!([keep_tag])
+    );
+
+    let old_policy_output = fileferry()
+        .env("FILEFERRY_PASSWORD", new_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--dry-run",
+            "--policy",
+            old_policy_id,
+        ])
+        .assert()
+        .code(7)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let old_policy: Value =
+        serde_json::from_slice(&old_policy_output).expect("old policy failure json");
+    assert_eq!(
+        old_policy["data"]["code"],
+        "repository_policy_config_not_found"
+    );
+
+    let forget_output = fileferry()
+        .env("FILEFERRY_PASSWORD", new_passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--policy",
+            new_policy_id,
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let forget: Value = serde_json::from_slice(&forget_output).expect("forget json");
+    assert_eq!(forget["data"]["policy_source"], "stored");
+    assert_eq!(forget["data"]["policy_id"], new_policy_id);
+    assert_eq!(forget["data"]["snapshots_forgotten"], 1);
+
+    let snapshots_output = fileferry()
+        .env("FILEFERRY_PASSWORD", new_passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(
+        snapshots["data"]["snapshots"]
+            .as_array()
+            .expect("snapshots")
+            .len(),
+        1
+    );
+    assert!(!raw_repository_bytes_contain(&repo, keep_tag.as_bytes()));
+}
+
+#[test]
 fn key_export_recovery_writes_encrypted_package_without_leaking_secrets() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -4615,6 +5048,7 @@ fn s3_data_path_commands_require_s3_environment_before_password() {
                 key_slot_id,
             ],
         ),
+        ("key rekey", vec!["key".to_owned(), "rekey".to_owned()]),
         (
             "key export-recovery",
             vec![

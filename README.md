@@ -114,6 +114,7 @@ ferry policy set --keep-daily 14 --keep-weekly 8
 ferry policy show --json
 ferry forget --policy <POLICY_ID> --dry-run
 ferry prune --dry-run
+FILEFERRY_NEW_PASSWORD="replacement-passphrase" ferry key rekey --jsonl
 ```
 
 S3-compatible repositories use S3-style repository URLs and the documented S3
@@ -148,7 +149,7 @@ format version and KDF parameters, may be plaintext and are documented in
 Current primitives and behavior include Argon2id passphrase derivation, a
 random repository master key, HKDF-derived subkeys, XChaCha20-Poly1305
 authenticated encryption, wrong-key and tamper failure paths, secret-redaction
-tests, and encrypted recovery export.
+tests, encrypted recovery export, and full repository rekey in current main.
 
 This is release-candidate security engineering, not an external audit claim.
 
@@ -162,8 +163,6 @@ This is release-candidate security engineering, not an external audit claim.
 - xattr values, ACL contents, file flags, resource forks, Windows attributes,
   sparse extent maps, symlink metadata, and creation/birth timestamps are not
   restored by this version.
-- Key rotation rotates unlock access by adding/removing key slots. It does not
-  rewrite repository data with a new master key.
 - The published `1.0.0-rc.1` artifacts include recovery export but not
   recovery import or `ferry find`. Current main adds recovery import as a new
   external key slot, `ferry find` for encrypted snapshot-metadata search,
@@ -171,8 +170,12 @@ This is release-candidate security engineering, not an external audit claim.
   repository status plus opt-in encrypted metadata/state verification,
   `ferry policy` for encrypted repository-local retention policy config
   storage, display, explicit deletion, and explicit application by policy id
-  through `ferry forget --policy`, plus `ferry doctor` for safe repository
-  diagnostics; full repository rekey is not implemented.
+  through `ferry forget --policy`, `ferry doctor` for safe repository
+  diagnostics, and `ferry key rekey` for creating a new repository master key
+  and rewriting repository objects.
+- `ferry key rotate` remains unlock rotation by adding/removing key slots.
+  Use `ferry key rekey` when the intended operation is a new repository master
+  key and object rewrite.
 - `ferry find` searches decrypted snapshot metadata after repository unlock. It
   does not search file contents or read chunk data.
 - `ferry diff` compares decrypted snapshot manifests after repository unlock.

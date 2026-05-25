@@ -10,8 +10,8 @@ use fileferry_core::{
     SnapshotSelection, add_repository_key_slot, create_repository, diff_snapshot_entries,
     export_repository_recovery, find_snapshot_entries, import_repository_recovery,
     inspect_repository_format, inspect_repository_object_families, list_snapshot_entries,
-    open_repository, remove_repository_key_slot, rotate_repository_key_slots, select_snapshot,
-    snapshot_summaries,
+    open_repository, rekey_repository, remove_repository_key_slot, rotate_repository_key_slots,
+    select_snapshot, snapshot_summaries,
 };
 use fileferry_crypto::{KdfAlgorithm, KdfParams};
 use fileferry_platform::{EntryKind, MetadataValue, PlatformKind};
@@ -360,6 +360,13 @@ pub enum KeyCommand {
         retire_key_slot_ids: Vec<String>,
     },
 
+    /// Rewrite repository objects under a new repository master key.
+    Rekey {
+        /// File containing the new repository passphrase.
+        #[arg(long = "new-password-file", value_name = "FILE")]
+        new_password_file: Option<PathBuf>,
+    },
+
     /// Export an encrypted recovery package for this repository.
     ExportRecovery {
         /// Destination file for the encrypted recovery export.
@@ -460,6 +467,9 @@ impl Command {
             Self::Key {
                 command: KeyCommand::Rotate { .. },
             } => "key rotate",
+            Self::Key {
+                command: KeyCommand::Rekey { .. },
+            } => "key rekey",
             Self::Key {
                 command: KeyCommand::ExportRecovery { .. },
             } => "key export-recovery",
@@ -656,6 +666,8 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::InvalidUploadState { .. }
         | CoreError::LeaseStateDecode { .. }
         | CoreError::InvalidLeaseState { .. }
+        | CoreError::RekeyStateDecode { .. }
+        | CoreError::InvalidRekeyState { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::ObjectDecode { .. }
         | CoreError::ObjectAuthentication { .. }
@@ -668,6 +680,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         CoreError::Encryption { .. } => 6,
         CoreError::PruneRepositoryStateChanged { .. }
         | CoreError::UploadRepositoryStateChanged { .. }
+        | CoreError::RekeyRepositoryStateChanged { .. }
         | CoreError::RepositoryLeaseExpired { .. } => 8,
         CoreError::KeySlotRemovalWouldLockOut { .. } => 4,
         CoreError::ObjectKey { .. }
@@ -1105,6 +1118,32 @@ struct KeyRotateData {
     removal_markers_created: usize,
     kdf: KdfSummary,
     deleted_key_slot_objects: bool,
+    reencrypted_repository_objects: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct KeyRekeyData {
+    repository_id: String,
+    rekey_id: String,
+    old_key_slots: usize,
+    new_key_slots: usize,
+    snapshots_rewritten: usize,
+    chunks_rewritten: usize,
+    indexes_rewritten: usize,
+    manifests_rewritten: usize,
+    commits_rewritten: usize,
+    forget_markers_rewritten: usize,
+    policies_rewritten: usize,
+    upload_states_rewritten: usize,
+    prune_states_rewritten: usize,
+    leases_removed: usize,
+    old_key_slots_retired: usize,
+    old_key_slot_objects_deleted: usize,
+    old_repository_objects_deleted: usize,
+    recovery_state: fileferry_core::RepositoryRekeyRecoveryState,
+    kdf: KdfSummary,
+    old_unlocks_retained: bool,
+    raw_master_key_exported: bool,
     reencrypted_repository_objects: bool,
 }
 
@@ -1625,6 +1664,12 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
             key_rotate(mode, &config, new_password_file, retire_key_slot_ids)
         }
         Command::Key {
+            command: KeyCommand::Rekey { new_password_file },
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            key_rekey(mode, &config, new_password_file)
+        }
+        Command::Key {
             command: KeyCommand::ExportRecovery { output },
         } => {
             let config = resolve_config(&cli.globals)?;
@@ -1890,9 +1935,12 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::InvalidUploadState { .. } => "repository_upload_state_invalid",
         CoreError::LeaseStateDecode { .. } => "repository_lease_state_decode_failed",
         CoreError::InvalidLeaseState { .. } => "repository_lease_state_invalid",
+        CoreError::RekeyStateDecode { .. } => "repository_rekey_state_decode_failed",
+        CoreError::InvalidRekeyState { .. } => "repository_rekey_state_invalid",
         CoreError::RepositoryLeaseConflict { .. } => "repository_locked",
         CoreError::PruneRepositoryStateChanged { .. } => "repository_prune_state_changed",
         CoreError::UploadRepositoryStateChanged { .. } => "repository_upload_state_changed",
+        CoreError::RekeyRepositoryStateChanged { .. } => "repository_rekey_state_changed",
         CoreError::RepositoryLeaseExpired { .. } => "repository_lease_expired",
         CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
         CoreError::RepositoryNotInitialized => "repository_not_initialized",
@@ -2093,6 +2141,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         | CoreError::InvalidUploadState { key, .. }
         | CoreError::LeaseStateDecode { key, .. }
         | CoreError::InvalidLeaseState { key, .. }
+        | CoreError::RekeyStateDecode { key, .. }
+        | CoreError::InvalidRekeyState { key, .. }
         | CoreError::RepositoryCheckMissingObject { key }
         | CoreError::RepositoryReferencedObjectMissing { key } => Some(key.as_str().to_owned()),
         CoreError::MissingChunkIndexEntry { object_key, .. }
@@ -2567,6 +2617,53 @@ fn key_rotate(
             data.removal_markers_created
         )
     })
+}
+
+fn key_rekey(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    new_password_file: Option<PathBuf>,
+) -> Result<Output, CliError> {
+    let repository = repository_store_for_command(
+        config,
+        "key rekey",
+        &[CliBackendKind::Local, CliBackendKind::S3Compatible],
+    )?;
+    let current_passphrase = repository_passphrase()?;
+    let new_passphrase = new_repository_passphrase(new_password_file.as_deref())?;
+    let runtime = tokio_runtime()?;
+    let result = runtime.block_on(rekey_repository(
+        repository.store.as_ref(),
+        &current_passphrase,
+        &new_passphrase,
+        KdfParams::default(),
+    ))?;
+    let data = KeyRekeyData {
+        repository_id: result.repository_id,
+        rekey_id: result.rekey_id,
+        old_key_slots: result.old_key_slots,
+        new_key_slots: result.new_key_slots,
+        snapshots_rewritten: result.snapshots_rewritten,
+        chunks_rewritten: result.chunks_rewritten,
+        indexes_rewritten: result.indexes_rewritten,
+        manifests_rewritten: result.manifests_rewritten,
+        commits_rewritten: result.commits_rewritten,
+        forget_markers_rewritten: result.forget_markers_rewritten,
+        policies_rewritten: result.policies_rewritten,
+        upload_states_rewritten: result.upload_states_rewritten,
+        prune_states_rewritten: result.prune_states_rewritten,
+        leases_removed: result.leases_removed,
+        old_key_slots_retired: result.old_key_slots_retired,
+        old_key_slot_objects_deleted: result.old_key_slot_objects_deleted,
+        old_repository_objects_deleted: result.old_repository_objects_deleted,
+        recovery_state: result.recovery_state,
+        kdf: KdfSummary::from(result.kdf),
+        old_unlocks_retained: false,
+        raw_master_key_exported: false,
+        reencrypted_repository_objects: true,
+    };
+
+    emit_key_rekey_command(mode, data)
 }
 
 fn key_export_recovery(
@@ -4328,6 +4425,105 @@ where
     })
 }
 
+fn emit_key_rekey_command(mode: OutputMode, data: KeyRekeyData) -> Result<Output, CliError> {
+    let stdout = match mode {
+        OutputMode::Human => format!(
+            "Rekeyed repository {}\nrekey_id={}\nsnapshots_rewritten={} chunks_rewritten={} indexes_rewritten={} manifests_rewritten={} commits_rewritten={} forget_markers_rewritten={}\nold_key_slots_retired={} old_unlocks_retained=false reencrypted_repository_objects=true\n",
+            data.repository_id,
+            data.rekey_id,
+            data.snapshots_rewritten,
+            data.chunks_rewritten,
+            data.indexes_rewritten,
+            data.manifests_rewritten,
+            data.commits_rewritten,
+            data.forget_markers_rewritten,
+            data.old_key_slots_retired
+        ),
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command: "key rekey",
+                status: CommandStatus::Success,
+                data,
+            };
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<KeyRekeyData> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command: "key rekey",
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let phases = [
+                (
+                    "load_bootstrap",
+                    "loaded repository bootstrap and key slots",
+                ),
+                (
+                    "derive_new_master_key",
+                    "created replacement repository master key",
+                ),
+                ("rewrite_objects", "rewrote encrypted repository objects"),
+                (
+                    "switch_bootstrap",
+                    "switched repository bootstrap to the new master key",
+                ),
+                (
+                    "cleanup_old_objects",
+                    "removed old rewritten repository objects",
+                ),
+                ("complete", "completed repository rekey"),
+            ];
+            let mut lines = vec![serde_json::to_string(&started)?];
+            let total = data.snapshots_rewritten
+                + data.chunks_rewritten
+                + data.indexes_rewritten
+                + data.manifests_rewritten
+                + data.commits_rewritten
+                + data.forget_markers_rewritten
+                + data.policies_rewritten
+                + data.upload_states_rewritten
+                + data.prune_states_rewritten;
+            for (phase, message) in phases {
+                let event = CommandEvent {
+                    schema_version: OUTPUT_SCHEMA_VERSION,
+                    event: EventKind::Progress,
+                    command: "key rekey",
+                    status: CommandStatus::Started,
+                    data: Some(ProgressData {
+                        phase,
+                        message,
+                        items_done: Some(total),
+                        items_total: Some(total),
+                        bytes_done: None,
+                        bytes_total: None,
+                        snapshot_id: None,
+                        object_key: None,
+                    }),
+                };
+                lines.push(serde_json::to_string(&event)?);
+            }
+            let completed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandCompleted,
+                command: "key rekey",
+                status: CommandStatus::Success,
+                data: Some(data),
+            };
+            lines.push(serde_json::to_string(&completed)?);
+            lines.join("\n") + "\n"
+        }
+    };
+
+    Ok(Output {
+        stdout,
+        stderr: String::new(),
+        exit_code: 0,
+    })
+}
+
 fn emit_backup_command(mode: OutputMode, data: BackupData) -> Result<Output, CliError> {
     let stdout = match mode {
         OutputMode::Human => format!(
@@ -5129,6 +5325,7 @@ fn repo_object_family_name(family: RepositoryObjectFamily) -> &'static str {
         RepositoryObjectFamily::UploadState => "upload_state",
         RepositoryObjectFamily::LeaseState => "lease_state",
         RepositoryObjectFamily::PruneState => "prune_state",
+        RepositoryObjectFamily::RekeyState => "rekey_state",
         RepositoryObjectFamily::Other => "other",
     }
 }

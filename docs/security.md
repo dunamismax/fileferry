@@ -54,6 +54,12 @@ Rules:
 - Do not add unauthenticated compression, framing, or metadata around
   ciphertext that affects restore behavior.
 
+The repository rekey path uses deterministic per-target-object nonces only for
+rewritten chunk objects so an interrupted rekey can recreate a missing
+rewritten chunk with identical bytes and stable index/manifest identities. The
+nonce is derived from the new master key, repository id, and target object key;
+object-key uniqueness keeps nonce reuse out of the same chunk-data subkey.
+
 ## Key Hierarchy
 
 Each repository has a random 256-bit master key. User passphrases and future
@@ -78,6 +84,7 @@ Initial subkey purposes:
 - `upload-state`
 - `prune-mark`
 - `lease-state`
+- `rekey-state`
 
 The `context` must bind a subkey to the repository identity or a narrower
 operation context. Domain labels must not be reused for incompatible object
@@ -418,6 +425,44 @@ or rewrite chunks, manifests, indexes, snapshot commit markers, forget
 markers, policy/config objects, or the original bootstrap slot, does not
 delete `key-slots/<key-slot-id>` objects, does not remove unselected key
 slots, and does not recover lost keys.
+
+## Repository Rekey
+
+`ferry key rekey` creates a new random repository master key for initialized
+local and S3-compatible repositories. It unlocks the current repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, reads the replacement
+passphrase from `--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`FILEFERRY_NEW_PASSWORD_FILE`, then rewrites repository objects derived from
+the old master key for the new master key.
+
+The rewritten set includes encrypted chunks, indexes, manifests, encrypted
+policy/config objects, encrypted upload state, encrypted prune state, commit
+markers, forget markers, and active key-slot state. The completed repository
+has one embedded bootstrap key slot wrapping the new master key. Existing
+external key slots are retired with removal markers and their old key-slot
+objects are deleted during cleanup, so old passphrases and old external slots
+do not unlock the completed repository unless the operator deliberately reuses
+the same passphrase value for the new bootstrap slot.
+
+Before switching bootstrap, rekey writes one pending state object under
+`objects/rekey/<prefix>/<rekey-id>`. The envelope contains non-sensitive
+format identity, repository id, rekey id, and old/new bootstrap data needed for
+recovery. Its body is encrypted and authenticated twice: once under the old
+master key and once under the new master key, using the `rekey-state` object
+kind and exact object name as AEAD context. When both old and new frames can
+be unlocked during resume, both encrypted state frames must authenticate and
+match. After bootstrap has already switched, the new frame is sufficient to
+finish cleanup.
+
+Interruption behavior is fail-closed and resumable. If interruption happens
+before bootstrap switches, rerunning `key rekey` with the old and new
+passphrases verifies the pending state, recreates missing rewritten objects,
+and switches bootstrap only when the observed commit/forget state still
+matches the authenticated pending state. If interruption happens after
+bootstrap switches, rerunning `key rekey` verifies the pending state with the
+new bootstrap and cleans up old rewritten objects, old external key-slot
+objects, old lease state, and the rekey state object. Malformed, tampered,
+stale, replayed, or mismatched rekey state fails closed.
 
 ## Tamper And Corruption Errors
 

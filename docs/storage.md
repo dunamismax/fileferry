@@ -241,6 +241,11 @@ imported recovery key slot can unlock the repository, and then deletes objects
 under only that unique repository prefix. The recovery export is written to a
 local temporary file; it is not stored in S3.
 
+`ferry key rekey` uses the same local/S3-compatible object-store abstraction
+and command backend selection as other initialized repository commands. The
+current focused rekey coverage is local and fake-store based; the opt-in live
+Backblaze B2 drill has not yet been expanded to run a destructive full rekey.
+
 The S3 prune test runs only when `FILEFERRY_S3_PRUNE_INTEGRATION=1` and the
 same S3 environment variables plus `FILEFERRY_S3_TEST_PREFIX` are set. It
 appends a unique `cli-prune-...` suffix, initializes that repository prefix,

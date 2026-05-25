@@ -5,10 +5,10 @@ compatibility contract is frozen for the object families and fields listed in
 this document as of 2026-05-22. The freeze covers the current bootstrap/key-slot
 and recovery-export objects, committed snapshot data, forget/prune state,
 policy/config objects, upload state, lease state, migration detection gates,
-object names, plaintext fields, encrypted-object framing, and AEAD
-authentication context. Future fields, new object families, and migration
-behavior require an explicit new format version or a documented feature gate
-with fixtures.
+repository rekey state, object names, plaintext fields, encrypted-object
+framing, and AEAD authentication context. Future fields, new object families,
+and migration behavior require an explicit new format version or a documented
+feature gate with fixtures.
 
 ## Format Principles
 
@@ -83,8 +83,16 @@ Current implementation status:
   create a new repository master key, delete key-slot objects, remove the
   original bootstrap key slot, retire unselected slots, or rewrite encrypted
   repository objects.
-- `ferry key add`, `ferry key remove`, and `ferry key rotate` acquire encrypted
-  `locks/<lease-id>` command lease state before key-slot mutation writes.
+- `ferry key rekey` for initialized local and S3-compatible repositories
+  creates a new repository master key, rewrites encrypted repository objects
+  derived from the old master key, stages one encrypted pending state object
+  under `objects/rekey/<prefix>/<rekey-id>`, switches `bootstrap` to one new
+  embedded key slot, retires and deletes old external key-slot objects, and
+  deletes old rewritten repository objects during cleanup. Completed rekey
+  leaves no `objects/rekey/` object behind.
+- `ferry key add`, `ferry key remove`, `ferry key rotate`, and `ferry key
+  rekey` acquire encrypted `locks/<lease-id>` command lease state before
+  key-management mutation writes.
   Active readable leases reject the command as locked, and malformed lease
   state fails closed before key-slot objects or removal markers are written.
 - `ferry key export-recovery --output <FILE>` for initialized local and
@@ -132,6 +140,7 @@ objects/policy/<prefix>/<policy-id>
 objects/upload/<writer-id>/<upload-id>
 objects/prune-plan/<prefix>/<plan-id>
 objects/prune-completion/<prefix>/<plan-id>
+objects/rekey/<prefix>/<rekey-id>
 commits/<commit-id>
 locks/<lease-id>
 forgets/<snapshot-id>
@@ -172,6 +181,7 @@ Format v0 object kinds:
 - `upload-state`
 - `prune-mark`
 - `lease-state`
+- `rekey-state`
 
 This binds ciphertext to its repository-format version, semantic object kind,
 and storage name. Moving a ciphertext to a different name or opening it as a
@@ -181,6 +191,74 @@ different kind must fail authentication.
 repository-local configuration. Current v0 code does not write or read a
 repository-config object family, and no repository-config object layout is part
 of the frozen v0 compatibility surface.
+
+## Repository Rekey State
+
+Rekey state is a transient encrypted mutation record. It exists only while
+`ferry key rekey` is between object rewrite and cleanup.
+
+Object name:
+
+```text
+objects/rekey/<prefix>/<rekey-id>
+```
+
+Plaintext envelope fields:
+
+- `schema_version`, `magic`, `format_version`
+- `repository_id`
+- `rekey_id`
+- `old_bootstrap`
+- `new_bootstrap`
+- `old_state`
+- `new_state`
+
+The plaintext envelope is limited to format identity and old/new bootstrap
+material needed to recover when either bootstrap may be visible. It must not
+contain source paths, tags, manifest bodies, policy bodies, chunk references,
+or object mappings in plaintext.
+
+Encrypted body fields:
+
+- Old and new commit marker object names.
+- Old and new forget marker object names.
+- Old-to-new repository object mappings and object family kinds.
+- Old external key-slot object names.
+- Old lease-state object names selected for cleanup.
+- Rewrite counters for snapshots, chunks, indexes, manifests, commit markers,
+  forget markers, policy configs, upload state, and prune state.
+- Creation time, repository id, rekey id, old visible key-slot count, format
+  identity, and schema version.
+
+The body is encrypted twice: `old_state` under the old master key and
+`new_state` under the new master key. Both frames use the `rekey-state` object
+kind, the exact `objects/rekey/<prefix>/<rekey-id>` object name, and the
+repository id as key context. When both frames can be unlocked during resume,
+they must authenticate and decrypt to the same body. After bootstrap has
+already switched, a single authenticated frame for the supplied passphrase is
+enough to drive cleanup.
+
+Recovery behavior:
+
+- Before bootstrap switch, rekey may recreate missing rewritten objects and
+  staged commit/forget markers only when the observed commit/forget state
+  reproduces the authenticated pending body exactly.
+- After bootstrap switch, rekey may use the pending state to delete old
+  rewritten objects, old external key-slot objects, old lease-state objects,
+  and the rekey state object.
+- Malformed JSON, tampered encrypted frames, invalid object names, multiple
+  pending rekey states, stale commit/forget state, and replayed mismatched
+  state fail closed.
+
+Fixture coverage:
+
+- Rekey state is transient and no completed repository fixture contains it.
+  Focused core and CLI tests cover successful rekey, malformed state,
+  tampered state, partial object rewrite resume, stale/replayed state,
+  missing referenced objects, old unlock rejection, policy/upload/prune state
+  rewrite, and cleanup. A durable golden rekey-state fixture should be added if
+  pending rekey state is promoted from transient recovery state to a long-term
+  compatibility artifact.
 
 ## Snapshot Manifest
 
@@ -398,15 +476,17 @@ Current implementation status:
 - `ferry backup`, non-dry-run `ferry forget`, non-dry-run `ferry prune`, and
   key-management mutation paths now use this lease-state format for
   command-level coordination. Before writing snapshot objects, forget markers,
-  marking/sweeping a prune plan, writing key-slot objects, or writing key-slot
-  removal markers, the command lists `locks/`, authenticates and validates
-  readable lease state, rejects another active lease, ignores expired readable
-  leases, writes its own encrypted lease, and rechecks active leases after the
-  write. When the mutation path returns, the command best-effort deletes its own
-  lease; if release is interrupted, timestamp expiry is the fallback.
+  marking/sweeping a prune plan, writing key-slot objects, writing key-slot
+  removal markers, or switching bootstrap for rekey, the command lists
+  `locks/`, authenticates and validates readable lease state, rejects another
+  active lease, ignores expired readable leases, writes its own encrypted
+  lease, and rechecks active leases after the write. When the mutation path
+  returns, the command best-effort deletes or rekey-cleans its own lease; if
+  release is interrupted, timestamp expiry is the fallback.
 - Lease enforcement is currently proven for `ferry backup`, non-dry-run forget,
-  non-dry-run prune, `ferry key add`, `ferry key remove`, and `ferry key
-  rotate`. Dry-run forget and dry-run prune write no lease state. Command-level
+  non-dry-run prune, `ferry key add`, `ferry key remove`, `ferry key rotate`,
+  and `ferry key rekey`. Dry-run forget and dry-run prune write no lease
+  state. Command-level
   leases for repository maintenance, stale-lease breaking, and lease repair are
   not implemented yet.
 
@@ -709,14 +789,18 @@ an active lease before writing markers, ignores an expired readable lease,
 best-effort releases its own lease after successful marker writes, rejects
 malformed lease state before writing markers, and keeps dry-run forget
 lease-free. Focused key-management tests now prove `key add`, `key remove`,
-and `key rotate` reject active or malformed lease state before key-slot object
-or key-slot removal-marker writes, that the shared key-management lease path
-ignores expired readable leases, and that successful key-management mutations
-release their own leases. Focused backup tests now prove `ferry backup` uses
-the shared lease path, rejects an active readable lease before writing snapshot
-objects, ignores an expired readable lease, best-effort releases its own lease
-after a successful snapshot write, and rejects malformed lease state before
-writing snapshot objects.
+`key rotate`, and `key rekey` reject active or malformed lease state before
+key-management writes, that the shared key-management lease path ignores
+expired readable leases, and that successful key-management mutations release
+or clean up their own leases. Focused rekey tests prove successful full-object
+rewrite, old unlock rejection, malformed and tampered rekey state failure,
+partial object rewrite resume, stale/replayed state failure, missing referenced
+object failure before bootstrap switch, and policy/upload/prune state rewrite.
+Focused backup tests now prove `ferry backup` uses the shared lease path,
+rejects an active readable lease before writing snapshot objects, ignores an
+expired readable lease, best-effort releases its own lease after a successful
+snapshot write, and rejects malformed lease state before writing snapshot
+objects.
 
 Current compatibility-contract strictness tests prove that fixture-covered
 current v0 objects reject unknown fields in bootstrap bytes, external key-slot

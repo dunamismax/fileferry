@@ -157,9 +157,10 @@ Evidence added or retained:
   permanent immutable-write conflicts, timeouts, and concurrency limiting.
 - `fileferry-cli` tests: missing referenced manifests/chunks, tampered
   chunks, malformed commits, corrupted metadata, stale local temp/uncommitted
-  partial objects, local prune JSON/JSONL output, malformed prune state exit
-  mapping, JSON permission failure envelopes, S3 data-path missing-environment
-  failure ordering, a gated live S3 data-path drill for init, backup,
+  partial objects, local prune JSON/JSONL output, full local repository rekey
+  JSON/JSONL behavior and failure mapping, malformed prune state exit mapping,
+  JSON permission failure envelopes, S3 data-path missing-environment failure
+  ordering, a gated live S3 data-path drill for init, backup,
   snapshots, ls, restore, check, and missing referenced manifests, and a
   gated live S3 retention/key-management drill for forget, key add, key
   remove, key rotate, key export-recovery, and key import-recovery, plus a

@@ -307,6 +307,30 @@ key rotate
   data.deleted_key_slot_objects: boolean
   data.reencrypted_repository_objects: boolean
 
+key rekey
+  data.repository_id: string
+  data.rekey_id: string
+  data.old_key_slots: integer
+  data.new_key_slots: integer
+  data.snapshots_rewritten: integer
+  data.chunks_rewritten: integer
+  data.indexes_rewritten: integer
+  data.manifests_rewritten: integer
+  data.commits_rewritten: integer
+  data.forget_markers_rewritten: integer
+  data.policies_rewritten: integer
+  data.upload_states_rewritten: integer
+  data.prune_states_rewritten: integer
+  data.leases_removed: integer
+  data.old_key_slots_retired: integer
+  data.old_key_slot_objects_deleted: integer
+  data.old_repository_objects_deleted: integer
+  data.recovery_state: "started" | "resumed"
+  data.kdf: KdfSummary
+  data.old_unlocks_retained: boolean
+  data.raw_master_key_exported: boolean
+  data.reencrypted_repository_objects: boolean
+
 key export-recovery
   data.repository_id: string
   data.export_id: string
@@ -407,7 +431,8 @@ RepositoryStorageStatus
 RepositoryObjectFamilyStatus
   family: "bootstrap" | "key_slot" | "key_slot_removal" | "commit" |
           "forget_marker" | "manifest" | "index" | "chunk" | "policy" |
-          "upload_state" | "lease_state" | "prune_state" | "other"
+          "upload_state" | "lease_state" | "prune_state" | "rekey_state" |
+          "other"
   objects: integer
   status: "empty" | "present" | "verified"
 
@@ -572,6 +597,8 @@ prune: plan, mark, sweep, verify_reachability, complete
 key add: load_bootstrap, derive_key, write_key_slot, complete
 key remove: load_bootstrap, verify_remaining_unlock, remove_key_slot, complete
 key rotate: load_bootstrap, derive_key, write_key_slot, retire_old_slots, complete
+key rekey: load_bootstrap, derive_new_master_key, rewrite_objects,
+           switch_bootstrap, cleanup_old_objects, complete
 key export-recovery: load_bootstrap, create_export, complete
 key import-recovery: load_bootstrap, read_export, write_key_slot, complete
 ```
@@ -741,6 +768,18 @@ key add command_started
 key add command_completed
   status: "success"
   data: KeyAdd data schema above
+
+key rekey command_started
+  status: "started"
+  data: null
+
+key rekey progress
+  status: "started"
+  data: ProgressData with the key rekey phase names above
+
+key rekey command_completed
+  status: "success"
+  data: KeyRekey data schema above
 
 version command_started
   status: "started"
@@ -1094,6 +1133,26 @@ includes the repository id, added key-slot id, removed key-slot ids, visible
 key-slot count, removal marker objects, removal marker creation count, KDF
 parameters, `deleted_key_slot_objects: false`, and
 `reencrypted_repository_objects: false`.
+
+`ferry key rekey` opens an initialized local or S3-compatible repository with
+the current passphrase from `FILEFERRY_PASSWORD` or
+`FILEFERRY_PASSWORD_FILE`, reads the replacement passphrase from
+`--new-password-file`, `FILEFERRY_NEW_PASSWORD`, or
+`FILEFERRY_NEW_PASSWORD_FILE`, creates a new repository master key, rewrites
+encrypted chunks, indexes, manifests, policy configs, upload state, prune
+state, and snapshot visibility markers for that new master key, then switches
+`bootstrap` to a single new embedded key slot. Existing external key slots are
+retired with removal markers and their old `key-slots/<key-slot-id>` objects
+are deleted during cleanup. Old passphrases and old external key slots do not
+unlock the completed repository unless the operator deliberately reuses the
+same passphrase value for the new bootstrap slot. A pending
+`objects/rekey/<prefix>/<rekey-id>` state is encrypted for both old and new
+masters so the command can resume after interruption; cleanup after the
+bootstrap switch can be resumed with the new passphrase. Malformed, tampered,
+stale, or replayed state fails closed. Active readable leases reject the
+command before object rewrites. Output includes rewrite counts,
+`old_unlocks_retained: false`, `raw_master_key_exported: false`, and
+`reencrypted_repository_objects: true`.
 
 `ferry key export-recovery --output <FILE>` opens an initialized local or
 S3-compatible repository with the current passphrase from

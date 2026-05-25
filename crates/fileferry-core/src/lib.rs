@@ -8,8 +8,8 @@ use fastcdc::v2020::{
 use fileferry_crypto::{
     AeadAlgorithm, CryptoError, EncryptedObject, KdfAlgorithm, KdfParams, KeyPurpose, KeySlot,
     MasterKey, ObjectContext, ObjectKind, RecoveryKeyExport, create_key_slot, create_master_key,
-    create_recovery_key_export, decrypt_object, encrypt_object, keyed_content_id, random_bytes,
-    unlock_master_key,
+    create_recovery_key_export, decrypt_object, encrypt_object, encrypt_object_with_nonce,
+    keyed_content_id, random_bytes, unlock_master_key,
 };
 use fileferry_platform::{
     CaseBehavior, EntryKind, EntryMetadata, MetadataExtensions, MetadataFieldSummary,
@@ -356,6 +356,22 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    #[error("rekey state {key} could not be decoded")]
+    RekeyStateDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("rekey state {key} is invalid: {reason}")]
+    InvalidRekeyState {
+        key: ObjectKey,
+        reason: &'static str,
+    },
+
+    #[error("repository state changed after rekey state {rekey_id} was planned")]
+    RekeyRepositoryStateChanged { rekey_id: String },
+
     #[error("repository lease {lease_id} is expired")]
     RepositoryLeaseExpired { lease_id: String },
 
@@ -690,6 +706,7 @@ const UPLOAD_STATE_PREFIX: &str = "objects/upload";
 const PRUNE_PLAN_PREFIX: &str = "objects/prune-plan";
 const PRUNE_COMPLETION_PREFIX: &str = "objects/prune-completion";
 const LEASE_STATE_PREFIX: &str = "locks";
+const REKEY_STATE_PREFIX: &str = "objects/rekey";
 pub const RECOVERY_EXPORT_WARNING: &str = "Recovery exports are encrypted with the current repository passphrase. Store the export separately from the repository and protect it like a backup key.";
 const LEGACY_RECOVERY_EXPORT_WARNING: &str = "Recovery exports are encrypted with the current repository passphrase. Store the export separately from the repository and protect it like a backup key. Recovery import is not implemented yet.";
 
@@ -733,6 +750,7 @@ pub enum RepositoryObjectFamily {
     UploadState,
     LeaseState,
     PruneState,
+    RekeyState,
     Other,
 }
 
@@ -784,6 +802,36 @@ pub struct KeyRotateResult {
     pub key_slots: usize,
     pub removal_marker_objects: Vec<String>,
     pub removal_markers_created: usize,
+    pub kdf: KdfParams,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryRekeyRecoveryState {
+    Started,
+    Resumed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct KeyRekeyResult {
+    pub repository_id: String,
+    pub rekey_id: String,
+    pub old_key_slots: usize,
+    pub new_key_slots: usize,
+    pub snapshots_rewritten: usize,
+    pub chunks_rewritten: usize,
+    pub indexes_rewritten: usize,
+    pub manifests_rewritten: usize,
+    pub commits_rewritten: usize,
+    pub forget_markers_rewritten: usize,
+    pub policies_rewritten: usize,
+    pub upload_states_rewritten: usize,
+    pub prune_states_rewritten: usize,
+    pub leases_removed: usize,
+    pub old_key_slots_retired: usize,
+    pub old_key_slot_objects_deleted: usize,
+    pub old_repository_objects_deleted: usize,
+    pub recovery_state: RepositoryRekeyRecoveryState,
     pub kdf: KdfParams,
 }
 
@@ -1056,6 +1104,7 @@ pub enum RepositoryLeaseCommandKind {
     Forget,
     Prune,
     KeyManagement,
+    Rekey,
     RepositoryMaintenance,
 }
 
@@ -1091,6 +1140,7 @@ pub enum PruneObjectKind {
     UploadState,
     LeaseState,
     PruneState,
+    RekeyState,
     Other,
 }
 
@@ -1542,6 +1592,1664 @@ pub async fn import_repository_recovery(
     result
 }
 
+pub async fn rekey_repository(
+    store: &dyn ObjectStore,
+    current_passphrase: &SecretString,
+    new_passphrase: &SecretString,
+    kdf: KdfParams,
+) -> CoreResult<KeyRekeyResult> {
+    let pending = load_rekey_state_envelopes(store).await?;
+    if !pending.is_empty() {
+        return resume_repository_rekey(store, current_passphrase, new_passphrase, kdf, pending)
+            .await;
+    }
+
+    let opened = open_repository(store, current_passphrase).await?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
+    let lease = pipeline
+        .acquire_repository_mutation_lease(
+            store,
+            &opened.master_key,
+            RepositoryLeaseCommandKind::Rekey,
+        )
+        .await?;
+    let result = execute_repository_rekey(
+        store,
+        &pipeline,
+        opened,
+        current_passphrase,
+        new_passphrase,
+        kdf,
+        Some(lease.lease_object.clone()),
+        RepositoryRekeyRecoveryState::Started,
+        None,
+    )
+    .await;
+    pipeline
+        .release_repository_mutation_lease(store, &lease.lease_object)
+        .await;
+    result
+}
+
+async fn resume_repository_rekey(
+    store: &dyn ObjectStore,
+    current_passphrase: &SecretString,
+    new_passphrase: &SecretString,
+    kdf: KdfParams,
+    envelopes: Vec<(ObjectKey, StoredRekeyStateEnvelope)>,
+) -> CoreResult<KeyRekeyResult> {
+    if envelopes.len() > 1 {
+        return Err(CoreError::InvalidRekeyState {
+            key: envelopes[1].0.clone(),
+            reason: "multiple pending rekey states are present",
+        });
+    }
+
+    let (state_key, envelope) = envelopes.into_iter().next().expect("checked non-empty");
+    envelope.validate(&state_key)?;
+    let old_bootstrap_bytes = serde_json::to_vec_pretty(&envelope.old_bootstrap)
+        .map_err(|source| CoreError::Serialization { source })?;
+    let new_bootstrap_bytes = serde_json::to_vec_pretty(&envelope.new_bootstrap)
+        .map_err(|source| CoreError::Serialization { source })?;
+    let bootstrap_phase =
+        repository_bootstrap_phase(store, &old_bootstrap_bytes, &new_bootstrap_bytes).await?;
+    let passphrases = [current_passphrase, new_passphrase];
+    let old_master = unlock_bootstrap_with_any_passphrase(&envelope.old_bootstrap, &passphrases)?;
+    let new_master = unlock_bootstrap_with_any_passphrase(&envelope.new_bootstrap, &passphrases)?;
+    let old_body = old_master
+        .as_ref()
+        .map(|master_key| {
+            decrypt_rekey_state_body(
+                &state_key,
+                &envelope.old_state,
+                master_key,
+                &envelope.repository_id,
+            )
+        })
+        .transpose()?;
+    let new_body = new_master
+        .as_ref()
+        .map(|master_key| {
+            decrypt_rekey_state_body(
+                &state_key,
+                &envelope.new_state,
+                master_key,
+                &envelope.repository_id,
+            )
+        })
+        .transpose()?;
+    let body = match (old_body, new_body) {
+        (Some(old), Some(new)) if old == new => old,
+        (Some(old), None) => old,
+        (None, Some(new)) => new,
+        (Some(_), Some(_)) => {
+            return Err(CoreError::InvalidRekeyState {
+                key: state_key,
+                reason: "old and new rekey state bodies do not match",
+            });
+        }
+        (None, None) => {
+            return Err(CoreError::RepositoryUnlock {
+                source: CryptoError::Decryption,
+            });
+        }
+    };
+    body.validate(&state_key, &envelope)?;
+    if bootstrap_phase == RepositoryRekeyBootstrapPhase::New {
+        ensure_rekey_repository_state_matches(
+            store,
+            &body.old_commit_objects,
+            &body.old_forget_marker_objects,
+            &body.new_commit_objects,
+            &body.new_forget_marker_objects,
+            &body.rekey_id,
+        )
+        .await?;
+        let deleted = cleanup_rekeyed_old_objects(store, &body, &state_key).await?;
+        return Ok(KeyRekeyResult {
+            repository_id: body.repository_id,
+            rekey_id: body.rekey_id,
+            old_key_slots: body.old_key_slots,
+            new_key_slots: 1,
+            snapshots_rewritten: body.snapshots_rewritten,
+            chunks_rewritten: body.chunks_rewritten,
+            indexes_rewritten: body.indexes_rewritten,
+            manifests_rewritten: body.manifests_rewritten,
+            commits_rewritten: body.commits_rewritten,
+            forget_markers_rewritten: body.forget_markers_rewritten,
+            policies_rewritten: body.policies_rewritten,
+            upload_states_rewritten: body.upload_states_rewritten,
+            prune_states_rewritten: body.prune_states_rewritten,
+            leases_removed: deleted.leases_removed,
+            old_key_slots_retired: body.old_external_key_slot_objects.len(),
+            old_key_slot_objects_deleted: deleted.old_key_slot_objects_deleted,
+            old_repository_objects_deleted: deleted.old_repository_objects_deleted,
+            recovery_state: RepositoryRekeyRecoveryState::Resumed,
+            kdf,
+        });
+    }
+    let old_master = old_master.ok_or(CoreError::RepositoryUnlock {
+        source: CryptoError::Decryption,
+    })?;
+    let new_master = new_master.ok_or(CoreError::RepositoryUnlock {
+        source: CryptoError::Decryption,
+    })?;
+    let opened = OpenedRepository {
+        repository_id: envelope.old_bootstrap.repository_id.clone(),
+        master_key: old_master,
+        key_slots: body.old_key_slots,
+        unlocked_key_slot_id: None,
+    };
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
+
+    execute_repository_rekey(
+        store,
+        &pipeline,
+        opened,
+        current_passphrase,
+        new_passphrase,
+        kdf,
+        None,
+        RepositoryRekeyRecoveryState::Resumed,
+        Some((state_key, envelope, body, new_master)),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_repository_rekey(
+    store: &dyn ObjectStore,
+    pipeline: &BackupPipeline,
+    opened: OpenedRepository,
+    _current_passphrase: &SecretString,
+    new_passphrase: &SecretString,
+    kdf: KdfParams,
+    lease_object: Option<ObjectKey>,
+    recovery_state: RepositoryRekeyRecoveryState,
+    resume: Option<(
+        ObjectKey,
+        StoredRekeyStateEnvelope,
+        StoredRekeyStateBody,
+        MasterKey,
+    )>,
+) -> CoreResult<KeyRekeyResult> {
+    let repository_id = opened.repository_id.clone();
+    let resume_old_bootstrap = resume
+        .as_ref()
+        .map(|(_, envelope, _, _)| envelope.old_bootstrap.clone());
+    let old_bootstrap = load_repository_bootstrap(store).await.or_else(|error| {
+        if matches!(error, CoreError::RepositoryNotInitialized)
+            && let Some(old_bootstrap) = &resume_old_bootstrap
+        {
+            return Ok(old_bootstrap.clone());
+        }
+        Err(error)
+    })?;
+    let old_bootstrap_bytes = serde_json::to_vec_pretty(&old_bootstrap)
+        .map_err(|source| CoreError::Serialization { source })?;
+    let (rekey_state_key, mut rekey_state, new_master, new_bootstrap) =
+        if let Some((state_key, envelope, body, resumed_new_master)) = resume {
+            (state_key, body, resumed_new_master, envelope.new_bootstrap)
+        } else {
+            let new_master = MasterKey::generate();
+            let new_slot = create_key_slot(&new_master, new_passphrase, kdf)
+                .map_err(|source| CoreError::Encryption { source })?;
+            let new_bootstrap = RepositoryBootstrap {
+                magic: REPOSITORY_MAGIC.to_owned(),
+                format_version: REPOSITORY_FORMAT_VERSION_V0,
+                repository_id: repository_id.clone(),
+                key_slots: vec![StoredKeySlot::from_key_slot(&new_slot)],
+                features: Vec::new(),
+            };
+            let rekey_id = hex_bytes(&random_bytes::<KEY_SLOT_ID_BYTES>());
+            let state_key = rekey_state_object_key(&rekey_id)?;
+            let body = StoredRekeyStateBody {
+                schema_version: 0,
+                magic: REPOSITORY_MAGIC.to_owned(),
+                format_version: REPOSITORY_FORMAT_VERSION_V0,
+                repository_id: repository_id.clone(),
+                rekey_id,
+                created_at_unix_seconds: current_unix_seconds()?,
+                old_key_slots: opened.key_slots,
+                old_commit_objects: Vec::new(),
+                old_forget_marker_objects: Vec::new(),
+                new_commit_objects: Vec::new(),
+                new_forget_marker_objects: Vec::new(),
+                object_mappings: Vec::new(),
+                old_external_key_slot_objects: Vec::new(),
+                old_lease_objects: lease_object
+                    .iter()
+                    .map(|key| key.as_str().to_owned())
+                    .collect(),
+                snapshots_rewritten: 0,
+                chunks_rewritten: 0,
+                indexes_rewritten: 0,
+                manifests_rewritten: 0,
+                commits_rewritten: 0,
+                forget_markers_rewritten: 0,
+                policies_rewritten: 0,
+                upload_states_rewritten: 0,
+                prune_states_rewritten: 0,
+            };
+            (state_key, body, new_master, new_bootstrap)
+        };
+    let new_bootstrap_bytes = serde_json::to_vec_pretty(&new_bootstrap)
+        .map_err(|source| CoreError::Serialization { source })?;
+
+    if recovery_state == RepositoryRekeyRecoveryState::Resumed {
+        match repository_bootstrap_phase(store, &old_bootstrap_bytes, &new_bootstrap_bytes).await? {
+            RepositoryRekeyBootstrapPhase::New => {
+                ensure_rekey_repository_state_matches(
+                    store,
+                    &rekey_state.old_commit_objects,
+                    &rekey_state.old_forget_marker_objects,
+                    &rekey_state.new_commit_objects,
+                    &rekey_state.new_forget_marker_objects,
+                    &rekey_state.rekey_id,
+                )
+                .await?;
+                let deleted =
+                    cleanup_rekeyed_old_objects(store, &rekey_state, &rekey_state_key).await?;
+                return Ok(KeyRekeyResult {
+                    repository_id,
+                    rekey_id: rekey_state.rekey_id,
+                    old_key_slots: rekey_state.old_key_slots,
+                    new_key_slots: 1,
+                    snapshots_rewritten: rekey_state.snapshots_rewritten,
+                    chunks_rewritten: rekey_state.chunks_rewritten,
+                    indexes_rewritten: rekey_state.indexes_rewritten,
+                    manifests_rewritten: rekey_state.manifests_rewritten,
+                    commits_rewritten: rekey_state.commits_rewritten,
+                    forget_markers_rewritten: rekey_state.forget_markers_rewritten,
+                    policies_rewritten: rekey_state.policies_rewritten,
+                    upload_states_rewritten: rekey_state.upload_states_rewritten,
+                    prune_states_rewritten: rekey_state.prune_states_rewritten,
+                    leases_removed: deleted.leases_removed,
+                    old_key_slots_retired: rekey_state.old_external_key_slot_objects.len(),
+                    old_key_slot_objects_deleted: deleted.old_key_slot_objects_deleted,
+                    old_repository_objects_deleted: deleted.old_repository_objects_deleted,
+                    recovery_state,
+                    kdf,
+                });
+            }
+            RepositoryRekeyBootstrapPhase::Old | RepositoryRekeyBootstrapPhase::Missing => {
+                delete_rekey_new_visibility_markers(store, &rekey_state).await?;
+            }
+        }
+    }
+
+    let expected_rekey_state =
+        (recovery_state == RepositoryRekeyRecoveryState::Resumed).then(|| rekey_state.clone());
+    let rewrite = rewrite_repository_objects_for_rekey(
+        store,
+        pipeline,
+        &opened.master_key,
+        &new_master,
+        lease_object.as_ref(),
+    )
+    .await?;
+    let pending_plain_writes = rewrite.pending_plain_writes.clone();
+    merge_rekey_rewrite(&mut rekey_state, rewrite);
+    if let Some(expected) = expected_rekey_state
+        && rekey_state != expected
+    {
+        return Err(CoreError::RekeyRepositoryStateChanged {
+            rekey_id: expected.rekey_id,
+        });
+    }
+    let rekey_envelope = StoredRekeyStateEnvelope::new(
+        &rekey_state_key,
+        &old_bootstrap,
+        &new_bootstrap,
+        &opened.master_key,
+        &new_master,
+        &rekey_state,
+    )?;
+    if !store
+        .exists(&rekey_state_key)
+        .await
+        .map_err(|source| CoreError::Storage { source })?
+    {
+        write_rekey_state_envelope(store, &rekey_state_key, &rekey_envelope).await?;
+    }
+    rekey_state.validate(&rekey_state_key, &rekey_envelope)?;
+    for write in pending_plain_writes {
+        write_or_verify_plain_bytes(store, &write.object_key, &write.bytes).await?;
+    }
+    ensure_rekey_repository_state_matches(
+        store,
+        &rekey_state.old_commit_objects,
+        &rekey_state.old_forget_marker_objects,
+        &rekey_state.new_commit_objects,
+        &rekey_state.new_forget_marker_objects,
+        &rekey_state.rekey_id,
+    )
+    .await?;
+    retire_old_external_key_slots(store, &opened, &rekey_state.old_external_key_slot_objects)
+        .await?;
+    switch_repository_bootstrap(store, &old_bootstrap_bytes, &new_bootstrap_bytes).await?;
+    let deleted = cleanup_rekeyed_old_objects(store, &rekey_state, &rekey_state_key).await?;
+
+    Ok(KeyRekeyResult {
+        repository_id,
+        rekey_id: rekey_state.rekey_id,
+        old_key_slots: rekey_state.old_key_slots,
+        new_key_slots: 1,
+        snapshots_rewritten: rekey_state.snapshots_rewritten,
+        chunks_rewritten: rekey_state.chunks_rewritten,
+        indexes_rewritten: rekey_state.indexes_rewritten,
+        manifests_rewritten: rekey_state.manifests_rewritten,
+        commits_rewritten: rekey_state.commits_rewritten,
+        forget_markers_rewritten: rekey_state.forget_markers_rewritten,
+        policies_rewritten: rekey_state.policies_rewritten,
+        upload_states_rewritten: rekey_state.upload_states_rewritten,
+        prune_states_rewritten: rekey_state.prune_states_rewritten,
+        leases_removed: deleted.leases_removed,
+        old_key_slots_retired: rekey_state.old_external_key_slot_objects.len(),
+        old_key_slot_objects_deleted: deleted.old_key_slot_objects_deleted,
+        old_repository_objects_deleted: deleted.old_repository_objects_deleted,
+        recovery_state,
+        kdf,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct RekeyRewriteResult {
+    old_commit_objects: Vec<String>,
+    old_forget_marker_objects: Vec<String>,
+    new_commit_objects: Vec<String>,
+    new_forget_marker_objects: Vec<String>,
+    object_mappings: Vec<StoredRekeyObjectMapping>,
+    pending_plain_writes: Vec<RekeyPlainWrite>,
+    old_external_key_slot_objects: Vec<String>,
+    old_lease_objects: Vec<String>,
+    snapshots_rewritten: usize,
+    chunks_rewritten: usize,
+    indexes_rewritten: usize,
+    manifests_rewritten: usize,
+    commits_rewritten: usize,
+    forget_markers_rewritten: usize,
+    policies_rewritten: usize,
+    upload_states_rewritten: usize,
+    prune_states_rewritten: usize,
+}
+
+#[derive(Clone, Debug)]
+struct RekeyPlainWrite {
+    object_key: ObjectKey,
+    bytes: Vec<u8>,
+}
+
+#[derive(Default)]
+struct RekeyCleanupResult {
+    leases_removed: usize,
+    old_key_slot_objects_deleted: usize,
+    old_repository_objects_deleted: usize,
+}
+
+#[derive(Clone, Debug)]
+struct RekeyChunkRewrite {
+    chunk_id: String,
+    object_key: ObjectKey,
+    plaintext_length: u64,
+    compressed_length: u64,
+    stored_length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRekeyStateEnvelope {
+    schema_version: u16,
+    magic: String,
+    format_version: u16,
+    repository_id: String,
+    rekey_id: String,
+    old_bootstrap: RepositoryBootstrap,
+    new_bootstrap: RepositoryBootstrap,
+    old_state: StoredEncryptedObject,
+    new_state: StoredEncryptedObject,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRekeyStateBody {
+    schema_version: u16,
+    magic: String,
+    format_version: u16,
+    repository_id: String,
+    rekey_id: String,
+    created_at_unix_seconds: u64,
+    old_key_slots: usize,
+    old_commit_objects: Vec<String>,
+    old_forget_marker_objects: Vec<String>,
+    new_commit_objects: Vec<String>,
+    new_forget_marker_objects: Vec<String>,
+    object_mappings: Vec<StoredRekeyObjectMapping>,
+    old_external_key_slot_objects: Vec<String>,
+    old_lease_objects: Vec<String>,
+    snapshots_rewritten: usize,
+    chunks_rewritten: usize,
+    indexes_rewritten: usize,
+    manifests_rewritten: usize,
+    commits_rewritten: usize,
+    forget_markers_rewritten: usize,
+    policies_rewritten: usize,
+    upload_states_rewritten: usize,
+    prune_states_rewritten: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRekeyObjectMapping {
+    old_object: String,
+    new_object: String,
+    kind: PruneObjectKind,
+}
+
+impl StoredRekeyStateEnvelope {
+    fn new(
+        state_key: &ObjectKey,
+        old_bootstrap: &RepositoryBootstrap,
+        new_bootstrap: &RepositoryBootstrap,
+        old_master_key: &MasterKey,
+        new_master_key: &MasterKey,
+        body: &StoredRekeyStateBody,
+    ) -> CoreResult<Self> {
+        let plaintext =
+            serde_json::to_vec(body).map_err(|source| CoreError::Serialization { source })?;
+        let old_state =
+            encrypt_rekey_state_frame(old_master_key, &body.repository_id, state_key, &plaintext)?;
+        let new_state =
+            encrypt_rekey_state_frame(new_master_key, &body.repository_id, state_key, &plaintext)?;
+        Ok(Self {
+            schema_version: 0,
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: body.repository_id.clone(),
+            rekey_id: body.rekey_id.clone(),
+            old_bootstrap: old_bootstrap.clone(),
+            new_bootstrap: new_bootstrap.clone(),
+            old_state,
+            new_state,
+        })
+    }
+
+    fn validate(&self, key: &ObjectKey) -> CoreResult<()> {
+        if self.schema_version != 0 {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "unsupported rekey state schema version",
+            });
+        }
+        if self.magic != REPOSITORY_MAGIC {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "repository magic is not recognized",
+            });
+        }
+        if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+            return Err(CoreError::UnsupportedRepositoryFormat {
+                format_version: self.format_version,
+            });
+        }
+        if !repository_id_is_valid(&self.repository_id) || !rekey_state_id_is_valid(&self.rekey_id)
+        {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "rekey state id is invalid",
+            });
+        }
+        if rekey_state_object_key(&self.rekey_id)? != *key {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "rekey state object key does not match rekey id",
+            });
+        }
+        self.old_bootstrap.validate()?;
+        self.new_bootstrap.validate()?;
+        if self.old_bootstrap.repository_id != self.repository_id
+            || self.new_bootstrap.repository_id != self.repository_id
+        {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "rekey state bootstrap repository ids do not match",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl StoredRekeyStateBody {
+    fn validate(&self, key: &ObjectKey, envelope: &StoredRekeyStateEnvelope) -> CoreResult<()> {
+        if self.schema_version != 0 {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "unsupported rekey state body schema version",
+            });
+        }
+        if self.magic != REPOSITORY_MAGIC {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "rekey state body magic is not recognized",
+            });
+        }
+        if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
+            return Err(CoreError::UnsupportedRepositoryFormat {
+                format_version: self.format_version,
+            });
+        }
+        if self.repository_id != envelope.repository_id || self.rekey_id != envelope.rekey_id {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "rekey state body identity does not match envelope",
+            });
+        }
+        for object in self
+            .old_commit_objects
+            .iter()
+            .chain(self.old_forget_marker_objects.iter())
+            .chain(self.new_commit_objects.iter())
+            .chain(self.new_forget_marker_objects.iter())
+            .chain(self.old_external_key_slot_objects.iter())
+            .chain(self.old_lease_objects.iter())
+        {
+            ObjectKey::new(object.clone()).map_err(|_| CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "rekey state object key is invalid",
+            })?;
+        }
+        for mapping in &self.object_mappings {
+            ObjectKey::new(mapping.old_object.clone()).map_err(|_| {
+                CoreError::InvalidRekeyState {
+                    key: key.clone(),
+                    reason: "rekey state old object key is invalid",
+                }
+            })?;
+            ObjectKey::new(mapping.new_object.clone()).map_err(|_| {
+                CoreError::InvalidRekeyState {
+                    key: key.clone(),
+                    reason: "rekey state new object key is invalid",
+                }
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn merge_rekey_rewrite(state: &mut StoredRekeyStateBody, rewrite: RekeyRewriteResult) {
+    state.old_commit_objects = rewrite.old_commit_objects;
+    state.old_forget_marker_objects = rewrite.old_forget_marker_objects;
+    state.new_commit_objects = rewrite.new_commit_objects;
+    state.new_forget_marker_objects = rewrite.new_forget_marker_objects;
+    state.object_mappings = rewrite.object_mappings;
+    state.old_external_key_slot_objects = rewrite.old_external_key_slot_objects;
+    state.old_lease_objects = rewrite.old_lease_objects;
+    state.snapshots_rewritten = rewrite.snapshots_rewritten;
+    state.chunks_rewritten = rewrite.chunks_rewritten;
+    state.indexes_rewritten = rewrite.indexes_rewritten;
+    state.manifests_rewritten = rewrite.manifests_rewritten;
+    state.commits_rewritten = rewrite.commits_rewritten;
+    state.forget_markers_rewritten = rewrite.forget_markers_rewritten;
+    state.policies_rewritten = rewrite.policies_rewritten;
+    state.upload_states_rewritten = rewrite.upload_states_rewritten;
+    state.prune_states_rewritten = rewrite.prune_states_rewritten;
+}
+
+async fn rewrite_repository_objects_for_rekey(
+    store: &dyn ObjectStore,
+    pipeline: &BackupPipeline,
+    old_master_key: &MasterKey,
+    new_master_key: &MasterKey,
+    lease_object: Option<&ObjectKey>,
+) -> CoreResult<RekeyRewriteResult> {
+    let repository_id = &pipeline.config.repository_id;
+    let repository_context = repository_id.as_bytes();
+    let old_chunk_key = old_master_key
+        .derive_subkey(KeyPurpose::ChunkData, repository_context)
+        .map_err(|source| CoreError::Encryption { source })?;
+    let new_chunk_key = new_master_key
+        .derive_subkey(KeyPurpose::ChunkData, repository_context)
+        .map_err(|source| CoreError::Encryption { source })?;
+    let new_index_key = new_master_key
+        .derive_subkey(KeyPurpose::Index, repository_context)
+        .map_err(|source| CoreError::Encryption { source })?;
+    let new_manifest_key = new_master_key
+        .derive_subkey(KeyPurpose::SnapshotMetadata, repository_context)
+        .map_err(|source| CoreError::Encryption { source })?;
+
+    let old_state = pipeline.read_prune_repository_state(store).await?;
+    let old_commit_objects = object_key_strings(&old_state.commit_objects);
+    let old_forget_marker_objects = object_key_strings(&old_state.forget_marker_objects);
+    let mut forget_markers = BTreeMap::new();
+    for key in &old_state.forget_marker_objects {
+        let marker = pipeline.read_snapshot_forget_marker(store, key).await?;
+        forget_markers.insert(marker.snapshot_id.clone(), marker);
+    }
+
+    let mut object_mappings = Vec::new();
+    let mut chunk_rewrites = BTreeMap::<String, RekeyChunkRewrite>::new();
+    let mut snapshots_rewritten = 0;
+    let mut chunks_rewritten = 0;
+    let mut indexes_rewritten = 0;
+    let mut manifests_rewritten = 0;
+    let mut commits_rewritten = 0;
+    let mut forget_markers_rewritten = 0;
+    let mut new_commit_objects = Vec::new();
+    let mut new_forget_marker_objects = Vec::new();
+    let mut pending_plain_writes = Vec::new();
+
+    for commit_key in &old_state.commit_objects {
+        let commit = pipeline.read_snapshot_commit(store, commit_key).await?;
+        let expected_commit_key = object_key_for_commit(&commit.snapshot_id)?;
+        if expected_commit_key != *commit_key {
+            return Err(CoreError::InvalidCommitMarker {
+                key: commit_key.clone(),
+                reason: "commit object key does not match committed snapshot id",
+            });
+        }
+        let old_manifest = pipeline
+            .read_snapshot_manifest(store, old_master_key, &commit.snapshot_id)
+            .await?;
+        let mut old_indexes = BTreeMap::new();
+        for index_id in &old_manifest.body.index_ids {
+            let index = pipeline
+                .read_chunk_index(store, old_master_key, index_id)
+                .await?;
+            old_indexes.insert(index_id.clone(), index);
+        }
+        let mut index_id_map = BTreeMap::new();
+        for (old_index_id, old_index) in &old_indexes {
+            let mut new_entries = Vec::with_capacity(old_index.chunks.len());
+            for entry in &old_index.chunks {
+                let rewrite = if let Some(rewrite) = chunk_rewrites.get(&entry.chunk_id) {
+                    rewrite.clone()
+                } else {
+                    let old_chunk_object = ObjectKey::new(entry.object_key.clone())
+                        .map_err(|source| CoreError::ObjectKey { source })?;
+                    let encrypted =
+                        store
+                            .get(&old_chunk_object)
+                            .await
+                            .map_err(|source| match source {
+                                StorageError::ObjectNotFound { .. } => {
+                                    CoreError::RepositoryReferencedObjectMissing {
+                                        key: old_chunk_object.clone(),
+                                    }
+                                }
+                                source => CoreError::Storage { source },
+                            })?;
+                    let compressed = decrypt_repository_object(
+                        &old_chunk_key,
+                        ObjectKind::Chunk,
+                        &old_chunk_object,
+                        &encrypted,
+                    )?;
+                    let expected_len = usize::try_from(entry.plaintext_length).map_err(|_| {
+                        CoreError::InvalidChunkLength {
+                            chunk_id: entry.chunk_id.clone(),
+                            snapshot_id: Some(commit.snapshot_id.clone()),
+                            path: None,
+                            object_key: Some(entry.object_key.clone()),
+                        }
+                    })?;
+                    let plaintext =
+                        zstd::bulk::decompress(&compressed, expected_len).map_err(|source| {
+                            CoreError::Decompression {
+                                chunk_id: entry.chunk_id.clone(),
+                                snapshot_id: Some(commit.snapshot_id.clone()),
+                                path: None,
+                                object_key: Some(entry.object_key.clone()),
+                                source,
+                            }
+                        })?;
+                    let old_actual = hex_bytes(
+                        &keyed_content_id(
+                            old_master_key,
+                            KeyPurpose::ChunkIdentity,
+                            repository_context,
+                            &plaintext,
+                        )
+                        .map_err(|source| CoreError::Encryption { source })?,
+                    );
+                    if old_actual != entry.chunk_id {
+                        return Err(CoreError::ChunkIdentityMismatch {
+                            expected: entry.chunk_id.clone(),
+                            actual: old_actual,
+                            snapshot_id: Some(commit.snapshot_id.clone()),
+                            path: None,
+                            object_key: Some(entry.object_key.clone()),
+                        });
+                    }
+                    let new_chunk_id = hex_bytes(
+                        &keyed_content_id(
+                            new_master_key,
+                            KeyPurpose::ChunkIdentity,
+                            repository_context,
+                            &plaintext,
+                        )
+                        .map_err(|source| CoreError::Encryption { source })?,
+                    );
+                    let new_chunk_object = object_key_for_id("objects/chunk", &new_chunk_id)?;
+                    let encrypted = encrypt_repository_object_with_nonce(
+                        &new_chunk_key,
+                        ObjectKind::Chunk,
+                        &new_chunk_object,
+                        deterministic_rekey_nonce(
+                            new_master_key,
+                            repository_id,
+                            &new_chunk_object,
+                        )?,
+                        &compressed,
+                    )?;
+                    let (_, stored_length) = write_or_verify_prepared_encrypted_bytes(
+                        store,
+                        &new_chunk_key,
+                        ObjectKind::Chunk,
+                        &new_chunk_object,
+                        &compressed,
+                        encrypted,
+                    )
+                    .await?;
+                    let rewrite = RekeyChunkRewrite {
+                        chunk_id: new_chunk_id,
+                        object_key: new_chunk_object,
+                        plaintext_length: entry.plaintext_length,
+                        compressed_length: compressed.len() as u64,
+                        stored_length,
+                    };
+                    object_mappings.push(StoredRekeyObjectMapping {
+                        old_object: old_chunk_object.as_str().to_owned(),
+                        new_object: rewrite.object_key.as_str().to_owned(),
+                        kind: PruneObjectKind::Chunk,
+                    });
+                    chunk_rewrites.insert(entry.chunk_id.clone(), rewrite.clone());
+                    chunks_rewritten += 1;
+                    rewrite
+                };
+                new_entries.push(ChunkIndexEntry {
+                    chunk_id: rewrite.chunk_id.clone(),
+                    object_key: rewrite.object_key.as_str().to_owned(),
+                    plaintext_length: rewrite.plaintext_length,
+                    compressed_length: rewrite.compressed_length,
+                    stored_length: rewrite.stored_length,
+                    compression: CompressionAlgorithm::Zstd,
+                    aead: RepositoryAeadAlgorithm::XChaCha20Poly1305,
+                });
+            }
+            new_entries.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+            new_entries.dedup_by(|left, right| left.chunk_id == right.chunk_id);
+            let new_index_id = content_id_for_metadata(
+                new_master_key,
+                KeyPurpose::Index,
+                repository_context,
+                &new_entries,
+            )?;
+            let new_index = ChunkIndex {
+                schema_version: 0,
+                index_id: new_index_id.clone(),
+                chunks: new_entries,
+            };
+            let new_index_object = object_key_for_id("objects/index", &new_index_id)?;
+            write_or_verify_encrypted_json(
+                store,
+                &new_index_key,
+                ObjectKind::Index,
+                &new_index_object,
+                &new_index,
+            )
+            .await?;
+            object_mappings.push(StoredRekeyObjectMapping {
+                old_object: object_key_for_id("objects/index", old_index_id)?
+                    .as_str()
+                    .to_owned(),
+                new_object: new_index_object.as_str().to_owned(),
+                kind: PruneObjectKind::Index,
+            });
+            index_id_map.insert(old_index_id.clone(), new_index_id);
+            indexes_rewritten += 1;
+        }
+
+        let mut new_body = old_manifest.body.clone();
+        for entry in &mut new_body.entries {
+            for chunk in &mut entry.chunks {
+                let rewrite = chunk_rewrites.get(&chunk.chunk_id).ok_or_else(|| {
+                    CoreError::MissingChunkIndexEntry {
+                        snapshot_id: old_manifest.snapshot_id.clone(),
+                        path: entry.relative_path.clone(),
+                        chunk_id: chunk.chunk_id.clone(),
+                        object_key: chunk.object_key.clone(),
+                    }
+                })?;
+                chunk.chunk_id = rewrite.chunk_id.clone();
+                chunk.object_key = rewrite.object_key.as_str().to_owned();
+            }
+        }
+        new_body.index_ids = old_manifest
+            .body
+            .index_ids
+            .iter()
+            .map(|id| {
+                index_id_map
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| CoreError::InvalidChunkIndex {
+                        index_id: id.clone(),
+                        object_key: object_key_for_id("objects/index", id)
+                            .expect("validated manifest index id has a valid object key"),
+                        reason: "manifest referenced an index that was not rewritten",
+                    })
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+        let new_snapshot_id = content_id_for_metadata(
+            new_master_key,
+            KeyPurpose::SnapshotMetadata,
+            repository_context,
+            &new_body,
+        )?;
+        let new_manifest = SnapshotManifest {
+            schema_version: 0,
+            snapshot_id: new_snapshot_id.clone(),
+            body: new_body,
+        };
+        let new_manifest_object = object_key_for_id("objects/manifest", &new_snapshot_id)?;
+        write_or_verify_encrypted_json(
+            store,
+            &new_manifest_key,
+            ObjectKind::SnapshotManifest,
+            &new_manifest_object,
+            &new_manifest,
+        )
+        .await?;
+        object_mappings.push(StoredRekeyObjectMapping {
+            old_object: object_key_for_id("objects/manifest", &commit.snapshot_id)?
+                .as_str()
+                .to_owned(),
+            new_object: new_manifest_object.as_str().to_owned(),
+            kind: PruneObjectKind::Manifest,
+        });
+        manifests_rewritten += 1;
+
+        let new_commit_object = object_key_for_commit(&new_snapshot_id)?;
+        let new_commit = SnapshotCommit {
+            schema_version: 0,
+            snapshot_id: new_snapshot_id.clone(),
+            manifest_object: new_manifest_object.as_str().to_owned(),
+        };
+        let new_commit_bytes = serde_json::to_vec(&new_commit)
+            .map_err(|source| CoreError::Serialization { source })?;
+        pending_plain_writes.push(RekeyPlainWrite {
+            object_key: new_commit_object.clone(),
+            bytes: new_commit_bytes,
+        });
+        object_mappings.push(StoredRekeyObjectMapping {
+            old_object: commit_key.as_str().to_owned(),
+            new_object: new_commit_object.as_str().to_owned(),
+            kind: PruneObjectKind::Commit,
+        });
+        new_commit_objects.push(new_commit_object.as_str().to_owned());
+        commits_rewritten += 1;
+
+        if let Some(old_forget) = forget_markers.get(&commit.snapshot_id) {
+            let new_forget_object = object_key_for_forget_marker(&new_snapshot_id)?;
+            let new_forget = SnapshotForgetMarker {
+                schema_version: 0,
+                snapshot_id: new_snapshot_id.clone(),
+                manifest_object: new_manifest_object.as_str().to_owned(),
+                commit_object: new_commit_object.as_str().to_owned(),
+                forgotten_at_unix_seconds: old_forget.forgotten_at_unix_seconds,
+            };
+            let new_forget_bytes = serde_json::to_vec(&new_forget)
+                .map_err(|source| CoreError::Serialization { source })?;
+            pending_plain_writes.push(RekeyPlainWrite {
+                object_key: new_forget_object.clone(),
+                bytes: new_forget_bytes,
+            });
+            object_mappings.push(StoredRekeyObjectMapping {
+                old_object: object_key_for_forget_marker(&commit.snapshot_id)?
+                    .as_str()
+                    .to_owned(),
+                new_object: new_forget_object.as_str().to_owned(),
+                kind: PruneObjectKind::ForgetMarker,
+            });
+            new_forget_marker_objects.push(new_forget_object.as_str().to_owned());
+            forget_markers_rewritten += 1;
+        }
+        snapshots_rewritten += 1;
+    }
+
+    let mut policies_rewritten = 0;
+    let policy_keys = listed_keys(store, POLICY_CONFIG_PREFIX).await?;
+    let new_policy_key = pipeline.derive_policy_config_key(new_master_key)?;
+    for old_policy_object in policy_keys {
+        let old_policy_id = policy_config_id_from_object_key(&old_policy_object)?;
+        let policy = pipeline
+            .read_repository_policy_config(store, old_master_key, &old_policy_id)
+            .await?;
+        let new_policy_id = content_id_for_metadata(
+            new_master_key,
+            KeyPurpose::PolicyConfig,
+            repository_context,
+            &policy.body,
+        )?;
+        let new_policy_object = object_key_for_policy_config(&new_policy_id)?;
+        let new_policy = RepositoryPolicyConfigState {
+            schema_version: policy.schema_version,
+            magic: policy.magic,
+            format_version: policy.format_version,
+            repository_id: policy.repository_id,
+            policy_id: new_policy_id,
+            body: policy.body,
+        };
+        write_or_verify_encrypted_json(
+            store,
+            &new_policy_key,
+            ObjectKind::PolicyConfig,
+            &new_policy_object,
+            &new_policy,
+        )
+        .await?;
+        object_mappings.push(StoredRekeyObjectMapping {
+            old_object: old_policy_object.as_str().to_owned(),
+            new_object: new_policy_object.as_str().to_owned(),
+            kind: PruneObjectKind::Policy,
+        });
+        policies_rewritten += 1;
+    }
+
+    let mut object_key_map = BTreeMap::new();
+    for mapping in &object_mappings {
+        object_key_map.insert(mapping.old_object.clone(), mapping.new_object.clone());
+    }
+
+    let mut upload_states_rewritten = 0;
+    let upload_keys = listed_keys(store, UPLOAD_STATE_PREFIX).await?;
+    let new_upload_key = pipeline.derive_upload_state_key(new_master_key)?;
+    for old_upload_object in upload_keys {
+        let (writer_id, upload_id) = upload_state_ids_from_object_key(&old_upload_object)?;
+        let upload = pipeline
+            .read_repository_upload_state(store, old_master_key, &writer_id, &upload_id)
+            .await?;
+        let new_writer_id = deterministic_rekey_id(
+            new_master_key,
+            KeyPurpose::UploadState,
+            repository_id,
+            "upload-writer",
+            &writer_id,
+        )?;
+        let new_upload_id = deterministic_rekey_id(
+            new_master_key,
+            KeyPurpose::UploadState,
+            repository_id,
+            "upload-id",
+            &upload_id,
+        )?;
+        let new_upload_object = upload_state_object_key(&new_writer_id, &new_upload_id)?;
+        let mut new_upload = RepositoryUploadState {
+            schema_version: upload.schema_version,
+            magic: upload.magic,
+            format_version: upload.format_version,
+            repository_id: upload.repository_id,
+            writer_id: new_writer_id,
+            upload_id: new_upload_id,
+            created_at_unix_seconds: upload.created_at_unix_seconds,
+            operation: upload.operation,
+            commit_objects: map_object_key_strings(&upload.commit_objects, &object_key_map),
+            forget_marker_objects: map_object_key_strings(
+                &upload.forget_marker_objects,
+                &object_key_map,
+            ),
+            pending_objects: upload
+                .pending_objects
+                .into_iter()
+                .map(|mut object| {
+                    if let Some(mapped) = object_key_map.get(&object.object_key) {
+                        object.object_key = mapped.clone();
+                    }
+                    object
+                })
+                .collect(),
+            state_identity: String::new(),
+        };
+        new_upload.state_identity =
+            upload_state_identity(new_master_key, repository_id, &new_upload)?;
+        validate_upload_state(
+            &new_upload,
+            &new_upload_object,
+            repository_id,
+            new_master_key,
+        )?;
+        write_or_verify_encrypted_json(
+            store,
+            &new_upload_key,
+            ObjectKind::UploadState,
+            &new_upload_object,
+            &new_upload,
+        )
+        .await?;
+        object_mappings.push(StoredRekeyObjectMapping {
+            old_object: old_upload_object.as_str().to_owned(),
+            new_object: new_upload_object.as_str().to_owned(),
+            kind: PruneObjectKind::UploadState,
+        });
+        upload_states_rewritten += 1;
+    }
+
+    let mut prune_states_rewritten = 0;
+    let old_prune_key = pipeline.derive_prune_key(old_master_key)?;
+    let new_prune_key = pipeline.derive_prune_key(new_master_key)?;
+    let prune_plan_keys = listed_keys(store, PRUNE_PLAN_PREFIX).await?;
+    for old_plan_object in prune_plan_keys {
+        let plan_id = prune_plan_id_from_object_key(&old_plan_object, PRUNE_PLAN_PREFIX)?;
+        let old_plan = pipeline
+            .read_prune_plan_object(store, &old_prune_key, &old_plan_object)
+            .await?;
+        old_plan.validate(&old_plan_object, repository_id)?;
+        let new_plan_id = deterministic_rekey_id(
+            new_master_key,
+            KeyPurpose::PruneMark,
+            repository_id,
+            "prune-plan",
+            &plan_id,
+        )?;
+        let new_plan_object = prune_plan_object_key(&new_plan_id)?;
+        let new_plan = StoredPrunePlan {
+            schema_version: old_plan.schema_version,
+            magic: old_plan.magic,
+            format_version: old_plan.format_version,
+            repository_id: old_plan.repository_id,
+            plan_id: new_plan_id.clone(),
+            created_at_unix_seconds: old_plan.created_at_unix_seconds,
+            commit_objects: map_object_key_strings(&old_plan.commit_objects, &object_key_map),
+            forget_marker_objects: map_object_key_strings(
+                &old_plan.forget_marker_objects,
+                &object_key_map,
+            ),
+            candidate_objects: map_prune_objects(&old_plan.candidate_objects, &object_key_map),
+            retained_objects: map_prune_objects(&old_plan.retained_objects, &object_key_map),
+        };
+        write_or_verify_encrypted_json(
+            store,
+            &new_prune_key,
+            ObjectKind::PruneMark,
+            &new_plan_object,
+            &new_plan,
+        )
+        .await?;
+        object_mappings.push(StoredRekeyObjectMapping {
+            old_object: old_plan_object.as_str().to_owned(),
+            new_object: new_plan_object.as_str().to_owned(),
+            kind: PruneObjectKind::PruneState,
+        });
+        prune_states_rewritten += 1;
+
+        let old_completion_object = prune_completion_object_key(&plan_id)?;
+        if store
+            .exists(&old_completion_object)
+            .await
+            .map_err(|source| CoreError::Storage { source })?
+        {
+            let old_completion = pipeline
+                .read_prune_completion_object(store, &old_prune_key, &old_completion_object)
+                .await?;
+            old_completion.validate(&old_completion_object, repository_id)?;
+            let candidate_bytes = sum_object_bytes(&new_plan.candidate_objects);
+            let new_completion = StoredPruneCompletion {
+                schema_version: old_completion.schema_version,
+                magic: old_completion.magic,
+                format_version: old_completion.format_version,
+                repository_id: old_completion.repository_id,
+                plan_id: new_plan_id.clone(),
+                plan_object: new_plan_object.as_str().to_owned(),
+                completed_at_unix_seconds: old_completion.completed_at_unix_seconds,
+                candidate_objects: new_plan.candidate_objects.len(),
+                deleted_objects: new_plan.candidate_objects.len(),
+                missing_objects: 0,
+                candidate_bytes,
+                deleted_bytes: candidate_bytes,
+                missing_bytes: 0,
+            };
+            let new_completion_object = prune_completion_object_key(&new_plan_id)?;
+            write_or_verify_encrypted_json(
+                store,
+                &new_prune_key,
+                ObjectKind::PruneMark,
+                &new_completion_object,
+                &new_completion,
+            )
+            .await?;
+            object_mappings.push(StoredRekeyObjectMapping {
+                old_object: old_completion_object.as_str().to_owned(),
+                new_object: new_completion_object.as_str().to_owned(),
+                kind: PruneObjectKind::PruneState,
+            });
+            prune_states_rewritten += 1;
+        }
+    }
+
+    let old_external_key_slot_objects = listed_keys(store, KEY_SLOT_PREFIX)
+        .await?
+        .into_iter()
+        .map(|key| key.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let mut old_lease_objects = listed_keys(store, LEASE_STATE_PREFIX)
+        .await?
+        .into_iter()
+        .map(|key| key.as_str().to_owned())
+        .collect::<Vec<_>>();
+    if let Some(lease_object) = lease_object {
+        let lease = lease_object.as_str().to_owned();
+        if !old_lease_objects.contains(&lease) {
+            old_lease_objects.push(lease);
+        }
+    }
+    old_lease_objects.sort();
+    old_lease_objects.dedup();
+
+    Ok(RekeyRewriteResult {
+        old_commit_objects,
+        old_forget_marker_objects,
+        new_commit_objects,
+        new_forget_marker_objects,
+        object_mappings,
+        pending_plain_writes,
+        old_external_key_slot_objects,
+        old_lease_objects,
+        snapshots_rewritten,
+        chunks_rewritten,
+        indexes_rewritten,
+        manifests_rewritten,
+        commits_rewritten,
+        forget_markers_rewritten,
+        policies_rewritten,
+        upload_states_rewritten,
+        prune_states_rewritten,
+    })
+}
+
+fn encrypt_rekey_state_frame(
+    master_key: &MasterKey,
+    repository_id: &str,
+    state_key: &ObjectKey,
+    plaintext: &[u8],
+) -> CoreResult<StoredEncryptedObject> {
+    let rekey_key = master_key
+        .derive_subkey(KeyPurpose::RekeyState, repository_id.as_bytes())
+        .map_err(|source| CoreError::Encryption { source })?;
+    let frame =
+        encrypt_repository_object(&rekey_key, ObjectKind::RekeyState, state_key, plaintext)?;
+    serde_json::from_slice(&frame).map_err(|source| CoreError::RekeyStateDecode {
+        key: state_key.clone(),
+        source,
+    })
+}
+
+fn decrypt_rekey_state_body(
+    state_key: &ObjectKey,
+    frame: &StoredEncryptedObject,
+    master_key: &MasterKey,
+    repository_id: &str,
+) -> CoreResult<StoredRekeyStateBody> {
+    let rekey_key = master_key
+        .derive_subkey(KeyPurpose::RekeyState, repository_id.as_bytes())
+        .map_err(|source| CoreError::Encryption { source })?;
+    let frame_bytes =
+        serde_json::to_vec(frame).map_err(|source| CoreError::Serialization { source })?;
+    let plaintext =
+        decrypt_repository_object(&rekey_key, ObjectKind::RekeyState, state_key, &frame_bytes)
+            .map_err(|error| match error {
+                CoreError::ObjectDecode { key, source }
+                | CoreError::MetadataDecode { key, source } => {
+                    CoreError::RekeyStateDecode { key, source }
+                }
+                other => other,
+            })?;
+    serde_json::from_slice(&plaintext).map_err(|source| CoreError::RekeyStateDecode {
+        key: state_key.clone(),
+        source,
+    })
+}
+
+async fn load_rekey_state_envelopes(
+    store: &dyn ObjectStore,
+) -> CoreResult<Vec<(ObjectKey, StoredRekeyStateEnvelope)>> {
+    let keys = listed_keys(store, REKEY_STATE_PREFIX).await?;
+    let mut states = Vec::with_capacity(keys.len());
+    for key in keys {
+        let bytes = store
+            .get(&key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        let envelope: StoredRekeyStateEnvelope =
+            serde_json::from_slice(&bytes).map_err(|source| CoreError::RekeyStateDecode {
+                key: key.clone(),
+                source,
+            })?;
+        envelope.validate(&key)?;
+        states.push((key, envelope));
+    }
+    Ok(states)
+}
+
+async fn write_rekey_state_envelope(
+    store: &dyn ObjectStore,
+    key: &ObjectKey,
+    envelope: &StoredRekeyStateEnvelope,
+) -> CoreResult<()> {
+    let bytes = serde_json::to_vec_pretty(envelope)
+        .map_err(|source| CoreError::Serialization { source })?;
+    write_or_verify_plain_bytes(store, key, &bytes).await?;
+    Ok(())
+}
+
+fn unlock_bootstrap_with_any_passphrase(
+    bootstrap: &RepositoryBootstrap,
+    passphrases: &[&SecretString],
+) -> CoreResult<Option<MasterKey>> {
+    for passphrase in passphrases {
+        for slot in &bootstrap.key_slots {
+            let key_slot = slot.to_key_slot()?;
+            match unlock_master_key(passphrase, &key_slot) {
+                Ok(master_key) => return Ok(Some(master_key)),
+                Err(CryptoError::Decryption) => {}
+                Err(source) => return Err(CoreError::RepositoryUnlock { source }),
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn write_or_verify_plain_bytes(
+    store: &dyn ObjectStore,
+    key: &ObjectKey,
+    bytes: &[u8],
+) -> CoreResult<bool> {
+    if store
+        .exists(key)
+        .await
+        .map_err(|source| CoreError::Storage { source })?
+    {
+        let existing = store
+            .get(key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        if existing != bytes {
+            return Err(CoreError::InvalidRekeyState {
+                key: key.clone(),
+                reason: "existing rekey target object has different bytes",
+            });
+        }
+        return Ok(false);
+    }
+    match store.put_if_absent(key, bytes).await {
+        Ok(PutStatus::Created) => Ok(true),
+        Ok(PutStatus::AlreadyPresent) => {
+            let existing = store
+                .get(key)
+                .await
+                .map_err(|source| CoreError::Storage { source })?;
+            if existing == bytes {
+                Ok(false)
+            } else {
+                Err(CoreError::InvalidRekeyState {
+                    key: key.clone(),
+                    reason: "existing rekey target object has different bytes",
+                })
+            }
+        }
+        Err(StorageError::ObjectAlreadyExists { .. }) => {
+            let existing = store
+                .get(key)
+                .await
+                .map_err(|source| CoreError::Storage { source })?;
+            if existing == bytes {
+                Ok(false)
+            } else {
+                Err(CoreError::InvalidRekeyState {
+                    key: key.clone(),
+                    reason: "existing rekey target object has different bytes",
+                })
+            }
+        }
+        Err(source) => Err(CoreError::Storage { source }),
+    }
+}
+
+async fn write_or_verify_encrypted_json<T>(
+    store: &dyn ObjectStore,
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+    value: &T,
+) -> CoreResult<bool>
+where
+    T: Serialize + for<'de> Deserialize<'de> + PartialEq,
+{
+    let plaintext =
+        serde_json::to_vec(value).map_err(|source| CoreError::Serialization { source })?;
+    let (created, _) =
+        write_or_verify_encrypted_bytes(store, key, kind, object_key, &plaintext).await?;
+    Ok(created)
+}
+
+async fn write_or_verify_encrypted_bytes(
+    store: &dyn ObjectStore,
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+    plaintext: &[u8],
+) -> CoreResult<(bool, u64)> {
+    let encrypted = encrypt_repository_object(key, kind, object_key, plaintext)?;
+    write_or_verify_prepared_encrypted_bytes(store, key, kind, object_key, plaintext, encrypted)
+        .await
+}
+
+async fn write_or_verify_prepared_encrypted_bytes(
+    store: &dyn ObjectStore,
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+    plaintext: &[u8],
+    encrypted: Vec<u8>,
+) -> CoreResult<(bool, u64)> {
+    if store
+        .exists(object_key)
+        .await
+        .map_err(|source| CoreError::Storage { source })?
+    {
+        let existing = store
+            .get(object_key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        let decrypted = decrypt_repository_object(key, kind, object_key, &existing)?;
+        if decrypted != plaintext {
+            return Err(CoreError::InvalidRekeyState {
+                key: object_key.clone(),
+                reason: "existing encrypted rekey target plaintext does not match",
+            });
+        }
+        return Ok((false, existing.len() as u64));
+    }
+    let encrypted_len = encrypted.len() as u64;
+    match store.put_if_absent(object_key, &encrypted).await {
+        Ok(PutStatus::Created) => Ok((true, encrypted_len)),
+        Ok(PutStatus::AlreadyPresent) | Err(StorageError::ObjectAlreadyExists { .. }) => {
+            let existing = store
+                .get(object_key)
+                .await
+                .map_err(|source| CoreError::Storage { source })?;
+            let decrypted = decrypt_repository_object(key, kind, object_key, &existing)?;
+            if decrypted != plaintext {
+                return Err(CoreError::InvalidRekeyState {
+                    key: object_key.clone(),
+                    reason: "existing encrypted rekey target plaintext does not match",
+                });
+            }
+            Ok((false, existing.len() as u64))
+        }
+        Err(source) => Err(CoreError::Storage { source }),
+    }
+}
+
+fn map_object_key_strings(keys: &[String], mapping: &BTreeMap<String, String>) -> Vec<String> {
+    keys.iter()
+        .map(|key| mapping.get(key).cloned().unwrap_or_else(|| key.clone()))
+        .collect()
+}
+
+fn map_prune_objects(
+    objects: &[PruneObject],
+    mapping: &BTreeMap<String, String>,
+) -> Vec<PruneObject> {
+    objects
+        .iter()
+        .map(|object| {
+            let object_key = mapping
+                .get(&object.object_key)
+                .cloned()
+                .unwrap_or_else(|| object.object_key.clone());
+            let kind = ObjectKey::new(object_key.clone())
+                .map(|key| prune_object_kind(&key))
+                .unwrap_or(object.kind);
+            PruneObject {
+                object_key,
+                kind,
+                bytes: object.bytes,
+            }
+        })
+        .collect()
+}
+
+fn deterministic_rekey_id(
+    master_key: &MasterKey,
+    purpose: KeyPurpose,
+    repository_id: &str,
+    label: &str,
+    value: &str,
+) -> CoreResult<String> {
+    let mut bytes = Vec::with_capacity(label.len() + value.len() + 1);
+    bytes.extend_from_slice(label.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(value.as_bytes());
+    keyed_content_id(master_key, purpose, repository_id.as_bytes(), &bytes)
+        .map(|id| hex_bytes(&id))
+        .map_err(|source| CoreError::Encryption { source })
+}
+
+fn deterministic_rekey_nonce(
+    master_key: &MasterKey,
+    repository_id: &str,
+    object_key: &ObjectKey,
+) -> CoreResult<[u8; fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN]> {
+    let digest = keyed_content_id(
+        master_key,
+        KeyPurpose::RekeyState,
+        repository_id.as_bytes(),
+        object_key.as_str().as_bytes(),
+    )
+    .map_err(|source| CoreError::Encryption { source })?;
+    let mut nonce = [0_u8; fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN];
+    nonce.copy_from_slice(&digest[..fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN]);
+    Ok(nonce)
+}
+
+async fn ensure_rekey_repository_state_matches(
+    store: &dyn ObjectStore,
+    old_commit_objects: &[String],
+    old_forget_marker_objects: &[String],
+    new_commit_objects: &[String],
+    new_forget_marker_objects: &[String],
+    rekey_id: &str,
+) -> CoreResult<()> {
+    let current = read_repository_commit_forget_state(store).await?;
+    let current_commits = object_key_strings(&current.commit_objects);
+    let current_forgets = object_key_strings(&current.forget_marker_objects);
+    let old_matches =
+        current_commits == old_commit_objects && current_forgets == old_forget_marker_objects;
+    let new_matches =
+        current_commits == new_commit_objects && current_forgets == new_forget_marker_objects;
+    let union_matches = current_commits
+        == sorted_union_strings(old_commit_objects, new_commit_objects)
+        && current_forgets
+            == sorted_union_strings(old_forget_marker_objects, new_forget_marker_objects);
+    if old_matches || new_matches || union_matches {
+        Ok(())
+    } else {
+        Err(CoreError::RekeyRepositoryStateChanged {
+            rekey_id: rekey_id.to_owned(),
+        })
+    }
+}
+
+fn sorted_union_strings(left: &[String], right: &[String]) -> Vec<String> {
+    let mut values = left.iter().chain(right.iter()).cloned().collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
+async fn read_repository_commit_forget_state(
+    store: &dyn ObjectStore,
+) -> CoreResult<PruneRepositoryState> {
+    let commit_prefix =
+        ObjectKeyPrefix::new("commits").map_err(|source| CoreError::ObjectKey { source })?;
+    let forget_prefix =
+        ObjectKeyPrefix::new("forgets").map_err(|source| CoreError::ObjectKey { source })?;
+    let mut commit_objects = store
+        .list_prefix(&commit_prefix)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    let mut forget_marker_objects = store
+        .list_prefix(&forget_prefix)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    commit_objects.sort();
+    forget_marker_objects.sort();
+    Ok(PruneRepositoryState {
+        commit_objects,
+        forget_marker_objects,
+    })
+}
+
+async fn retire_old_external_key_slots(
+    store: &dyn ObjectStore,
+    opened: &OpenedRepository,
+    old_external_key_slot_objects: &[String],
+) -> CoreResult<()> {
+    for key in old_external_key_slot_objects {
+        let key = ObjectKey::new(key.clone()).map_err(|source| CoreError::ObjectKey { source })?;
+        let Some(key_slot_id) = key.as_str().strip_prefix(&format!("{KEY_SLOT_PREFIX}/")) else {
+            return Err(CoreError::InvalidKeySlot {
+                key,
+                reason: "key slot object is outside key-slot prefix",
+            });
+        };
+        write_key_slot_removal_marker(store, opened, key_slot_id).await?;
+    }
+    Ok(())
+}
+
+async fn switch_repository_bootstrap(
+    store: &dyn ObjectStore,
+    old_bootstrap_bytes: &[u8],
+    new_bootstrap_bytes: &[u8],
+) -> CoreResult<()> {
+    let bootstrap_key = bootstrap_object_key()?;
+    match store.get(&bootstrap_key).await {
+        Ok(current) if current == new_bootstrap_bytes => return Ok(()),
+        Ok(current) if current != old_bootstrap_bytes => {
+            return Err(CoreError::InvalidRekeyState {
+                key: bootstrap_key,
+                reason: "bootstrap changed during rekey",
+            });
+        }
+        Ok(_) => {
+            store
+                .delete(&bootstrap_key)
+                .await
+                .map_err(|source| CoreError::Storage { source })?;
+        }
+        Err(StorageError::ObjectNotFound { .. }) => {}
+        Err(source) => return Err(CoreError::Storage { source }),
+    }
+    write_or_verify_plain_bytes(store, &bootstrap_key, new_bootstrap_bytes).await?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepositoryRekeyBootstrapPhase {
+    Old,
+    New,
+    Missing,
+}
+
+async fn repository_bootstrap_phase(
+    store: &dyn ObjectStore,
+    old_bootstrap_bytes: &[u8],
+    new_bootstrap_bytes: &[u8],
+) -> CoreResult<RepositoryRekeyBootstrapPhase> {
+    let bootstrap_key = bootstrap_object_key()?;
+    match store.get(&bootstrap_key).await {
+        Ok(bytes) if bytes == new_bootstrap_bytes => Ok(RepositoryRekeyBootstrapPhase::New),
+        Ok(bytes) if bytes == old_bootstrap_bytes => Ok(RepositoryRekeyBootstrapPhase::Old),
+        Ok(_) => Err(CoreError::InvalidRekeyState {
+            key: bootstrap_key,
+            reason: "bootstrap does not match pending rekey state",
+        }),
+        Err(StorageError::ObjectNotFound { .. }) => Ok(RepositoryRekeyBootstrapPhase::Missing),
+        Err(source) => Err(CoreError::Storage { source }),
+    }
+}
+
+async fn delete_rekey_new_visibility_markers(
+    store: &dyn ObjectStore,
+    state: &StoredRekeyStateBody,
+) -> CoreResult<()> {
+    for key in state
+        .new_commit_objects
+        .iter()
+        .chain(state.new_forget_marker_objects.iter())
+    {
+        let object_key =
+            ObjectKey::new(key.clone()).map_err(|source| CoreError::ObjectKey { source })?;
+        store
+            .delete(&object_key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+    }
+    Ok(())
+}
+
+async fn cleanup_rekeyed_old_objects(
+    store: &dyn ObjectStore,
+    state: &StoredRekeyStateBody,
+    rekey_state_key: &ObjectKey,
+) -> CoreResult<RekeyCleanupResult> {
+    let mut result = RekeyCleanupResult::default();
+    let mut old_keys = BTreeSet::new();
+    let new_keys = state
+        .object_mappings
+        .iter()
+        .map(|mapping| mapping.new_object.clone())
+        .collect::<BTreeSet<_>>();
+    for mapping in &state.object_mappings {
+        if mapping.old_object != mapping.new_object && !new_keys.contains(&mapping.old_object) {
+            old_keys.insert(mapping.old_object.clone());
+        }
+    }
+    for key in &state.old_external_key_slot_objects {
+        old_keys.insert(key.clone());
+    }
+    for key in &state.old_lease_objects {
+        old_keys.insert(key.clone());
+    }
+
+    for key in old_keys {
+        let object_key =
+            ObjectKey::new(key.clone()).map_err(|source| CoreError::ObjectKey { source })?;
+        let existed = store
+            .exists(&object_key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        store
+            .delete(&object_key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        if existed {
+            match prune_object_kind(&object_key) {
+                PruneObjectKind::KeySlot => result.old_key_slot_objects_deleted += 1,
+                PruneObjectKind::LeaseState => result.leases_removed += 1,
+                _ => result.old_repository_objects_deleted += 1,
+            }
+        }
+    }
+
+    store
+        .delete(rekey_state_key)
+        .await
+        .map_err(|source| CoreError::Storage { source })?;
+    Ok(result)
+}
+
 fn normalized_retire_key_slot_ids(key_slot_ids: &[String]) -> CoreResult<Vec<String>> {
     if key_slot_ids.is_empty() {
         return Err(CoreError::InvalidKeyRotation {
@@ -1694,6 +3402,10 @@ fn prune_completion_object_key(plan_id: &str) -> CoreResult<ObjectKey> {
     object_key_for_id(PRUNE_COMPLETION_PREFIX, plan_id)
 }
 
+fn rekey_state_object_key(rekey_id: &str) -> CoreResult<ObjectKey> {
+    object_key_for_id(REKEY_STATE_PREFIX, rekey_id)
+}
+
 fn validate_key_slot_id(key_slot_id: &str) -> CoreResult<()> {
     if !key_slot_id_is_valid(key_slot_id) {
         return Err(CoreError::InvalidKeySlot {
@@ -1729,12 +3441,19 @@ fn lease_state_id_is_valid(id: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+fn rekey_state_id_is_valid(id: &str) -> bool {
+    id.len() == KEY_SLOT_ID_BYTES * 2
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn repository_id_is_valid(repository_id: &str) -> bool {
     repository_id.len() == REPOSITORY_ID_BYTES * 2
         && repository_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RepositoryBootstrap {
     magic: String,
@@ -2348,7 +4067,7 @@ impl StoredExternalKeySlot {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredKeySlot {
     kdf: StoredKdfParams,
@@ -2386,7 +4105,7 @@ impl StoredKeySlot {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredKdfParams {
     algorithm: StoredKdfAlgorithm,
@@ -2419,7 +4138,7 @@ impl StoredKdfParams {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum StoredKdfAlgorithm {
     Argon2idV19,
@@ -6513,6 +8232,20 @@ fn encrypt_repository_object(
     encode_encrypted_object(encrypted)
 }
 
+fn encrypt_repository_object_with_nonce(
+    key: &fileferry_crypto::Subkey,
+    kind: ObjectKind,
+    object_key: &ObjectKey,
+    nonce: [u8; fileferry_crypto::XCHACHA20_POLY1305_NONCE_LEN],
+    plaintext: &[u8],
+) -> CoreResult<Vec<u8>> {
+    let context = ObjectContext::new(kind, object_key.as_str())
+        .map_err(|source| CoreError::Encryption { source })?;
+    let encrypted = encrypt_object_with_nonce(key, &context, nonce, plaintext)
+        .map_err(|source| CoreError::Encryption { source })?;
+    encode_encrypted_object(encrypted)
+}
+
 async fn write_encrypted_json_object<T: Serialize>(
     store: &dyn ObjectStore,
     key: &fileferry_crypto::Subkey,
@@ -8371,6 +10104,7 @@ const REPOSITORY_OBJECT_FAMILIES: &[RepositoryObjectFamily] = &[
     RepositoryObjectFamily::UploadState,
     RepositoryObjectFamily::LeaseState,
     RepositoryObjectFamily::PruneState,
+    RepositoryObjectFamily::RekeyState,
     RepositoryObjectFamily::Other,
 ];
 
@@ -8388,6 +10122,7 @@ fn repository_object_family(key: &ObjectKey) -> RepositoryObjectFamily {
         PruneObjectKind::UploadState => RepositoryObjectFamily::UploadState,
         PruneObjectKind::LeaseState => RepositoryObjectFamily::LeaseState,
         PruneObjectKind::PruneState => RepositoryObjectFamily::PruneState,
+        PruneObjectKind::RekeyState => RepositoryObjectFamily::RekeyState,
         PruneObjectKind::Other => RepositoryObjectFamily::Other,
     }
 }
@@ -8428,6 +10163,8 @@ fn prune_object_kind(key: &ObjectKey) -> PruneObjectKind {
         PruneObjectKind::LeaseState
     } else if value.starts_with("objects/prune-") {
         PruneObjectKind::PruneState
+    } else if value.starts_with("objects/rekey/") {
+        PruneObjectKind::RekeyState
     } else {
         PruneObjectKind::Other
     }
@@ -8855,6 +10592,84 @@ mod tests {
             .expect("second snapshot");
 
         (store, repository, pipeline, first)
+    }
+
+    async fn write_pending_rekey_state_for_tests(
+        store: &fileferry_testkit::FakeObjectStore,
+        repository: &OpenedRepository,
+        pipeline: &BackupPipeline,
+        new_passphrase: &SecretString,
+    ) -> (ObjectKey, MasterKey) {
+        let new_master = MasterKey::generate();
+        let new_slot = create_key_slot(&new_master, new_passphrase, KdfParams::for_tests())
+            .expect("new key slot");
+        let old_bootstrap = load_repository_bootstrap(store)
+            .await
+            .expect("old bootstrap");
+        let new_bootstrap = RepositoryBootstrap {
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: repository.repository_id.clone(),
+            key_slots: vec![StoredKeySlot::from_key_slot(&new_slot)],
+            features: Vec::new(),
+        };
+        let rewrite = rewrite_repository_objects_for_rekey(
+            store,
+            pipeline,
+            &repository.master_key,
+            &new_master,
+            None,
+        )
+        .await
+        .expect("rewrite objects");
+        let rekey_id = hex_bytes(&random_bytes::<KEY_SLOT_ID_BYTES>());
+        let state_key = rekey_state_object_key(&rekey_id).expect("state key");
+        let mut body = StoredRekeyStateBody {
+            schema_version: 0,
+            magic: REPOSITORY_MAGIC.to_owned(),
+            format_version: REPOSITORY_FORMAT_VERSION_V0,
+            repository_id: repository.repository_id.clone(),
+            rekey_id,
+            created_at_unix_seconds: current_unix_seconds().expect("time"),
+            old_key_slots: repository.key_slots,
+            old_commit_objects: Vec::new(),
+            old_forget_marker_objects: Vec::new(),
+            new_commit_objects: Vec::new(),
+            new_forget_marker_objects: Vec::new(),
+            object_mappings: Vec::new(),
+            old_external_key_slot_objects: Vec::new(),
+            old_lease_objects: Vec::new(),
+            snapshots_rewritten: 0,
+            chunks_rewritten: 0,
+            indexes_rewritten: 0,
+            manifests_rewritten: 0,
+            commits_rewritten: 0,
+            forget_markers_rewritten: 0,
+            policies_rewritten: 0,
+            upload_states_rewritten: 0,
+            prune_states_rewritten: 0,
+        };
+        let pending_plain_writes = rewrite.pending_plain_writes.clone();
+        merge_rekey_rewrite(&mut body, rewrite);
+        let envelope = StoredRekeyStateEnvelope::new(
+            &state_key,
+            &old_bootstrap,
+            &new_bootstrap,
+            &repository.master_key,
+            &new_master,
+            &body,
+        )
+        .expect("state envelope");
+        write_rekey_state_envelope(store, &state_key, &envelope)
+            .await
+            .expect("write state");
+        for write in pending_plain_writes {
+            write_or_verify_plain_bytes(store, &write.object_key, &write.bytes)
+                .await
+                .expect("write staged commit marker");
+        }
+
+        (state_key, new_master)
     }
 
     fn planned_metadata_field_count_for_file_and_directory_entries(entries: usize) -> usize {
@@ -9610,6 +11425,425 @@ mod tests {
                 .expect_err("empty retire selection fails");
 
         assert!(matches!(error, CoreError::InvalidKeyRotation { .. }));
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_rewrites_repository_objects_and_retires_old_unlocks() {
+        let (store, _repository, _pipeline, _first) = repository_with_two_snapshots(1, 2).await;
+        let old = SecretString::from("test-passphrase");
+        let added = SecretString::from("added passphrase");
+        let new = SecretString::from("new passphrase");
+        let added_slot = add_repository_key_slot(&store, &old, &added, KdfParams::for_tests())
+            .await
+            .expect("add old external slot");
+
+        let result = rekey_repository(&store, &added, &new, KdfParams::for_tests())
+            .await
+            .expect("rekey repository");
+
+        assert_eq!(result.old_key_slots, 2);
+        assert_eq!(result.new_key_slots, 1);
+        assert_eq!(result.snapshots_rewritten, 2);
+        assert!(result.chunks_rewritten > 0);
+        assert_eq!(result.old_key_slots_retired, 1);
+        assert_eq!(result.old_key_slot_objects_deleted, 1);
+        assert_eq!(result.recovery_state, RepositoryRekeyRecoveryState::Started);
+        assert!(
+            store
+                .list_prefix(&ObjectKeyPrefix::new(REKEY_STATE_PREFIX).expect("rekey prefix"))
+                .await
+                .expect("list rekey states")
+                .is_empty()
+        );
+        assert!(
+            !store
+                .exists(&key_slot_object_key(&added_slot.key_slot_id).expect("added slot key"))
+                .await
+                .expect("old slot deleted")
+        );
+
+        let opened = open_repository(&store, &new)
+            .await
+            .expect("new passphrase unlocks");
+        assert_eq!(opened.key_slots, 1);
+        let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))
+            .expect("pipeline");
+        let check = pipeline
+            .check_repository(&store, &opened.master_key)
+            .await
+            .expect("check after rekey");
+        assert_eq!(check.errors.len(), 0);
+        assert_eq!(
+            pipeline
+                .read_committed_snapshot_manifests(&store, &opened.master_key)
+                .await
+                .expect("manifests after rekey")
+                .len(),
+            2
+        );
+        assert!(matches!(
+            open_repository(&store, &old).await,
+            Err(CoreError::RepositoryUnlock { .. })
+        ));
+        assert!(matches!(
+            open_repository(&store, &added).await,
+            Err(CoreError::RepositoryUnlock { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_rewrites_auxiliary_state_families() {
+        let (store, repository, pipeline, first) = repository_with_two_snapshots(13, 14).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget first snapshot");
+        pipeline
+            .prune_repository(
+                &store,
+                &repository.master_key,
+                PruneRepositoryOptions::sweep(),
+            )
+            .await
+            .expect("write prune plan and completion");
+        pipeline
+            .write_repository_policy_config(
+                &store,
+                &repository.master_key,
+                RepositoryPolicyConfigRequest {
+                    created_at_unix_seconds: 123,
+                    retention: RepositoryRetentionPolicyConfig {
+                        keep_last: Some(1),
+                        ..RepositoryRetentionPolicyConfig::default()
+                    },
+                },
+            )
+            .await
+            .expect("write policy config");
+        let retained_chunk = store
+            .list_prefix(&ObjectKeyPrefix::new("objects/chunk").expect("chunk prefix"))
+            .await
+            .expect("list chunks")
+            .into_iter()
+            .next()
+            .expect("retained chunk");
+        pipeline
+            .write_repository_upload_state(
+                &store,
+                &repository.master_key,
+                RepositoryUploadStateRequest {
+                    writer_id: "12".repeat(32),
+                    upload_id: "34".repeat(32),
+                    created_at_unix_seconds: 456,
+                    operation: RepositoryUploadOperation::BackupSnapshot,
+                    pending_objects: vec![RepositoryUploadPendingObject {
+                        object_key: retained_chunk.as_str().to_owned(),
+                        kind: RepositoryUploadPendingObjectKind::Chunk,
+                        bytes: Some(1),
+                    }],
+                },
+            )
+            .await
+            .expect("write upload state");
+
+        let result = rekey_repository(&store, &old, &new, KdfParams::for_tests())
+            .await
+            .expect("rekey repository");
+
+        assert_eq!(result.policies_rewritten, 1);
+        assert_eq!(result.upload_states_rewritten, 1);
+        assert_eq!(result.prune_states_rewritten, 2);
+        let opened = open_repository(&store, &new)
+            .await
+            .expect("new passphrase unlocks");
+        let check = pipeline
+            .check_repository(&store, &opened.master_key)
+            .await
+            .expect("check after rekey");
+        assert_eq!(check.errors.len(), 0);
+        let auxiliary = pipeline
+            .check_repository_auxiliary_state(&store, &opened.master_key)
+            .await
+            .expect("check auxiliary state after rekey");
+        assert_eq!(auxiliary.policy_configs_checked, 1);
+        assert_eq!(auxiliary.upload_states_checked, 1);
+        assert_eq!(auxiliary.prune_plans_checked, 1);
+        assert_eq!(auxiliary.prune_completions_checked, 1);
+        let policies = pipeline
+            .list_repository_policy_configs(&store, &opened.master_key)
+            .await
+            .expect("list policies after rekey");
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].state.body.retention.keep_last, Some(1));
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_rejects_active_lease_before_rewrite() {
+        let (store, repository, pipeline, _first) = repository_with_two_snapshots(3, 4).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        pipeline
+            .write_repository_lease_state(
+                &store,
+                &repository.master_key,
+                RepositoryLeaseStateRequest {
+                    lease_id: "ac".repeat(LEASE_STATE_ID_BYTES),
+                    writer_id: "bd".repeat(LEASE_STATE_ID_BYTES),
+                    command_kind: RepositoryLeaseCommandKind::Backup,
+                    acquired_at_unix_seconds: 1,
+                    expires_at_unix_seconds: 4_000_000_000,
+                },
+            )
+            .await
+            .expect("write active lease");
+
+        let error = rekey_repository(&store, &old, &new, KdfParams::for_tests())
+            .await
+            .expect_err("active lease blocks rekey");
+
+        assert!(matches!(
+            error,
+            CoreError::RepositoryLeaseConflict {
+                command_kind: RepositoryLeaseCommandKind::Backup,
+                ..
+            }
+        ));
+        assert!(
+            store
+                .list_prefix(&ObjectKeyPrefix::new(REKEY_STATE_PREFIX).expect("rekey prefix"))
+                .await
+                .expect("list rekey states")
+                .is_empty()
+        );
+        open_repository(&store, &old)
+            .await
+            .expect("old passphrase still unlocks");
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_resumes_from_pending_state() {
+        let (store, repository, pipeline, _first) = repository_with_two_snapshots(5, 6).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        let (state_key, _) =
+            write_pending_rekey_state_for_tests(&store, &repository, &pipeline, &new).await;
+
+        let result = rekey_repository(&store, &old, &new, KdfParams::for_tests())
+            .await
+            .expect("resume rekey");
+
+        assert_eq!(result.recovery_state, RepositoryRekeyRecoveryState::Resumed);
+        open_repository(&store, &new)
+            .await
+            .expect("new passphrase unlocks after resume");
+        assert!(matches!(
+            open_repository(&store, &old).await,
+            Err(CoreError::RepositoryUnlock { .. })
+        ));
+        assert!(!store.exists(&state_key).await.expect("rekey state deleted"));
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_malformed_state_fails_closed() {
+        let (store, _repository, _pipeline, _first) = repository_with_two_snapshots(7, 8).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        let state_key = rekey_state_object_key(&"ab".repeat(KEY_SLOT_ID_BYTES)).expect("state key");
+        store
+            .overwrite_for_tests(state_key.clone(), b"not-json".to_vec())
+            .await;
+
+        let error = rekey_repository(&store, &old, &new, KdfParams::for_tests())
+            .await
+            .expect_err("malformed state fails");
+
+        assert!(matches!(error, CoreError::RekeyStateDecode { key, .. } if key == state_key));
+        open_repository(&store, &old)
+            .await
+            .expect("old passphrase still unlocks");
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_tampered_state_fails_closed() {
+        let (store, repository, pipeline, _first) = repository_with_two_snapshots(11, 12).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        let (state_key, _) =
+            write_pending_rekey_state_for_tests(&store, &repository, &pipeline, &new).await;
+        let state_bytes = store.get(&state_key).await.expect("state bytes");
+        let mut envelope: StoredRekeyStateEnvelope =
+            serde_json::from_slice(&state_bytes).expect("state envelope");
+        envelope.old_state.ciphertext[0] ^= 0x01;
+        store
+            .overwrite_for_tests(
+                state_key.clone(),
+                serde_json::to_vec_pretty(&envelope).expect("tampered state bytes"),
+            )
+            .await;
+
+        let error = rekey_repository(&store, &old, &new, KdfParams::for_tests())
+            .await
+            .expect_err("tampered state fails");
+
+        assert!(matches!(error, CoreError::ObjectAuthentication { key, .. } if key == state_key));
+        open_repository(&store, &old)
+            .await
+            .expect("old passphrase still unlocks");
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_resumes_partial_object_rewrite() {
+        let (store, repository, pipeline, _first) = repository_with_two_snapshots(15, 16).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        let (state_key, _) =
+            write_pending_rekey_state_for_tests(&store, &repository, &pipeline, &new).await;
+        let state_bytes = store.get(&state_key).await.expect("state bytes");
+        let envelope: StoredRekeyStateEnvelope =
+            serde_json::from_slice(&state_bytes).expect("state envelope");
+        let body = decrypt_rekey_state_body(
+            &state_key,
+            &envelope.old_state,
+            &repository.master_key,
+            &repository.repository_id,
+        )
+        .expect("state body");
+        let missing_new_object = body
+            .object_mappings
+            .iter()
+            .find(|mapping| mapping.kind == PruneObjectKind::Chunk)
+            .expect("chunk mapping")
+            .new_object
+            .clone();
+        store
+            .delete(&ObjectKey::new(missing_new_object).expect("missing new object key"))
+            .await
+            .expect("delete rewritten object");
+
+        let result = rekey_repository(&store, &old, &new, KdfParams::for_tests())
+            .await
+            .expect("resume partial rekey");
+
+        assert_eq!(result.recovery_state, RepositoryRekeyRecoveryState::Resumed);
+        open_repository(&store, &new)
+            .await
+            .expect("new passphrase unlocks after partial resume");
+        assert!(!store.exists(&state_key).await.expect("rekey state deleted"));
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_resumes_cleanup_after_bootstrap_switch_with_new_passphrase() {
+        let (store, repository, pipeline, _first) = repository_with_two_snapshots(21, 22).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        let (state_key, _) =
+            write_pending_rekey_state_for_tests(&store, &repository, &pipeline, &new).await;
+        let state_bytes = store.get(&state_key).await.expect("state bytes");
+        let envelope: StoredRekeyStateEnvelope =
+            serde_json::from_slice(&state_bytes).expect("state envelope");
+        let old_bootstrap_bytes =
+            serde_json::to_vec_pretty(&envelope.old_bootstrap).expect("old bootstrap bytes");
+        let new_bootstrap_bytes =
+            serde_json::to_vec_pretty(&envelope.new_bootstrap).expect("new bootstrap bytes");
+        switch_repository_bootstrap(&store, &old_bootstrap_bytes, &new_bootstrap_bytes)
+            .await
+            .expect("switch bootstrap");
+
+        let result = rekey_repository(&store, &new, &new, KdfParams::for_tests())
+            .await
+            .expect("resume cleanup with new passphrase");
+
+        assert_eq!(result.recovery_state, RepositoryRekeyRecoveryState::Resumed);
+        assert!(!store.exists(&state_key).await.expect("rekey state deleted"));
+        open_repository(&store, &new)
+            .await
+            .expect("new passphrase unlocks after cleanup");
+        assert!(matches!(
+            open_repository(&store, &old).await,
+            Err(CoreError::RepositoryUnlock { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_replayed_stale_state_fails_closed() {
+        let (store, repository, pipeline, _first) = repository_with_two_snapshots(17, 18).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        let (state_key, _) =
+            write_pending_rekey_state_for_tests(&store, &repository, &pipeline, &new).await;
+        let state_bytes = store.get(&state_key).await.expect("state bytes");
+        let envelope: StoredRekeyStateEnvelope =
+            serde_json::from_slice(&state_bytes).expect("state envelope");
+        let body = decrypt_rekey_state_body(
+            &state_key,
+            &envelope.old_state,
+            &repository.master_key,
+            &repository.repository_id,
+        )
+        .expect("state body");
+        delete_rekey_new_visibility_markers(&store, &body)
+            .await
+            .expect("hide staged visibility markers");
+        let stale_source = tempfile::tempdir().expect("stale source");
+        fs::write(stale_source.path().join("file.txt"), varied_bytes(19, 2048))
+            .expect("write stale source");
+        pipeline
+            .write_snapshot(
+                &store,
+                &repository.master_key,
+                BackupRequest {
+                    roots: vec![stale_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("write stale snapshot");
+
+        let error = rekey_repository(&store, &old, &new, KdfParams::for_tests())
+            .await
+            .expect_err("stale rekey fails");
+
+        assert!(matches!(
+            error,
+            CoreError::RekeyRepositoryStateChanged { rekey_id } if rekey_id == body.rekey_id
+        ));
+        open_repository(&store, &old)
+            .await
+            .expect("old passphrase still unlocks");
+    }
+
+    #[tokio::test]
+    async fn repository_rekey_missing_referenced_object_fails_before_bootstrap_switch() {
+        let (store, _repository, _pipeline, _first) = repository_with_two_snapshots(9, 10).await;
+        let old = SecretString::from("test-passphrase");
+        let new = SecretString::from("new passphrase");
+        let chunk_key = store
+            .list_prefix(&ObjectKeyPrefix::new("objects/chunk").expect("chunk prefix"))
+            .await
+            .expect("list chunks")
+            .into_iter()
+            .next()
+            .expect("chunk object");
+        store.delete(&chunk_key).await.expect("delete chunk");
+
+        let error = rekey_repository(&store, &old, &new, KdfParams::for_tests())
+            .await
+            .expect_err("missing chunk fails");
+
+        assert!(matches!(
+            error,
+            CoreError::RepositoryReferencedObjectMissing { key } if key == chunk_key
+        ));
+        open_repository(&store, &old)
+            .await
+            .expect("old passphrase still unlocks");
+        assert!(matches!(
+            open_repository(&store, &new).await,
+            Err(CoreError::RepositoryUnlock { .. })
+        ));
     }
 
     #[tokio::test]

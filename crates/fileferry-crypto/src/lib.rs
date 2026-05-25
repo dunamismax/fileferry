@@ -196,6 +196,7 @@ pub enum KeyPurpose {
     UploadState,
     PruneMark,
     LeaseState,
+    RekeyState,
     KeySlot,
 }
 
@@ -210,6 +211,7 @@ impl KeyPurpose {
             Self::UploadState => b"upload-state",
             Self::PruneMark => b"prune-mark",
             Self::LeaseState => b"lease-state",
+            Self::RekeyState => b"rekey-state",
             Self::KeySlot => b"key-slot",
         }
     }
@@ -357,6 +359,7 @@ pub enum ObjectKind {
     UploadState,
     PruneMark,
     LeaseState,
+    RekeyState,
 }
 
 impl ObjectKind {
@@ -370,6 +373,7 @@ impl ObjectKind {
             Self::UploadState => b"upload-state",
             Self::PruneMark => b"prune-mark",
             Self::LeaseState => b"lease-state",
+            Self::RekeyState => b"rekey-state",
         }
     }
 }
@@ -433,6 +437,15 @@ pub fn encrypt_object(
     plaintext: &[u8],
 ) -> Result<EncryptedObject, CryptoError> {
     let nonce = random_nonce();
+    encrypt_object_with_nonce(key, context, nonce, plaintext)
+}
+
+pub fn encrypt_object_with_nonce(
+    key: &Subkey,
+    context: &ObjectContext,
+    nonce: [u8; XCHACHA20_POLY1305_NONCE_LEN],
+    plaintext: &[u8],
+) -> Result<EncryptedObject, CryptoError> {
     let aad = context.aad();
     let ciphertext = encrypt_with_key(key, &nonce, plaintext, &aad)?;
 

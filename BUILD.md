@@ -23,9 +23,9 @@ Implemented and tested in current main:
 - `ferry init`, `backup`, `restore`, `snapshots`, `ls`, `find`, `diff`,
   `repo`, `doctor`, `check`, `forget`, `prune`, `policy`, `completion`, and
   `version`.
-- Key add, marker-based key remove, limited unlock rotation, encrypted
-  recovery export, and recovery import as a new external key slot. Full
-  repository rekey and bootstrap-slot removal are not implemented.
+- Key add, marker-based key remove, limited unlock rotation, full repository
+  rekey, encrypted recovery export, and recovery import as a new external key
+  slot. Bootstrap-slot removal outside full rekey is not implemented.
 - Encrypted local and S3-compatible repositories through the shared object
   storage pipeline.
 - Encrypted, compressed, deduplicated snapshot creation.
@@ -110,7 +110,7 @@ Core product:
 - [x] Restore by latest, snapshot id, tag, and path.
 - [x] `snapshots`, `ls`, `find`, `diff`, `check`, `forget`, and recoverable
       two-phase `prune`.
-- [x] Key add/remove/rotate/export-recovery/import-recovery paths.
+- [x] Key add/remove/rotate/rekey/export-recovery/import-recovery paths.
 - [x] Stable config profiles and environment variables.
 - [x] Shell completion generation.
 - [x] Format v0 freeze decision completed.
@@ -152,7 +152,7 @@ Additional command surface:
 - [x] `ferry policy`.
 - [x] `ferry doctor`.
 - [x] Recovery import.
-- [ ] Full repository rekey.
+- [x] Full repository rekey.
 - [ ] Broader storage providers.
 
 Out of scope for v1: GUI, TUI, daemon, server, scheduler, SaaS, mobile app,
@@ -168,9 +168,9 @@ FUSE mount, and compatibility with existing backup repository formats.
 - Current normal metadata capture does not restore xattr values, ACL contents,
   file flags, resource forks, Windows attributes, sparse extent maps, symlink
   metadata, or creation/birth timestamps.
-- Key rotation currently rotates unlock access by adding a new slot and
-  marker-removing selected externally added slots. It does not rewrite
-  repository data with a new master key.
+- `ferry key rotate` currently rotates unlock access by adding a new slot and
+  marker-removing selected externally added slots. `ferry key rekey` is the
+  separate full repository master-key rewrite path.
 - `ferry find` searches encrypted snapshot metadata after repository unlock.
   It does not search file contents or read chunk data.
 - `ferry diff` compares encrypted snapshot metadata after repository unlock.
