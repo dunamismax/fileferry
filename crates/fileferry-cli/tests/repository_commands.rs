@@ -10,7 +10,7 @@ use predicates::prelude::PredicateBooleanExt;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use std::{
-    fs,
+    fs, io,
     path::Path,
     process::Output,
     time::{Duration, SystemTime},
@@ -179,6 +179,22 @@ fn set_modified_time(path: &Path, modified: SystemTime) {
         .expect("open file for timestamp update");
     file.set_times(fs::FileTimes::new().set_modified(modified))
         .expect("set file modified time");
+}
+
+fn try_set_directory_modified_time(path: &Path, modified: SystemTime) -> bool {
+    let directory = match fs::File::open(path) {
+        Ok(directory) => directory,
+        Err(source) if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied => {
+            return false;
+        }
+        Err(source) => panic!("open directory for timestamp update: {source}"),
+    };
+
+    match directory.set_times(fs::FileTimes::new().set_modified(modified)) {
+        Ok(()) => true,
+        Err(source) if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied => false,
+        Err(source) => panic!("set directory modified time: {source}"),
+    }
 }
 
 #[cfg(unix)]
@@ -4254,6 +4270,99 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
         .code(2)
         .stdout("")
         .stderr(predicates::str::contains("contains a symlink"));
+}
+
+#[test]
+fn restore_preserves_file_and_directory_modified_times_through_cli() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    let docs = source.join("docs");
+    let report = docs.join("report.txt");
+    fs::create_dir_all(&docs).expect("create source tree");
+    fs::write(&report, b"mtime survives ferry restore").expect("write report");
+
+    let file_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_650_000_000);
+    let directory_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_550_000_000);
+    set_modified_time(&report, file_modified);
+    let directory_mtime_configured = try_set_directory_modified_time(&docs, directory_modified);
+
+    let backup = backup_source(&repo_url, passphrase, &source);
+    let destination = temp.path().join("restore");
+    let restore_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "restore",
+            "--path",
+            "docs",
+            destination.to_str().expect("destination path"),
+        ])
+        .assert()
+        .code(10)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let restore: Value = serde_json::from_slice(&restore_output).expect("restore json");
+
+    assert_eq!(
+        restore["data"]["snapshot_id"],
+        backup["data"]["snapshot_id"]
+    );
+    assert_eq!(restore["data"]["entries_selected"], 2);
+    assert_eq!(restore["data"]["directories_written"], 1);
+    assert_eq!(restore["data"]["files_written"], 1);
+    assert_eq!(
+        restore["data"]["metadata_planned"],
+        expected_restore_metadata_planned_fields(2)
+    );
+    assert_eq!(
+        fs::read(destination.join("docs/report.txt")).expect("restored report"),
+        b"mtime survives ferry restore"
+    );
+    assert_eq!(
+        fs::metadata(destination.join("docs/report.txt"))
+            .expect("restored report metadata")
+            .modified()
+            .expect("restored report modified time"),
+        file_modified
+    );
+
+    let warnings = restore["data"]["metadata_warnings"]
+        .as_array()
+        .expect("metadata warnings");
+    assert!(warnings.iter().any(|warning| {
+        warning["entry_id"] == platform_relative_path("docs/report.txt")
+            && warning["namespace"] == "portable"
+            && warning["field"] == "created"
+            && warning["source_platform"] == current_platform_json_name()
+            && warning["destination_platform"] == current_platform_json_name()
+    }));
+
+    if directory_mtime_configured {
+        assert_eq!(
+            fs::metadata(destination.join("docs"))
+                .expect("restored docs metadata")
+                .modified()
+                .expect("restored docs modified time"),
+            directory_modified
+        );
+    } else {
+        assert!(warnings.iter().any(|warning| {
+            warning["entry_id"] == platform_relative_path("docs")
+                && warning["namespace"] == "portable"
+                && warning["field"] == "modified"
+                && warning["source_platform"] == current_platform_json_name()
+                && warning["destination_platform"] == current_platform_json_name()
+        }));
+    }
 }
 
 #[test]

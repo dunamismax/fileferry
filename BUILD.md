@@ -135,7 +135,7 @@ Purpose: make the already-implemented metadata subset difficult to regress.
 - [x] Add or tighten focused core tests for file and directory modified-time
       application, including failure/warning behavior when timestamps are
       denied, unsupported, or outside the destination system-time range.
-- [ ] Add or tighten CLI tests that prove file and directory modified times
+- [x] Add or tighten CLI tests that prove file and directory modified times
       survive backup and restore through the `ferry` binary.
 - [x] Add or tighten Unix tests for regular-file and directory mode restore,
       including masking to `0o777` and warning for special bits.
