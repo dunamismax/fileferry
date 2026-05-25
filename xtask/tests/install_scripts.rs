@@ -164,7 +164,7 @@ impl Fixture {
     }
 
     fn release_archive(&self, binary_name: &str, binary_contents: &[u8]) -> PathBuf {
-        let package_dir = self.path("stage/fileferry-1.0.0-rc.1-test-target");
+        let package_dir = self.path("stage/fileferry-1.0.0-test-target");
         fs::create_dir_all(&package_dir).expect("create package dir");
         let binary = package_dir.join(binary_name);
         fs::write(&binary, binary_contents).expect("write binary");
@@ -177,13 +177,13 @@ impl Fixture {
             fs::set_permissions(&binary, permissions).expect("chmod binary");
         }
 
-        let archive = self.path("fileferry-1.0.0-rc.1-test-target.tar.gz");
+        let archive = self.path("fileferry-1.0.0-test-target.tar.gz");
         let output = Command::new("tar")
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
             .arg(self.path("stage"))
-            .arg("fileferry-1.0.0-rc.1-test-target")
+            .arg("fileferry-1.0.0-test-target")
             .output()
             .expect("create test archive with tar");
         assert_success(&output);

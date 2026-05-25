@@ -15,11 +15,12 @@ const TERMINAL_HTML: &str = r#"<span class="prompt">$ </span><span class="cmd">f
 <span class="out">repository initialized &middot; format v0 &middot; encrypted</span>
 
 <span class="prompt">$ </span><span class="cmd">ferry</span> <span class="arg">backup</span> <span class="arg">~/Documents</span> <span class="flag">--tag</span> <span class="arg">laptop</span> <span class="flag">--jsonl</span>
-<span class="json-key">{</span><span class="json-str">&quot;event&quot;:&quot;backup.started&quot;</span><span class="json-key">,...}</span>
-<span class="json-key">{</span><span class="json-str">&quot;event&quot;:&quot;backup.finished&quot;</span><span class="json-key">,...}</span>
+<span class="json-key">{</span><span class="json-str">&quot;event&quot;:&quot;command_started&quot;,&quot;command&quot;:&quot;backup&quot;</span><span class="json-key">,...}</span>
+<span class="json-key">{</span><span class="json-str">&quot;event&quot;:&quot;progress&quot;,&quot;data&quot;:{&quot;phase&quot;:&quot;write_commit&quot;}</span><span class="json-key">,...}</span>
+<span class="json-key">{</span><span class="json-str">&quot;event&quot;:&quot;command_completed&quot;,&quot;command&quot;:&quot;backup&quot;</span><span class="json-key">,...}</span>
 <span class="comment"># stdout stays JSONL &middot; progress stays on stderr</span>
 
-<span class="prompt">$ </span><span class="cmd">ferry</span> <span class="arg">restore</span> <span class="arg">latest</span> <span class="arg">~/restore-test</span>
+<span class="prompt">$ </span><span class="cmd">ferry</span> <span class="arg">restore</span> <span class="flag">--latest</span> <span class="arg">~/restore-test</span>
 <span class="out">restored &middot; verified bytes &middot; metadata warnings reported</span>"#;
 
 // Applies the saved or system theme before the first paint.
@@ -77,7 +78,7 @@ fn Homepage() -> impl IntoView {
                 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"/>
                 <meta
                     name="description"
-                    content="FileFerry is an all-Rust encrypted backup CLI. Version 1.0.0-rc.1 is a release candidate, not final v1.0.0."
+                    content="FileFerry is an all-Rust encrypted backup CLI. Version 1.0.0 is the first official v1 release."
                 />
                 <title>"FileFerry - encrypted backup CLI"</title>
                 <link rel="stylesheet" href="/assets/site.css"/>
@@ -130,7 +131,7 @@ fn Homepage() -> impl IntoView {
                     <section class="hero" aria-labelledby="hero-title">
                         <div class="hero-grid">
                             <div class="hero-copy">
-                                <span class="eyebrow">"1.0.0-rc.1 release candidate"</span>
+                                <span class="eyebrow">"1.0.0 official release"</span>
                                 <h1 id="hero-title">
                                     "Encrypted backups."
                                     <br/>
@@ -140,11 +141,11 @@ fn Homepage() -> impl IntoView {
                                     "FileFerry is an all-Rust CLI for encrypted, compressed, deduplicated backups to local and S3-compatible repositories. It is built for shells, restore drills, and self-hosted operations."
                                 </p>
                                 <div class="hero-actions">
-                                    <a class="button primary" href="https://github.com/dunamismax/fileferry/releases/tag/v1.0.0-rc.1">
+                                    <a class="button primary" href="https://github.com/dunamismax/fileferry/releases/tag/v1.0.0">
                                         <svg viewBox="0 0 16 16" aria-hidden="true">
                                             <path d="M7.25 1.75a.75.75 0 0 1 1.5 0v7.69l2.22-2.22a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 0 1 1.06-1.06l2.22 2.22V1.75zM2 13.75a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75z"/>
                                         </svg>
-                                        "Download RC"
+                                        "Download v1.0.0"
                                     </a>
                                     <a class="button secondary" href="https://github.com/dunamismax/fileferry">
                                         "View source"
@@ -181,9 +182,9 @@ fn Homepage() -> impl IntoView {
                     <section class="section" id="status" aria-labelledby="status-title">
                         <div class="section-inner">
                             <div class="section-heading">
-                                <h2 id="status-title">"Release candidate, not final v1.0.0."</h2>
+                                <h2 id="status-title">"V1 shipped with scoped support evidence."</h2>
                                 <p>
-                                    "The 1.0.0-rc.1 build exercises FileFerry's current encrypted backup, restore, check, retention, key-management, machine-output, and release-artifact paths. Platform wording is limited to observed CI, tests, artifacts, and smoke evidence."
+                                    "The 1.0.0 release exercises FileFerry's encrypted backup, restore, check, retention, key-management, machine-output, and release-artifact paths. Platform wording is limited to observed CI, tests, artifacts, and smoke evidence."
                                 </p>
                             </div>
                             <div class="status-grid">
@@ -224,14 +225,14 @@ fn Homepage() -> impl IntoView {
                     <section class="section" id="install" aria-labelledby="install-title">
                         <div class="section-inner deploy-section">
                             <div class="deploy-copy">
-                                <span class="eyebrow">"signed RC artifacts"</span>
+                                <span class="eyebrow">"signed v1 artifacts"</span>
                                 <h2 id="install-title">"Download the target archive and verify the attached evidence."</h2>
                                 <p>
-                                    "The release candidate attaches archives for Linux x86_64 GNU, Linux ARM64 GNU, macOS x86_64, macOS ARM64, and Windows x86_64 MSVC. Each target includes checksums, a Sigstore bundle, SBOM, manifest, archive-smoke JSON, and installer scripts."
+                                    "The release attaches archives for Linux x86_64 GNU, Linux ARM64 GNU, macOS x86_64, macOS ARM64, and Windows x86_64 MSVC. Each target includes checksums, a Sigstore bundle, SBOM, manifest, archive-smoke JSON, and installer scripts."
                                 </p>
                             </div>
                             <div class="deploy-card">
-                                <div class="deploy-card-header">"1.0.0-rc.1 artifact targets"</div>
+                                <div class="deploy-card-header">"1.0.0 artifact targets"</div>
                                 <dl class="deploy-rows">
                                     <dt>"Linux"</dt>
                                     <dd>"x86_64-unknown-linux-gnu"</dd>
@@ -286,7 +287,7 @@ fn Homepage() -> impl IntoView {
                             <div class="section-heading">
                                 <h2 id="security-title">"Encrypted before anything leaves the machine."</h2>
                                 <p>
-                                    "FileFerry uses client-side encryption and authenticated repository objects. The release candidate has tests for wrong-key, wrong-password, tamper, corruption, and redaction paths, but it is not an external audit claim."
+                                    "FileFerry uses client-side encryption and authenticated repository objects. The 1.0.0 release has tests for wrong-key, wrong-password, tamper, corruption, and redaction paths, but it is not an external audit claim."
                                 </p>
                             </div>
                             <div class="feature-grid">
@@ -321,7 +322,7 @@ fn Homepage() -> impl IntoView {
                     <span>"MIT licensed · built in Rust · CLI-only"</span>
                     <span class="footer-links">
                         <a href="https://github.com/dunamismax/fileferry">"GitHub"</a>
-                        <a href="https://github.com/dunamismax/fileferry/releases/tag/v1.0.0-rc.1">"1.0.0-rc.1"</a>
+                        <a href="https://github.com/dunamismax/fileferry/releases/tag/v1.0.0">"1.0.0"</a>
                     </span>
                 </footer>
 
@@ -338,12 +339,12 @@ mod tests {
     use tower::ServiceExt;
 
     #[test]
-    fn homepage_renders_release_candidate_status() {
+    fn homepage_renders_v1_status() {
         let html = render_homepage();
 
         assert!(html.contains("Encrypted backups."));
-        assert!(html.contains("1.0.0-rc.1 release candidate"));
-        assert!(html.contains("Release candidate, not final v1.0.0."));
+        assert!(html.contains("1.0.0 official release"));
+        assert!(html.contains("V1 shipped with scoped support evidence."));
         assert!(html.contains("x86_64-unknown-linux-gnu"));
         assert!(html.contains("CLI-only"));
         assert!(html.contains("/assets/site.css"));

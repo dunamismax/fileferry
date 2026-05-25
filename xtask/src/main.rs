@@ -1646,7 +1646,7 @@ mod tests {
     fn parses_archive_smoke_options() {
         let args = [
             "--archive",
-            "target/release-artifacts/fileferry-1.0.0-rc.1-test.tar.gz",
+            "target/release-artifacts/fileferry-1.0.0-test.tar.gz",
             "--target",
             "x86_64-unknown-linux-gnu",
             "--checksum-file",
@@ -1666,7 +1666,7 @@ mod tests {
         assert_eq!(
             options.archive.as_deref(),
             Some(Path::new(
-                "target/release-artifacts/fileferry-1.0.0-rc.1-test.tar.gz"
+                "target/release-artifacts/fileferry-1.0.0-test.tar.gz"
             ))
         );
         assert_eq!(options.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
@@ -1742,7 +1742,7 @@ mod tests {
     fn verify_release_artifacts_accepts_complete_target_evidence() {
         let root = create_temp_dir("fileferry-xtask-verify-artifacts").expect("temp root");
         let target = "x86_64-unknown-linux-gnu";
-        let stem = format!("fileferry-1.0.0-rc.1-{target}");
+        let stem = format!("fileferry-1.0.0-{target}");
         let archive_name = format!("{stem}.tar.gz");
         let manifest_name = format!("{stem}.manifest.json");
         let sbom_name = format!("{stem}.cdx.json");
@@ -1763,7 +1763,7 @@ mod tests {
             schema_version: 1,
             package: "fileferry",
             binary: "ferry",
-            version: "1.0.0-rc.1",
+            version: "1.0.0",
             target,
             commit: "0123456789abcdef",
             archive: archive_name.clone(),
@@ -1803,7 +1803,7 @@ mod tests {
         let root = create_temp_dir("fileferry-xtask-verify-target").expect("temp root");
         let target = "x86_64-unknown-linux-gnu";
         let wrong_target = "aarch64-unknown-linux-gnu";
-        let stem = format!("fileferry-1.0.0-rc.1-{target}");
+        let stem = format!("fileferry-1.0.0-{target}");
         let archive_name = format!("{stem}.tar.gz");
         let manifest_name = format!("{stem}.manifest.json");
         let sbom_name = format!("{stem}.cdx.json");
@@ -1819,7 +1819,7 @@ mod tests {
             schema_version: 1,
             package: "fileferry",
             binary: "ferry",
-            version: "1.0.0-rc.1",
+            version: "1.0.0",
             target: wrong_target,
             commit: "0123456789abcdef",
             archive: archive_name.clone(),
@@ -1863,7 +1863,7 @@ mod tests {
     fn verify_release_artifacts_requires_signature_when_expected() {
         let root = create_temp_dir("fileferry-xtask-verify-signature").expect("temp root");
         let target = "x86_64-unknown-linux-gnu";
-        let stem = format!("fileferry-1.0.0-rc.1-{target}");
+        let stem = format!("fileferry-1.0.0-{target}");
         let archive_name = format!("{stem}.tar.gz");
         let manifest_name = format!("{stem}.manifest.json");
         let sbom_name = format!("{stem}.cdx.json");
@@ -1879,7 +1879,7 @@ mod tests {
             schema_version: 1,
             package: "fileferry",
             binary: "ferry",
-            version: "1.0.0-rc.1",
+            version: "1.0.0",
             target,
             commit: "0123456789abcdef",
             archive: archive_name.clone(),
@@ -1975,7 +1975,7 @@ mod tests {
         let root = create_temp_dir("fileferry-xtask-verify-smoke-name").expect("temp root");
         let target = "x86_64-unknown-linux-gnu";
         let wrong_target = "aarch64-unknown-linux-gnu";
-        let stem = format!("fileferry-1.0.0-rc.1-{target}");
+        let stem = format!("fileferry-1.0.0-{target}");
         let archive_name = format!("{stem}.tar.gz");
         let manifest_name = format!("{stem}.manifest.json");
         let sbom_name = format!("{stem}.cdx.json");
@@ -1991,7 +1991,7 @@ mod tests {
             schema_version: 1,
             package: "fileferry",
             binary: "ferry",
-            version: "1.0.0-rc.1",
+            version: "1.0.0",
             target,
             commit: "0123456789abcdef",
             archive: archive_name.clone(),
@@ -2035,14 +2035,14 @@ mod tests {
     #[test]
     fn verify_archive_smoke_rejects_target_mismatch() {
         let target = "x86_64-unknown-linux-gnu";
-        let archive_name = format!("fileferry-1.0.0-rc.1-{target}.tar.gz");
+        let archive_name = format!("fileferry-1.0.0-{target}.tar.gz");
         let mut smoke = test_archive_smoke("aarch64-unknown-linux-gnu", &archive_name);
 
         let error = verify_archive_smoke_test(
             &smoke,
             target,
             &archive_name,
-            "1.0.0-rc.1",
+            "1.0.0",
             "archive-smoke evidence JSON",
         )
         .expect_err("target mismatch should fail");
@@ -2055,7 +2055,7 @@ mod tests {
             &smoke,
             target,
             &archive_name,
-            "1.0.0-rc.1",
+            "1.0.0",
             "archive-smoke evidence JSON",
         )
         .expect("corrected smoke evidence should verify");
@@ -2064,7 +2064,7 @@ mod tests {
     #[test]
     fn verify_archive_smoke_requires_packaged_binary_auditable_metadata() {
         let target = "x86_64-unknown-linux-gnu";
-        let archive_name = format!("fileferry-1.0.0-rc.1-{target}.tar.gz");
+        let archive_name = format!("fileferry-1.0.0-{target}.tar.gz");
         let mut smoke = test_archive_smoke(target, &archive_name);
         smoke.auditable_metadata = None;
 
@@ -2072,7 +2072,7 @@ mod tests {
             &smoke,
             target,
             &archive_name,
-            "1.0.0-rc.1",
+            "1.0.0",
             "archive-smoke evidence JSON",
         )
         .expect_err("missing packaged-binary auditable proof should fail");
@@ -2083,7 +2083,7 @@ mod tests {
     #[test]
     fn archive_smoke_rejects_target_that_does_not_match_archive_filename() {
         let root = create_temp_dir("fileferry-xtask-archive-target").expect("temp root");
-        let archive = root.join("fileferry-1.0.0-rc.1-aarch64-unknown-linux-gnu.tar.gz");
+        let archive = root.join("fileferry-1.0.0-aarch64-unknown-linux-gnu.tar.gz");
         fs::write(&archive, b"not a tar archive").expect("write fake archive");
 
         let error = archive_smoke(ArchiveSmokeRequest {
@@ -2104,7 +2104,7 @@ mod tests {
     #[test]
     fn archive_smoke_rejects_archive_without_release_target_filename() {
         let root = create_temp_dir("fileferry-xtask-archive-no-target").expect("temp root");
-        let archive = root.join("fileferry-1.0.0-rc.1-test.tar.gz");
+        let archive = root.join("fileferry-1.0.0-test.tar.gz");
         fs::write(&archive, b"not a tar archive").expect("write fake archive");
 
         let error = archive_smoke(ArchiveSmokeRequest {
@@ -2200,12 +2200,12 @@ mod tests {
 
     #[cfg(unix)]
     fn create_test_archive(root: &Path) -> PathBuf {
-        let package_dir = root.join("stage/fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu");
+        let package_dir = root.join("stage/fileferry-1.0.0-x86_64-unknown-linux-gnu");
         fs::create_dir_all(&package_dir).expect("create package dir");
         let binary = package_dir.join("ferry");
         fs::write(
             &binary,
-            b"#!/bin/sh\nprintf '{\"version\":\"1.0.0-rc.1-test\"}\\n'\n",
+            b"#!/bin/sh\nprintf '{\"version\":\"1.0.0-test\"}\\n'\n",
         )
         .expect("write fake ferry");
 
@@ -2214,14 +2214,14 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&binary, permissions).expect("chmod binary");
 
-        let archive = root.join("fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz");
+        let archive = root.join("fileferry-1.0.0-x86_64-unknown-linux-gnu.tar.gz");
         let mut command = Command::new("tar");
         command
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
             .arg(root.join("stage"))
-            .arg("fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu");
+            .arg("fileferry-1.0.0-x86_64-unknown-linux-gnu");
         run_command(&mut command, "create test archive").expect("create test archive");
         archive
     }
@@ -2245,7 +2245,7 @@ mod tests {
     }
 
     fn write_verify_release_fixture(root: &Path, target: &str, signature_json: Option<&str>) {
-        let stem = format!("fileferry-1.0.0-rc.1-{target}");
+        let stem = format!("fileferry-1.0.0-{target}");
         let archive_name = format!("{stem}.tar.gz");
         let manifest_name = format!("{stem}.manifest.json");
         let sbom_name = format!("{stem}.cdx.json");
@@ -2267,7 +2267,7 @@ mod tests {
             schema_version: 1,
             package: "fileferry",
             binary: "ferry",
-            version: "1.0.0-rc.1",
+            version: "1.0.0",
             target,
             commit: "0123456789abcdef",
             archive: archive_name.clone(),
@@ -2306,7 +2306,7 @@ mod tests {
                 "ferry".to_string()
             },
             root_package: FERRY_ROOT_PACKAGE.to_string(),
-            root_version: "1.0.0-rc.1".to_string(),
+            root_version: "1.0.0".to_string(),
             package_count: 42,
             format: 0,
         }
@@ -2322,7 +2322,7 @@ mod tests {
                 "status": "success",
                 "data": {
                     "command": "ferry",
-                    "version": "1.0.0-rc.1"
+                    "version": "1.0.0"
                 }
             })
             .to_string(),

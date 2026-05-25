@@ -801,7 +801,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fileferry-cli"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "fileferry-core"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "fastcdc",
  "fileferry-crypto",
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "fileferry-crypto"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "fileferry-platform"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "fileferry-policy"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "fileferry-storage"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "fileferry-testkit"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "fileferry-storage",
  "tempfile",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "fileferry-web"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "axum",
  "leptos",
@@ -3825,7 +3825,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "auditable-info",
  "serde",

@@ -3,9 +3,9 @@
 FileFerry storage is object-oriented. Backends store immutable byte objects by
 validated repository object keys; higher layers decide what those bytes mean.
 
-This document describes the current storage contract. It is not the complete
-v1 storage design yet, and it does not claim release support, platform
-support, or live S3 prune provider evidence beyond the evidence stated here.
+This document describes the current v1 storage contract. It does not claim
+release support, platform support, or live S3 prune provider evidence beyond
+the evidence stated here.
 
 ## Object Keys
 

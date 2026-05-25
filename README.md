@@ -16,24 +16,24 @@ Repository: [github.com/dunamismax/fileferry](https://github.com/dunamismax/file
 
 ## Status
 
-`1.0.0-rc.1` is a release candidate, not final v1.0.0.
+`1.0.0` is the first official FileFerry v1 release.
 
-The current release candidate includes:
+The current release includes:
 
 - Encrypted local and S3-compatible repository initialization.
 - Encrypted, compressed, deduplicated backup snapshots.
 - Restore by latest snapshot, snapshot id, tag, and path.
-- `snapshots`, `ls`, `check`, `forget`, `prune`, and
-  key-management commands.
+- `snapshots`, `ls`, `find`, `diff`, `repo`, `doctor`, `check`, `forget`,
+  `prune`, `policy`, and key-management commands.
 - JSON and JSONL machine output for the implemented command surface.
 - Config profiles and environment-variable precedence.
 - Format v0 repository compatibility fixtures for the documented current
   object families.
-- Signed release-candidate artifacts, checksums, SBOMs, cargo-auditable
-  metadata, installer scripts, and archive-smoke evidence for the intended RC
+- Signed release artifacts, checksums, SBOMs, cargo-auditable metadata,
+  installer scripts, and archive-smoke evidence for the intended release
   targets listed below.
 
-Release-candidate artifacts are intended for:
+Release artifacts are published for:
 
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
@@ -41,7 +41,7 @@ Release-candidate artifacts are intended for:
 - `aarch64-apple-darwin`
 - `x86_64-pc-windows-msvc`
 
-These targets have CI and release-artifact evidence for the RC. Do not read
+These targets have CI and release-artifact evidence for v1.0.0. Do not read
 that as a broad promise that every filesystem feature, metadata field, storage
 provider, or operating-system edge case is fully supported. Known limits are
 documented below and in [BUILD.md](BUILD.md).
@@ -49,15 +49,15 @@ documented below and in [BUILD.md](BUILD.md).
 ## Install
 
 Download the archive for your target from the
-[FileFerry 1.0.0-rc.1 GitHub release](https://github.com/dunamismax/fileferry/releases/tag/v1.0.0-rc.1).
+[FileFerry 1.0.0 GitHub release](https://github.com/dunamismax/fileferry/releases/tag/v1.0.0).
 
 For each target, the GitHub release includes:
 
-- `fileferry-1.0.0-rc.1-<target>.tar.gz`
-- `fileferry-1.0.0-rc.1-<target>.SHA256SUMS`
-- `fileferry-1.0.0-rc.1-<target>.SHA256SUMS.sigstore.json`
-- `fileferry-1.0.0-rc.1-<target>.manifest.json`
-- `fileferry-1.0.0-rc.1-<target>.cdx.json`
+- `fileferry-1.0.0-<target>.tar.gz`
+- `fileferry-1.0.0-<target>.SHA256SUMS`
+- `fileferry-1.0.0-<target>.SHA256SUMS.sigstore.json`
+- `fileferry-1.0.0-<target>.manifest.json`
+- `fileferry-1.0.0-<target>.cdx.json`
 - `fileferry-<target>.archive-smoke.json`
 
 The release also includes shared `install.sh` and `install.ps1` installer
@@ -67,7 +67,7 @@ Unix shell installer:
 
 ```sh
 sh ./install.sh \
-  --archive ./fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz \
+  --archive ./fileferry-1.0.0-x86_64-unknown-linux-gnu.tar.gz \
   --install-dir "$HOME/.local/bin"
 ```
 
@@ -75,7 +75,7 @@ PowerShell installer:
 
 ```powershell
 pwsh -NoLogo -NoProfile -NonInteractive -File ./install.ps1 `
-  -Archive ./fileferry-1.0.0-rc.1-x86_64-pc-windows-msvc.tar.gz `
+  -Archive ./fileferry-1.0.0-x86_64-pc-windows-msvc.tar.gz `
   -InstallDir "$HOME/bin"
 ```
 
@@ -87,8 +87,8 @@ checksum file explicitly or save it as `SHA256SUMS` beside the archive.
 Manual install:
 
 ```sh
-tar -xzf fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz
-install -m 0755 fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu/ferry "$HOME/.local/bin/ferry"
+tar -xzf fileferry-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 fileferry-1.0.0-x86_64-unknown-linux-gnu/ferry "$HOME/.local/bin/ferry"
 ferry version
 ```
 
@@ -108,7 +108,7 @@ ferry find --all --glob 'Projects/**/*.rs'
 ferry diff --from-tag laptop --to-latest --path Projects
 ferry repo --verify --json
 ferry doctor --json
-ferry restore latest ~/restore-test
+ferry restore --latest ~/restore-test
 ferry check --read-data-subset 5%
 ferry policy set --keep-daily 14 --keep-weekly 8
 ferry policy show --json
@@ -149,13 +149,13 @@ format version and KDF parameters, may be plaintext and are documented in
 Current primitives and behavior include Argon2id passphrase derivation, a
 random repository master key, HKDF-derived subkeys, XChaCha20-Poly1305
 authenticated encryption, wrong-key and tamper failure paths, secret-redaction
-tests, encrypted recovery export, and full repository rekey in current main.
+tests, encrypted recovery export/import, and full repository rekey.
 
-This is release-candidate security engineering, not an external audit claim.
+This is implementation and test evidence, not an external security audit
+claim.
 
 ## Known Limits
 
-- `1.0.0-rc.1` is not final v1.0.0.
 - Restore applies the implemented metadata subset only. It currently restores
   regular-file and directory modified timestamps, restores Unix mode bits for
   regular files and directories where representable, and verifies Unix
@@ -163,16 +163,6 @@ This is release-candidate security engineering, not an external audit claim.
 - xattr values, ACL contents, file flags, resource forks, Windows attributes,
   sparse extent maps, symlink metadata, and creation/birth timestamps are not
   restored by this version.
-- The published `1.0.0-rc.1` artifacts include recovery export but not
-  recovery import or `ferry find`. Current main adds recovery import as a new
-  external key slot, `ferry find` for encrypted snapshot-metadata search,
-  `ferry diff` for manifest-level snapshot comparison, `ferry repo` for safe
-  repository status plus opt-in encrypted metadata/state verification,
-  `ferry policy` for encrypted repository-local retention policy config
-  storage, display, explicit deletion, and explicit application by policy id
-  through `ferry forget --policy`, `ferry doctor` for safe repository
-  diagnostics, and `ferry key rekey` for creating a new repository master key
-  and rewriting repository objects.
 - `ferry key rotate` remains unlock rotation by adding/removing key slots.
   Use `ferry key rekey` when the intended operation is a new repository master
   key and object rewrite.
@@ -246,7 +236,7 @@ FILEFERRY_WEB_ADDR=127.0.0.1:8080 cargo run -p fileferry-web
 
 Release process and artifact expectations live in
 [docs/release.md](docs/release.md). Current release notes live in
-[docs/release-notes-1.0.0-rc.1.md](docs/release-notes-1.0.0-rc.1.md).
+[docs/release-notes-1.0.0.md](docs/release-notes-1.0.0.md).
 
 ## License
 

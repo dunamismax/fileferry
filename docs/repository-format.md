@@ -502,7 +502,7 @@ Future concurrent backups may be allowed when:
 Current `ferry backup` takes the repository mutation lease before scanning and
 publishing a snapshot. It rejects another active readable lease and malformed
 lease state before writing chunk, index, manifest, or commit objects. This is a
-narrow pre-v1 safety rule, not a final concurrent-backup design.
+narrow v1 safety rule, not a final concurrent-backup design.
 
 Concurrent backup must be rejected when the backend cannot provide the minimum
 idempotent write and visibility behavior needed for safe publication.

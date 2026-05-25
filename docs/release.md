@@ -3,16 +3,15 @@
 This document defines the retained FileFerry release process until a dedicated
 release tool such as `cargo-dist` is adopted.
 
-`1.0.0-rc.1` is a release candidate. Do not publish or describe it as final
-v1.0.0.
+`1.0.0` is the first official FileFerry v1 release.
 
 The release process must not claim platform support before CI, relevant tests,
 release artifacts, checksums/signatures, SBOMs, cargo-auditable metadata, and
 archive-smoke evidence exist for the exact release commit.
 
-## Release-Candidate Targets
+## Release Targets
 
-The intended `1.0.0-rc.1` target matrix is:
+The intended `1.0.0` target matrix is:
 
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
@@ -22,17 +21,17 @@ The intended `1.0.0-rc.1` target matrix is:
 
 Each target release directory must contain:
 
-- `fileferry-1.0.0-rc.1-<target>.tar.gz`
+- `fileferry-1.0.0-<target>.tar.gz`
 - `SHA256SUMS`
 - `SHA256SUMS.sigstore.json`
-- `fileferry-1.0.0-rc.1-<target>.manifest.json`
-- `fileferry-1.0.0-rc.1-<target>.cdx.json`
+- `fileferry-1.0.0-<target>.manifest.json`
+- `fileferry-1.0.0-<target>.cdx.json`
 - `fileferry-<target>.archive-smoke.json`
 - `install.sh`
 - `install.ps1`
 
 Every release manifest must record package `fileferry`, binary `ferry`,
-version `1.0.0-rc.1`, the target triple, the exact release commit, an
+version `1.0.0`, the target triple, the exact release commit, an
 auditable build, cargo-auditable metadata, the archive name, installer names,
 and the target SBOM.
 
@@ -47,15 +46,15 @@ hosted runner targets:
 - macOS ARM64 host.
 - Windows x86_64 MSVC host.
 
-Completed passing jobs are required release-candidate evidence, but they are
+Completed passing jobs are required release evidence, but they are
 not platform support by themselves. Support language still needs the matching
 target-specific release artifact, checksum/signature/SBOM/auditable metadata,
 archive-smoke evidence, and relevant platform metadata tests for the exact
-release candidate.
+release commit.
 
 ## Preconditions
 
-Before tagging a release candidate:
+Before tagging a release:
 
 - The checkout is clean and on `main`.
 - `git pull --ff-only origin main` has completed.
@@ -114,7 +113,7 @@ artifacts are useful for dry runs, but they are not release artifacts.
 The retained archive smoke entrypoint is:
 
 ```sh
-version="1.0.0-rc.1"
+version="1.0.0"
 host="$(rustc -vV | awk '/host:/ {print $2}')"
 cargo run -p xtask -- archive-smoke \
   --archive "target/release-artifacts/fileferry-${version}-${host}.tar.gz" \
@@ -146,7 +145,7 @@ archive-smoke evidence JSON, verifies target ownership, and checks
 ## Manual Workflow
 
 The workflow `.github/workflows/release-artifacts.yml` is manual-only. It
-builds candidate artifacts with `cargo-auditable`, generates SBOMs with
+builds release artifacts with `cargo-auditable`, generates SBOMs with
 `cargo-cyclonedx`, and signs checksum manifests with Sigstore keyless signing
 through GitHub OIDC when `sign_artifacts=true`.
 
@@ -174,12 +173,12 @@ gh run watch <RUN_ID> --exit-status
 Download and verify:
 
 ```sh
-rm -rf "target/release-candidate-evidence-<RUN_ID>"
-mkdir -p "target/release-candidate-evidence-<RUN_ID>"
-gh run download <RUN_ID> --dir "target/release-candidate-evidence-<RUN_ID>"
+rm -rf "target/release-evidence-<RUN_ID>"
+mkdir -p "target/release-evidence-<RUN_ID>"
+gh run download <RUN_ID> --dir "target/release-evidence-<RUN_ID>"
 
 cargo run -p xtask -- verify-release-artifacts \
-  --dir "target/release-candidate-evidence-<RUN_ID>/fileferry-x86_64-unknown-linux-gnu-release-artifacts" \
+  --dir "target/release-evidence-<RUN_ID>/fileferry-x86_64-unknown-linux-gnu-release-artifacts" \
   --target x86_64-unknown-linux-gnu \
   --expect-signature
 ```
@@ -204,7 +203,7 @@ Unix shell example:
 
 ```sh
 sh ./install.sh \
-  --archive ./fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz \
+  --archive ./fileferry-1.0.0-x86_64-unknown-linux-gnu.tar.gz \
   --install-dir "$HOME/.local/bin"
 ```
 
@@ -212,7 +211,7 @@ PowerShell example:
 
 ```powershell
 pwsh -NoLogo -NoProfile -NonInteractive -File ./install.ps1 `
-  -Archive ./fileferry-1.0.0-rc.1-x86_64-pc-windows-msvc.tar.gz `
+  -Archive ./fileferry-1.0.0-x86_64-pc-windows-msvc.tar.gz `
   -InstallDir "$HOME/bin"
 ```
 
@@ -239,13 +238,12 @@ Preferred shape:
 
 ```sh
 commit="$(git rev-parse HEAD)"
-git tag -s v1.0.0-rc.1 "$commit" -m "FileFerry 1.0.0-rc.1"
-git push origin v1.0.0-rc.1
+git tag -s v1.0.0 "$commit" -m "FileFerry 1.0.0"
+git push origin v1.0.0
 
-gh release create v1.0.0-rc.1 <artifact-files...> \
-  --title "FileFerry 1.0.0-rc.1" \
-  --notes-file docs/release-notes-1.0.0-rc.1.md \
-  --prerelease \
+gh release create v1.0.0 <artifact-files...> \
+  --title "FileFerry 1.0.0" \
+  --notes-file docs/release-notes-1.0.0.md \
   --target "$commit"
 ```
 
@@ -261,11 +259,11 @@ uploading artifacts from the per-target workflow directories, keep the target
 archive, SBOM, manifest, and archive-smoke filenames unchanged, upload one
 shared `install.sh` and `install.ps1`, and rename duplicate per-target
 `SHA256SUMS` and `SHA256SUMS.sigstore.json` assets to target-qualified names
-such as `fileferry-1.0.0-rc.1-x86_64-unknown-linux-gnu.SHA256SUMS`.
+such as `fileferry-1.0.0-x86_64-unknown-linux-gnu.SHA256SUMS`.
 
 Do not publish a release from uncommitted changes. Do not publish artifacts
 whose binary version, commit, checksum, or smoke-test evidence cannot be tied
-back to the release candidate.
+back to the release commit.
 
 ## Release Notes
 
@@ -281,5 +279,5 @@ Release notes must be written for users and operators. They should include:
 Release notes must not include unsupported platform claims or attribution to
 automation tools.
 
-The `1.0.0-rc.1` notes are in
-[`docs/release-notes-1.0.0-rc.1.md`](release-notes-1.0.0-rc.1.md).
+The `1.0.0` notes are in
+[`docs/release-notes-1.0.0.md`](release-notes-1.0.0.md).

@@ -1,7 +1,7 @@
 # CLI Contract
 
 FileFerry's command-line interface is intended for scripts first. Human output
-may improve while the project is pre-v1, but stdout/stderr separation, exit
+may improve across compatible releases, but stdout/stderr separation, exit
 code families, and machine-output envelopes are treated as compatibility
 surfaces once marked stable.
 
@@ -93,7 +93,7 @@ directory.
   "status": "success",
   "data": {
     "command": "ferry",
-    "version": "1.0.0-rc.1"
+    "version": "1.0.0"
   }
 }
 ```
@@ -519,7 +519,7 @@ does not support JSON wrapping because the completion script itself is the data.
 
 ```json
 {"schema_version":1,"event":"command_started","command":"version","status":"started","data":null}
-{"schema_version":1,"event":"command_completed","command":"version","status":"success","data":{"command":"ferry","version":"1.0.0-rc.1"}}
+{"schema_version":1,"event":"command_completed","command":"version","status":"success","data":{"command":"ferry","version":"1.0.0"}}
 ```
 
 Reserved event names:

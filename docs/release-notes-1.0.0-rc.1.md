@@ -1,5 +1,8 @@
 # FileFerry 1.0.0-rc.1
 
+These are historical release-candidate notes. The current official v1 release
+notes are in [`docs/release-notes-1.0.0.md`](release-notes-1.0.0.md).
+
 FileFerry `1.0.0-rc.1` is a release candidate for the first FileFerry CLI
 release. It is not final v1.0.0.
 

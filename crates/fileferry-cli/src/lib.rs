@@ -5545,7 +5545,7 @@ mod tests {
     fn version_human_output_is_stable() {
         let output = run(version_cli(false, false)).expect("version output");
 
-        assert_eq!(output.stdout, "ferry 1.0.0-rc.1\n");
+        assert_eq!(output.stdout, "ferry 1.0.0\n");
         assert_eq!(output.stderr, "");
     }
 
@@ -5559,7 +5559,7 @@ mod tests {
         assert_eq!(parsed["command"], "version");
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["data"]["command"], "ferry");
-        assert_eq!(parsed["data"]["version"], "1.0.0-rc.1");
+        assert_eq!(parsed["data"]["version"], "1.0.0");
     }
 
     #[test]

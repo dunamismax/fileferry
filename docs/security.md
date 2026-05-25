@@ -1,10 +1,11 @@
 # Security Design
 
-FileFerry is pre-v1. The format v0 compatibility contract is frozen for the
-object families and fields documented in `docs/repository-format.md`. This
-document records the security decisions that format v0 implementation work
-must follow. Changing these decisions requires updating this document,
-repository-format fixtures, and the focused crypto tests.
+FileFerry v1.0.0 uses repository format v0. The format v0 compatibility
+contract is frozen for the object families and fields documented in
+`docs/repository-format.md`. This document records the security decisions that
+format v0 implementation work must follow. Changing these decisions requires
+updating this document, repository-format fixtures, and the focused crypto
+tests.
 
 ## Goals
 
@@ -506,8 +507,8 @@ Sensitive plaintext metadata must not be placed in any error field.
 
 ## Secret Leakage Audit
 
-The current release-candidate audit covers CLI runtime output for human, JSON,
-and JSONL failure paths, plus storage debug output for S3 configuration. The
+The current v1 audit covers CLI runtime output for human, JSON, and JSONL
+failure paths, plus storage debug output for S3 configuration. The
 covered canaries assert that passphrase values, S3 access key values, S3 secret
 key values, embedded URL userinfo, query strings, and fragments do not appear
 in output when repository access, config parsing, S3 URL parsing, or S3
