@@ -6238,7 +6238,7 @@ impl BackupPipeline {
         let mut directories = Vec::new();
         let mut files = Vec::new();
         let mut symlinks = Vec::new();
-        let mut metadata_warnings = Vec::new();
+        let mut metadata_outcomes = RestoreMetadataOutcomes::default();
 
         for entry in scoped_entries {
             match entry.metadata.kind {
@@ -6287,24 +6287,24 @@ impl BackupPipeline {
                             });
                         }
                         MetadataValue::Unsupported => {
-                            metadata_warnings.push(RestoreMetadataWarning {
-                                relative_path: entry.relative_path.clone(),
-                                namespace: "portable",
-                                field: "symlink_target",
-                                source_platform: entry.metadata.source_platform,
-                                destination_platform: current_platform(),
-                                reason: "symlink target was not captured".to_owned(),
-                            });
+                            metadata_outcomes.record(RestoreMetadataFieldOutcome::warning_only(
+                                &entry.relative_path,
+                                "portable",
+                                "symlink_target",
+                                entry.metadata.source_platform,
+                                RestoreMetadataOutcomeStatus::SkippedUnsupported,
+                                "symlink target was not captured".to_owned(),
+                            ));
                         }
                         MetadataValue::Denied(reason) => {
-                            metadata_warnings.push(RestoreMetadataWarning {
-                                relative_path: entry.relative_path.clone(),
-                                namespace: "portable",
-                                field: "symlink_target",
-                                source_platform: entry.metadata.source_platform,
-                                destination_platform: current_platform(),
-                                reason: format!("symlink target was denied: {reason}"),
-                            });
+                            metadata_outcomes.record(RestoreMetadataFieldOutcome::warning_only(
+                                &entry.relative_path,
+                                "portable",
+                                "symlink_target",
+                                entry.metadata.source_platform,
+                                RestoreMetadataOutcomeStatus::Denied,
+                                format!("symlink target was denied: {reason}"),
+                            ));
                         }
                     }
                     continue;
@@ -6422,7 +6422,8 @@ impl BackupPipeline {
             directories,
             files,
             symlinks,
-            metadata_warnings,
+            metadata_warnings: metadata_outcomes.metadata_warnings(),
+            metadata_outcomes,
         })
     }
 
@@ -6448,10 +6449,11 @@ impl BackupPipeline {
         let mut prepared_directories = Vec::with_capacity(contents.directories.len());
         let mut prepared_files = Vec::with_capacity(contents.files.len());
         let mut prepared_symlinks = Vec::with_capacity(contents.symlinks.len());
-        let mut metadata_applied = 0_usize;
 
         validate_restore_destination_entry_set(&request.destination, &contents, request.dry_run)?;
-        let mut metadata_warnings = contents.metadata_warnings;
+        let snapshot_id = contents.snapshot_id;
+        let selected_entries = contents.selected_entries;
+        let mut metadata_outcomes = contents.metadata_outcomes;
 
         for directory in contents.directories {
             let destination_path =
@@ -6556,78 +6558,37 @@ impl BackupPipeline {
             });
         }
 
-        let metadata_planned = (planned_files.len() + planned_directories.len()) * 2
-            + planned_files
-                .iter()
-                .filter(|file| file.unix_mode.is_some())
-                .count()
-            + planned_directories
-                .iter()
-                .filter(|directory| directory.unix_mode.is_some())
-                .count()
-            + planned_files
-                .iter()
-                .filter(|file| file.unix_owner.is_some())
-                .count()
-                * 2
-            + planned_directories
-                .iter()
-                .filter(|directory| directory.unix_owner.is_some())
-                .count()
-                * 2
-            + planned_symlinks.len() * 2
-            + planned_symlinks
-                .iter()
-                .filter(|symlink| symlink.unix_mode.is_some())
-                .count()
-            + planned_symlinks
-                .iter()
-                .filter(|symlink| symlink.unix_owner.is_some())
-                .count()
-                * 2
-            + planned_files
-                .iter()
-                .map(|file| planned_extension_field_count(&file.extensions))
-                .sum::<usize>()
-            + planned_directories
-                .iter()
-                .map(|directory| planned_extension_field_count(&directory.extensions))
-                .sum::<usize>()
-            + planned_symlinks
-                .iter()
-                .map(|symlink| planned_extension_field_count(&symlink.extensions))
-                .sum::<usize>();
         if request.dry_run {
             for file in &planned_files {
                 plan_restored_modified_timestamp(
                     &file.relative_path,
                     file.source_platform,
                     &file.modified,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_unrestored_created_timestamp(
                     &file.relative_path,
                     file.source_platform,
                     &file.created,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_restored_unix_mode(
                     &file.relative_path,
                     file.source_platform,
                     file.unix_mode,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_restored_unix_owner(
                     &file.relative_path,
                     file.source_platform,
                     file.unix_owner,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_unrestored_platform_extensions(
                     &file.relative_path,
                     file.source_platform,
                     &file.extensions,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
             }
 
@@ -6636,133 +6597,137 @@ impl BackupPipeline {
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.modified,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_unrestored_created_timestamp(
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.created,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_restored_unix_mode(
                     &directory.relative_path,
                     directory.source_platform,
                     directory.unix_mode,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_restored_unix_owner(
                     &directory.relative_path,
                     directory.source_platform,
                     directory.unix_owner,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_unrestored_platform_extensions(
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.extensions,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
             }
 
             for symlink in &planned_symlinks {
-                plan_unrestored_symlink_metadata(symlink, &mut metadata_warnings);
+                plan_unrestored_symlink_metadata(symlink, &mut metadata_outcomes);
                 plan_unrestored_platform_extensions(
                     &symlink.relative_path,
                     symlink.source_platform,
                     &symlink.extensions,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
             }
         } else {
             for file in &planned_files {
-                metadata_applied += apply_restored_modified_timestamp(
+                apply_restored_modified_timestamp(
                     &file.destination_path,
                     &file.relative_path,
                     file.source_platform,
                     &file.modified,
                     RestoredMetadataTarget::RegularFile,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_unrestored_created_timestamp(
                     &file.relative_path,
                     file.source_platform,
                     &file.created,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
-                metadata_applied += apply_restored_unix_mode(
+                apply_restored_unix_mode(
                     &file.destination_path,
                     &file.relative_path,
                     file.source_platform,
                     file.unix_mode,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
-                metadata_applied += verify_restored_unix_owner(
+                verify_restored_unix_owner(
                     &file.destination_path,
                     &file.relative_path,
                     file.source_platform,
                     file.unix_owner,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_unrestored_platform_extensions(
                     &file.relative_path,
                     file.source_platform,
                     &file.extensions,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
             }
 
             for directory in &planned_directories {
-                metadata_applied += apply_restored_modified_timestamp(
+                apply_restored_modified_timestamp(
                     &directory.destination_path,
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.modified,
                     RestoredMetadataTarget::Directory,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_unrestored_created_timestamp(
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.created,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
-                metadata_applied += apply_restored_unix_mode(
+                apply_restored_unix_mode(
                     &directory.destination_path,
                     &directory.relative_path,
                     directory.source_platform,
                     directory.unix_mode,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
-                metadata_applied += verify_restored_unix_owner(
+                verify_restored_unix_owner(
                     &directory.destination_path,
                     &directory.relative_path,
                     directory.source_platform,
                     directory.unix_owner,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
                 plan_unrestored_platform_extensions(
                     &directory.relative_path,
                     directory.source_platform,
                     &directory.extensions,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
             }
 
             for symlink in &planned_symlinks {
-                plan_unrestored_symlink_metadata(symlink, &mut metadata_warnings);
+                plan_unrestored_symlink_metadata(symlink, &mut metadata_outcomes);
                 plan_unrestored_platform_extensions(
                     &symlink.relative_path,
                     symlink.source_platform,
                     &symlink.extensions,
-                    &mut metadata_warnings,
+                    &mut metadata_outcomes,
                 );
             }
         }
 
+        let metadata_planned = metadata_outcomes.metadata_planned();
+        let metadata_applied = metadata_outcomes.metadata_applied();
+        let metadata_warnings = metadata_outcomes.metadata_warnings();
+
         let bytes = planned_files.iter().map(|file| file.bytes).sum();
         Ok(RestoreDestinationResult {
-            snapshot_id: contents.snapshot_id,
-            selected_entries: contents.selected_entries,
+            snapshot_id,
+            selected_entries,
             directories: planned_directories,
             files: planned_files,
             symlinks: planned_symlinks,
@@ -7998,6 +7963,7 @@ pub struct RestoreContentResult {
     pub files: Vec<RestoredFile>,
     pub symlinks: Vec<RestoredSymlink>,
     pub metadata_warnings: Vec<RestoreMetadataWarning>,
+    metadata_outcomes: RestoreMetadataOutcomes,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8129,6 +8095,167 @@ pub struct RestoreMetadataWarning {
     pub source_platform: PlatformKind,
     pub destination_platform: PlatformKind,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RestoreMetadataOutcomes {
+    fields: Vec<RestoreMetadataFieldOutcome>,
+}
+
+impl RestoreMetadataOutcomes {
+    fn record(&mut self, outcome: RestoreMetadataFieldOutcome) {
+        self.fields.push(outcome);
+    }
+
+    fn metadata_planned(&self) -> usize {
+        self.fields
+            .iter()
+            .filter(|outcome| outcome.counts_as_planned)
+            .count()
+    }
+
+    fn metadata_applied(&self) -> usize {
+        self.fields
+            .iter()
+            .filter(|outcome| outcome.status == RestoreMetadataOutcomeStatus::Applied)
+            .count()
+    }
+
+    fn metadata_warnings(&self) -> Vec<RestoreMetadataWarning> {
+        self.fields
+            .iter()
+            .filter_map(RestoreMetadataFieldOutcome::as_warning)
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RestoreMetadataFieldOutcome {
+    relative_path: PathBuf,
+    namespace: &'static str,
+    field: &'static str,
+    source_platform: PlatformKind,
+    destination_platform: PlatformKind,
+    status: RestoreMetadataOutcomeStatus,
+    reason: Option<String>,
+    counts_as_planned: bool,
+}
+
+impl RestoreMetadataFieldOutcome {
+    fn planned(
+        relative_path: &Path,
+        namespace: &'static str,
+        field: &'static str,
+        source_platform: PlatformKind,
+    ) -> Self {
+        Self::new(
+            relative_path,
+            namespace,
+            field,
+            source_platform,
+            RestoreMetadataOutcomeStatus::Planned,
+            None,
+            true,
+        )
+    }
+
+    fn applied(
+        relative_path: &Path,
+        namespace: &'static str,
+        field: &'static str,
+        source_platform: PlatformKind,
+    ) -> Self {
+        Self::new(
+            relative_path,
+            namespace,
+            field,
+            source_platform,
+            RestoreMetadataOutcomeStatus::Applied,
+            None,
+            true,
+        )
+    }
+
+    fn warning_with_reason(
+        relative_path: &Path,
+        namespace: &'static str,
+        field: &'static str,
+        source_platform: PlatformKind,
+        status: RestoreMetadataOutcomeStatus,
+        reason: String,
+    ) -> Self {
+        Self::new(
+            relative_path,
+            namespace,
+            field,
+            source_platform,
+            status,
+            Some(reason),
+            true,
+        )
+    }
+
+    fn warning_only(
+        relative_path: &Path,
+        namespace: &'static str,
+        field: &'static str,
+        source_platform: PlatformKind,
+        status: RestoreMetadataOutcomeStatus,
+        reason: String,
+    ) -> Self {
+        Self::new(
+            relative_path,
+            namespace,
+            field,
+            source_platform,
+            status,
+            Some(reason),
+            false,
+        )
+    }
+
+    fn new(
+        relative_path: &Path,
+        namespace: &'static str,
+        field: &'static str,
+        source_platform: PlatformKind,
+        status: RestoreMetadataOutcomeStatus,
+        reason: Option<String>,
+        counts_as_planned: bool,
+    ) -> Self {
+        Self {
+            relative_path: relative_path.to_path_buf(),
+            namespace,
+            field,
+            source_platform,
+            destination_platform: current_platform(),
+            status,
+            reason,
+            counts_as_planned,
+        }
+    }
+
+    fn as_warning(&self) -> Option<RestoreMetadataWarning> {
+        self.reason.as_ref().map(|reason| RestoreMetadataWarning {
+            relative_path: self.relative_path.clone(),
+            namespace: self.namespace,
+            field: self.field,
+            source_platform: self.source_platform,
+            destination_platform: self.destination_platform,
+            reason: reason.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoreMetadataOutcomeStatus {
+    Planned,
+    Applied,
+    SkippedUnsupported,
+    Denied,
+    Unrepresentable,
+    Failed,
+    NotYetImplemented,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -8725,27 +8852,29 @@ fn apply_restored_modified_timestamp(
     source_platform: PlatformKind,
     modified: &MetadataValue<Timestamp>,
     target: RestoredMetadataTarget,
-    warnings: &mut Vec<RestoreMetadataWarning>,
-) -> usize {
+    outcomes: &mut RestoreMetadataOutcomes,
+) {
     let Some(modified_time) =
-        restored_modified_time_or_warn(relative_path, source_platform, modified, warnings)
+        restored_modified_time_or_record(relative_path, source_platform, modified, outcomes)
     else {
-        return 0;
+        return;
     };
 
     match set_restored_modified_timestamp(destination_path, target, modified_time) {
-        Ok(()) => 1,
-        Err(source) => {
-            warnings.push(RestoreMetadataWarning {
-                relative_path: relative_path.to_path_buf(),
-                namespace: "portable",
-                field: "modified",
-                source_platform,
-                destination_platform: current_platform(),
-                reason: format!("modified timestamp could not be applied: {source}"),
-            });
-            0
-        }
+        Ok(()) => outcomes.record(RestoreMetadataFieldOutcome::applied(
+            relative_path,
+            "portable",
+            "modified",
+            source_platform,
+        )),
+        Err(source) => outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            relative_path,
+            "portable",
+            "modified",
+            source_platform,
+            RestoreMetadataOutcomeStatus::Failed,
+            format!("modified timestamp could not be applied: {source}"),
+        )),
     }
 }
 
@@ -8753,9 +8882,18 @@ fn plan_restored_modified_timestamp(
     relative_path: &Path,
     source_platform: PlatformKind,
     modified: &MetadataValue<Timestamp>,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
-    let _ = restored_modified_time_or_warn(relative_path, source_platform, modified, warnings);
+    if restored_modified_time_or_record(relative_path, source_platform, modified, outcomes)
+        .is_some()
+    {
+        outcomes.record(RestoreMetadataFieldOutcome::planned(
+            relative_path,
+            "portable",
+            "modified",
+            source_platform,
+        ));
+    }
 }
 
 fn apply_restored_unix_mode(
@@ -8763,39 +8901,41 @@ fn apply_restored_unix_mode(
     relative_path: &Path,
     source_platform: PlatformKind,
     unix_mode: Option<u32>,
-    warnings: &mut Vec<RestoreMetadataWarning>,
-) -> usize {
+    outcomes: &mut RestoreMetadataOutcomes,
+) {
     let Some(mode) = unix_mode else {
-        return 0;
+        return;
     };
 
-    warn_unrestored_unix_mode_bits(relative_path, source_platform, mode, warnings);
+    warn_unrestored_unix_mode_bits(relative_path, source_platform, mode, outcomes);
 
     if !destination_supports_unix_mode() {
-        warnings.push(RestoreMetadataWarning {
-            relative_path: relative_path.to_path_buf(),
-            namespace: "unix",
-            field: "mode",
+        outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            relative_path,
+            "unix",
+            "mode",
             source_platform,
-            destination_platform: current_platform(),
-            reason: "unix mode cannot be represented on this destination platform".to_owned(),
-        });
-        return 0;
+            RestoreMetadataOutcomeStatus::Unrepresentable,
+            "unix mode cannot be represented on this destination platform".to_owned(),
+        ));
+        return;
     }
 
     match set_restored_unix_mode(destination_path, mode & RESTORABLE_UNIX_MODE_BITS) {
-        Ok(()) => 1,
-        Err(source) => {
-            warnings.push(RestoreMetadataWarning {
-                relative_path: relative_path.to_path_buf(),
-                namespace: "unix",
-                field: "mode",
-                source_platform,
-                destination_platform: current_platform(),
-                reason: format!("unix mode could not be applied: {source}"),
-            });
-            0
-        }
+        Ok(()) => outcomes.record(RestoreMetadataFieldOutcome::applied(
+            relative_path,
+            "unix",
+            "mode",
+            source_platform,
+        )),
+        Err(source) => outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            relative_path,
+            "unix",
+            "mode",
+            source_platform,
+            RestoreMetadataOutcomeStatus::Failed,
+            format!("unix mode could not be applied: {source}"),
+        )),
     }
 }
 
@@ -8803,23 +8943,30 @@ fn plan_restored_unix_mode(
     relative_path: &Path,
     source_platform: PlatformKind,
     unix_mode: Option<u32>,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
     let Some(mode) = unix_mode else {
         return;
     };
 
-    warn_unrestored_unix_mode_bits(relative_path, source_platform, mode, warnings);
+    warn_unrestored_unix_mode_bits(relative_path, source_platform, mode, outcomes);
 
     if !destination_supports_unix_mode() {
-        warnings.push(RestoreMetadataWarning {
-            relative_path: relative_path.to_path_buf(),
-            namespace: "unix",
-            field: "mode",
+        outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            relative_path,
+            "unix",
+            "mode",
             source_platform,
-            destination_platform: current_platform(),
-            reason: "unix mode cannot be represented on this destination platform".to_owned(),
-        });
+            RestoreMetadataOutcomeStatus::Unrepresentable,
+            "unix mode cannot be represented on this destination platform".to_owned(),
+        ));
+    } else {
+        outcomes.record(RestoreMetadataFieldOutcome::planned(
+            relative_path,
+            "unix",
+            "mode",
+            source_platform,
+        ));
     }
 }
 
@@ -8828,15 +8975,15 @@ fn verify_restored_unix_owner(
     relative_path: &Path,
     source_platform: PlatformKind,
     unix_owner: Option<RestoredUnixOwner>,
-    warnings: &mut Vec<RestoreMetadataWarning>,
-) -> usize {
+    outcomes: &mut RestoreMetadataOutcomes,
+) {
     let Some(expected_owner) = unix_owner else {
-        return 0;
+        return;
     };
 
     if !destination_supports_unix_owner() {
-        warn_unix_owner_unrepresentable(relative_path, source_platform, warnings);
-        return 0;
+        warn_unix_owner_unrepresentable(relative_path, source_platform, outcomes);
+        return;
     }
 
     let actual_owner = match read_restored_unix_owner(destination_path) {
@@ -8846,157 +8993,171 @@ fn verify_restored_unix_owner(
                 relative_path,
                 source_platform,
                 "uid",
+                RestoreMetadataOutcomeStatus::Failed,
                 format!("unix ownership could not be observed after restore: {source}"),
-                warnings,
+                outcomes,
             );
             warn_unix_owner_field(
                 relative_path,
                 source_platform,
                 "gid",
+                RestoreMetadataOutcomeStatus::Failed,
                 format!("unix ownership could not be observed after restore: {source}"),
-                warnings,
+                outcomes,
             );
-            return 0;
+            return;
         }
     };
 
-    let mut represented = 0;
     if actual_owner.uid == expected_owner.uid {
-        represented += 1;
+        outcomes.record(RestoreMetadataFieldOutcome::applied(
+            relative_path,
+            "unix",
+            "uid",
+            source_platform,
+        ));
     } else {
         warn_unix_owner_field(
             relative_path,
             source_platform,
             "uid",
+            RestoreMetadataOutcomeStatus::NotYetImplemented,
             format!(
                 "unix uid is not restored by this version; captured uid {} but destination uid is {}",
                 expected_owner.uid, actual_owner.uid
             ),
-            warnings,
+            outcomes,
         );
     }
 
     if actual_owner.gid == expected_owner.gid {
-        represented += 1;
+        outcomes.record(RestoreMetadataFieldOutcome::applied(
+            relative_path,
+            "unix",
+            "gid",
+            source_platform,
+        ));
     } else {
         warn_unix_owner_field(
             relative_path,
             source_platform,
             "gid",
+            RestoreMetadataOutcomeStatus::NotYetImplemented,
             format!(
                 "unix gid is not restored by this version; captured gid {} but destination gid is {}",
                 expected_owner.gid, actual_owner.gid
             ),
-            warnings,
+            outcomes,
         );
     }
-
-    represented
 }
 
 fn plan_restored_unix_owner(
     relative_path: &Path,
     source_platform: PlatformKind,
     unix_owner: Option<RestoredUnixOwner>,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
-    if unix_owner.is_none() || destination_supports_unix_owner() {
+    if unix_owner.is_none() {
         return;
     }
 
-    warn_unix_owner_unrepresentable(relative_path, source_platform, warnings);
+    if destination_supports_unix_owner() {
+        outcomes.record(RestoreMetadataFieldOutcome::planned(
+            relative_path,
+            "unix",
+            "uid",
+            source_platform,
+        ));
+        outcomes.record(RestoreMetadataFieldOutcome::planned(
+            relative_path,
+            "unix",
+            "gid",
+            source_platform,
+        ));
+    } else {
+        warn_unix_owner_unrepresentable(relative_path, source_platform, outcomes);
+    }
 }
 
 fn plan_unrestored_created_timestamp(
     relative_path: &Path,
     source_platform: PlatformKind,
     created: &MetadataValue<Timestamp>,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
-    let reason = match created {
-        MetadataValue::Captured(_) => {
-            "created timestamp is not restored by this version".to_owned()
-        }
-        MetadataValue::Unsupported => "created timestamp was not captured".to_owned(),
-        MetadataValue::Denied(reason) => {
-            format!("created timestamp was denied during backup: {reason}")
-        }
+    let (status, reason) = match created {
+        MetadataValue::Captured(_) => (
+            RestoreMetadataOutcomeStatus::NotYetImplemented,
+            "created timestamp is not restored by this version".to_owned(),
+        ),
+        MetadataValue::Unsupported => (
+            RestoreMetadataOutcomeStatus::SkippedUnsupported,
+            "created timestamp was not captured".to_owned(),
+        ),
+        MetadataValue::Denied(reason) => (
+            RestoreMetadataOutcomeStatus::Denied,
+            format!("created timestamp was denied during backup: {reason}"),
+        ),
     };
 
-    warnings.push(RestoreMetadataWarning {
-        relative_path: relative_path.to_path_buf(),
-        namespace: "portable",
-        field: "created",
+    outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+        relative_path,
+        "portable",
+        "created",
         source_platform,
-        destination_platform: current_platform(),
+        status,
         reason,
-    });
+    ));
 }
 
 fn plan_unrestored_symlink_metadata(
     symlink: &RestoreDestinationSymlink,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
     warn_unrestored_symlink_timestamp(
         &symlink.relative_path,
         symlink.source_platform,
         "modified",
         &symlink.modified,
-        warnings,
+        outcomes,
     );
     warn_unrestored_symlink_timestamp(
         &symlink.relative_path,
         symlink.source_platform,
         "created",
         &symlink.created,
-        warnings,
+        outcomes,
     );
 
     if symlink.unix_mode.is_some() {
-        warnings.push(RestoreMetadataWarning {
-            relative_path: symlink.relative_path.clone(),
-            namespace: "unix",
-            field: "mode",
-            source_platform: symlink.source_platform,
-            destination_platform: current_platform(),
-            reason: "symlink unix mode is not restored by this version".to_owned(),
-        });
+        outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            &symlink.relative_path,
+            "unix",
+            "mode",
+            symlink.source_platform,
+            RestoreMetadataOutcomeStatus::NotYetImplemented,
+            "symlink unix mode is not restored by this version".to_owned(),
+        ));
     }
 
     if symlink.unix_owner.is_some() {
-        warnings.push(RestoreMetadataWarning {
-            relative_path: symlink.relative_path.clone(),
-            namespace: "unix",
-            field: "uid",
-            source_platform: symlink.source_platform,
-            destination_platform: current_platform(),
-            reason: "symlink unix uid is not restored by this version".to_owned(),
-        });
-        warnings.push(RestoreMetadataWarning {
-            relative_path: symlink.relative_path.clone(),
-            namespace: "unix",
-            field: "gid",
-            source_platform: symlink.source_platform,
-            destination_platform: current_platform(),
-            reason: "symlink unix gid is not restored by this version".to_owned(),
-        });
-    }
-}
-
-fn planned_extension_field_count(extensions: &MetadataExtensions) -> usize {
-    usize::from(metadata_summary_selected(&extensions.xattrs))
-        + usize::from(metadata_summary_selected(&extensions.acls))
-        + usize::from(metadata_summary_selected(&extensions.file_flags))
-        + usize::from(metadata_summary_selected(&extensions.resource_forks))
-        + usize::from(metadata_summary_selected(&extensions.windows_attributes))
-        + usize::from(metadata_summary_selected(&extensions.sparse_extents))
-}
-
-fn metadata_summary_selected(value: &MetadataValue<MetadataFieldSummary>) -> bool {
-    match value {
-        MetadataValue::Captured(summary) => summary.count > 0,
-        MetadataValue::Denied(_) => true,
-        MetadataValue::Unsupported => false,
+        outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            &symlink.relative_path,
+            "unix",
+            "uid",
+            symlink.source_platform,
+            RestoreMetadataOutcomeStatus::NotYetImplemented,
+            "symlink unix uid is not restored by this version".to_owned(),
+        ));
+        outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            &symlink.relative_path,
+            "unix",
+            "gid",
+            symlink.source_platform,
+            RestoreMetadataOutcomeStatus::NotYetImplemented,
+            "symlink unix gid is not restored by this version".to_owned(),
+        ));
     }
 }
 
@@ -9004,7 +9165,7 @@ fn plan_unrestored_platform_extensions(
     relative_path: &Path,
     source_platform: PlatformKind,
     extensions: &MetadataExtensions,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
     plan_unrestored_metadata_summary(
         relative_path,
@@ -9013,7 +9174,7 @@ fn plan_unrestored_platform_extensions(
         &extensions.xattrs,
         "extended attribute",
         "extended attributes",
-        warnings,
+        outcomes,
     );
     plan_unrestored_metadata_summary(
         relative_path,
@@ -9022,7 +9183,7 @@ fn plan_unrestored_platform_extensions(
         &extensions.acls,
         "ACL",
         "ACLs",
-        warnings,
+        outcomes,
     );
     plan_unrestored_metadata_summary(
         relative_path,
@@ -9031,7 +9192,7 @@ fn plan_unrestored_platform_extensions(
         &extensions.file_flags,
         "file flag",
         "file flags",
-        warnings,
+        outcomes,
     );
     plan_unrestored_metadata_summary(
         relative_path,
@@ -9040,7 +9201,7 @@ fn plan_unrestored_platform_extensions(
         &extensions.resource_forks,
         "resource fork",
         "resource forks",
-        warnings,
+        outcomes,
     );
     plan_unrestored_metadata_summary(
         relative_path,
@@ -9049,7 +9210,7 @@ fn plan_unrestored_platform_extensions(
         &extensions.windows_attributes,
         "Windows attribute",
         "Windows attributes",
-        warnings,
+        outcomes,
     );
     plan_unrestored_metadata_summary(
         relative_path,
@@ -9058,7 +9219,7 @@ fn plan_unrestored_platform_extensions(
         &extensions.sparse_extents,
         "sparse extent",
         "sparse extents",
-        warnings,
+        outcomes,
     );
 }
 
@@ -9069,31 +9230,35 @@ fn plan_unrestored_metadata_summary(
     value: &MetadataValue<MetadataFieldSummary>,
     singular: &str,
     plural: &str,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
-    let reason = match value {
+    let (status, reason) = match value {
         MetadataValue::Captured(summary) if summary.count > 0 => {
             let noun = if summary.count == 1 {
                 format!("{singular} is")
             } else {
                 format!("{plural} are")
             };
-            format!("{} {} not restored by this version", summary.count, noun)
+            (
+                RestoreMetadataOutcomeStatus::NotYetImplemented,
+                format!("{} {} not restored by this version", summary.count, noun),
+            )
         }
-        MetadataValue::Denied(reason) => {
-            format!("{plural} were denied during backup: {reason}")
-        }
+        MetadataValue::Denied(reason) => (
+            RestoreMetadataOutcomeStatus::Denied,
+            format!("{plural} were denied during backup: {reason}"),
+        ),
         MetadataValue::Captured(_) | MetadataValue::Unsupported => return,
     };
 
-    warnings.push(RestoreMetadataWarning {
-        relative_path: relative_path.to_path_buf(),
-        namespace: platform_metadata_namespace(source_platform),
+    outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+        relative_path,
+        platform_metadata_namespace(source_platform),
         field,
         source_platform,
-        destination_platform: current_platform(),
+        status,
         reason,
-    });
+    ));
 }
 
 fn platform_metadata_namespace(platform: PlatformKind) -> &'static str {
@@ -9111,46 +9276,53 @@ fn warn_unrestored_symlink_timestamp(
     source_platform: PlatformKind,
     field: &'static str,
     timestamp: &MetadataValue<Timestamp>,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
-    let reason = match timestamp {
-        MetadataValue::Captured(_) => {
-            format!("symlink {field} timestamp is not restored by this version")
-        }
-        MetadataValue::Unsupported => format!("symlink {field} timestamp was not captured"),
-        MetadataValue::Denied(reason) => {
-            format!("symlink {field} timestamp was denied during backup: {reason}")
-        }
+    let (status, reason) = match timestamp {
+        MetadataValue::Captured(_) => (
+            RestoreMetadataOutcomeStatus::NotYetImplemented,
+            format!("symlink {field} timestamp is not restored by this version"),
+        ),
+        MetadataValue::Unsupported => (
+            RestoreMetadataOutcomeStatus::SkippedUnsupported,
+            format!("symlink {field} timestamp was not captured"),
+        ),
+        MetadataValue::Denied(reason) => (
+            RestoreMetadataOutcomeStatus::Denied,
+            format!("symlink {field} timestamp was denied during backup: {reason}"),
+        ),
     };
 
-    warnings.push(RestoreMetadataWarning {
-        relative_path: relative_path.to_path_buf(),
-        namespace: "portable",
+    outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+        relative_path,
+        "portable",
         field,
         source_platform,
-        destination_platform: current_platform(),
+        status,
         reason,
-    });
+    ));
 }
 
 fn warn_unix_owner_unrepresentable(
     relative_path: &Path,
     source_platform: PlatformKind,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
     warn_unix_owner_field(
         relative_path,
         source_platform,
         "uid",
+        RestoreMetadataOutcomeStatus::Unrepresentable,
         "unix uid cannot be represented on this destination platform".to_owned(),
-        warnings,
+        outcomes,
     );
     warn_unix_owner_field(
         relative_path,
         source_platform,
         "gid",
+        RestoreMetadataOutcomeStatus::Unrepresentable,
         "unix gid cannot be represented on this destination platform".to_owned(),
-        warnings,
+        outcomes,
     );
 }
 
@@ -9158,81 +9330,82 @@ fn warn_unix_owner_field(
     relative_path: &Path,
     source_platform: PlatformKind,
     field: &'static str,
+    status: RestoreMetadataOutcomeStatus,
     reason: String,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
-    warnings.push(RestoreMetadataWarning {
-        relative_path: relative_path.to_path_buf(),
-        namespace: "unix",
+    outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+        relative_path,
+        "unix",
         field,
         source_platform,
-        destination_platform: current_platform(),
+        status,
         reason,
-    });
+    ));
 }
 
 fn warn_unrestored_unix_mode_bits(
     relative_path: &Path,
     source_platform: PlatformKind,
     mode: u32,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) {
     let special_bits = mode & UNRESTORED_UNIX_SPECIAL_MODE_BITS;
     if special_bits == 0 {
         return;
     }
 
-    warnings.push(RestoreMetadataWarning {
-        relative_path: relative_path.to_path_buf(),
-        namespace: "unix",
-        field: "mode",
+    outcomes.record(RestoreMetadataFieldOutcome::warning_only(
+        relative_path,
+        "unix",
+        "mode",
         source_platform,
-        destination_platform: current_platform(),
-        reason: format!("unix mode special bits {special_bits:#o} are not restored"),
-    });
+        RestoreMetadataOutcomeStatus::NotYetImplemented,
+        format!("unix mode special bits {special_bits:#o} are not restored"),
+    ));
 }
 
-fn restored_modified_time_or_warn(
+fn restored_modified_time_or_record(
     relative_path: &Path,
     source_platform: PlatformKind,
     modified: &MetadataValue<Timestamp>,
-    warnings: &mut Vec<RestoreMetadataWarning>,
+    outcomes: &mut RestoreMetadataOutcomes,
 ) -> Option<SystemTime> {
     let timestamp = match modified {
         MetadataValue::Captured(timestamp) => timestamp,
         MetadataValue::Unsupported => {
-            warnings.push(RestoreMetadataWarning {
-                relative_path: relative_path.to_path_buf(),
-                namespace: "portable",
-                field: "modified",
+            outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+                relative_path,
+                "portable",
+                "modified",
                 source_platform,
-                destination_platform: current_platform(),
-                reason: "modified timestamp was not captured".to_owned(),
-            });
+                RestoreMetadataOutcomeStatus::SkippedUnsupported,
+                "modified timestamp was not captured".to_owned(),
+            ));
             return None;
         }
         MetadataValue::Denied(reason) => {
-            warnings.push(RestoreMetadataWarning {
-                relative_path: relative_path.to_path_buf(),
-                namespace: "portable",
-                field: "modified",
+            outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+                relative_path,
+                "portable",
+                "modified",
                 source_platform,
-                destination_platform: current_platform(),
-                reason: format!("modified timestamp was denied during backup: {reason}"),
-            });
+                RestoreMetadataOutcomeStatus::Denied,
+                format!("modified timestamp was denied during backup: {reason}"),
+            ));
             return None;
         }
     };
 
     let Some(modified_time) = system_time_from_timestamp(*timestamp) else {
-        warnings.push(RestoreMetadataWarning {
-            relative_path: relative_path.to_path_buf(),
-            namespace: "portable",
-            field: "modified",
+        outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            relative_path,
+            "portable",
+            "modified",
             source_platform,
-            destination_platform: current_platform(),
-            reason: "modified timestamp is outside the supported system time range".to_owned(),
-        });
+            RestoreMetadataOutcomeStatus::Unrepresentable,
+            "modified timestamp is outside the supported system time range".to_owned(),
+        ));
         return None;
     };
 
@@ -14793,7 +14966,7 @@ mod tests {
 
     #[test]
     fn plan_unrestored_platform_extensions_warns_for_acl_status() {
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
         let captured = MetadataExtensions {
             acls: MetadataValue::Captured(MetadataFieldSummary { count: 1 }),
             ..MetadataExtensions::default()
@@ -14803,24 +14976,22 @@ mod tests {
             ..MetadataExtensions::default()
         };
 
-        assert_eq!(planned_extension_field_count(&captured), 1);
-        assert_eq!(planned_extension_field_count(&denied), 1);
-
         plan_unrestored_platform_extensions(
             Path::new("captured.txt"),
             current_platform(),
             &captured,
-            &mut warnings,
+            &mut outcomes,
         );
         plan_unrestored_platform_extensions(
             Path::new("denied.txt"),
             current_platform(),
             &denied,
-            &mut warnings,
+            &mut outcomes,
         );
 
+        assert_eq!(outcomes.metadata_planned(), 2);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("captured.txt"),
@@ -14844,7 +15015,7 @@ mod tests {
 
     #[test]
     fn plan_unrestored_platform_extensions_warns_for_file_flag_status() {
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
         let captured = MetadataExtensions {
             file_flags: MetadataValue::Captured(MetadataFieldSummary { count: 2 }),
             ..MetadataExtensions::default()
@@ -14854,24 +15025,22 @@ mod tests {
             ..MetadataExtensions::default()
         };
 
-        assert_eq!(planned_extension_field_count(&captured), 1);
-        assert_eq!(planned_extension_field_count(&denied), 1);
-
         plan_unrestored_platform_extensions(
             Path::new("captured.txt"),
             current_platform(),
             &captured,
-            &mut warnings,
+            &mut outcomes,
         );
         plan_unrestored_platform_extensions(
             Path::new("denied.txt"),
             current_platform(),
             &denied,
-            &mut warnings,
+            &mut outcomes,
         );
 
+        assert_eq!(outcomes.metadata_planned(), 2);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("captured.txt"),
@@ -14895,7 +15064,7 @@ mod tests {
 
     #[test]
     fn plan_unrestored_platform_extensions_warns_for_windows_attribute_status() {
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
         let captured = MetadataExtensions {
             windows_attributes: MetadataValue::Captured(MetadataFieldSummary { count: 3 }),
             ..MetadataExtensions::default()
@@ -14905,24 +15074,22 @@ mod tests {
             ..MetadataExtensions::default()
         };
 
-        assert_eq!(planned_extension_field_count(&captured), 1);
-        assert_eq!(planned_extension_field_count(&denied), 1);
-
         plan_unrestored_platform_extensions(
             Path::new("captured.txt"),
             PlatformKind::Windows,
             &captured,
-            &mut warnings,
+            &mut outcomes,
         );
         plan_unrestored_platform_extensions(
             Path::new("denied.txt"),
             PlatformKind::Windows,
             &denied,
-            &mut warnings,
+            &mut outcomes,
         );
 
+        assert_eq!(outcomes.metadata_planned(), 2);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("captured.txt"),
@@ -14947,7 +15114,7 @@ mod tests {
 
     #[test]
     fn plan_unrestored_platform_extensions_warns_for_resource_fork_status() {
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
         let captured = MetadataExtensions {
             resource_forks: MetadataValue::Captured(MetadataFieldSummary { count: 1 }),
             ..MetadataExtensions::default()
@@ -14957,24 +15124,22 @@ mod tests {
             ..MetadataExtensions::default()
         };
 
-        assert_eq!(planned_extension_field_count(&captured), 1);
-        assert_eq!(planned_extension_field_count(&denied), 1);
-
         plan_unrestored_platform_extensions(
             Path::new("captured.txt"),
             PlatformKind::Macos,
             &captured,
-            &mut warnings,
+            &mut outcomes,
         );
         plan_unrestored_platform_extensions(
             Path::new("denied.txt"),
             PlatformKind::Macos,
             &denied,
-            &mut warnings,
+            &mut outcomes,
         );
 
+        assert_eq!(outcomes.metadata_planned(), 2);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("captured.txt"),
@@ -14999,7 +15164,7 @@ mod tests {
 
     #[test]
     fn plan_unrestored_platform_extensions_warns_for_sparse_extent_status() {
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
         let captured = MetadataExtensions {
             sparse_extents: MetadataValue::Captured(MetadataFieldSummary { count: 2 }),
             ..MetadataExtensions::default()
@@ -15009,24 +15174,22 @@ mod tests {
             ..MetadataExtensions::default()
         };
 
-        assert_eq!(planned_extension_field_count(&captured), 1);
-        assert_eq!(planned_extension_field_count(&denied), 1);
-
         plan_unrestored_platform_extensions(
             Path::new("captured.txt"),
             PlatformKind::Linux,
             &captured,
-            &mut warnings,
+            &mut outcomes,
         );
         plan_unrestored_platform_extensions(
             Path::new("denied.txt"),
             PlatformKind::Linux,
             &denied,
-            &mut warnings,
+            &mut outcomes,
         );
 
+        assert_eq!(outcomes.metadata_planned(), 2);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("captured.txt"),
@@ -15068,24 +15231,84 @@ mod tests {
     }
 
     #[test]
+    fn restore_metadata_outcomes_derive_counts_and_warnings() {
+        let mut outcomes = RestoreMetadataOutcomes::default();
+
+        outcomes.record(RestoreMetadataFieldOutcome::planned(
+            Path::new("planned.txt"),
+            "portable",
+            "modified",
+            current_platform(),
+        ));
+        outcomes.record(RestoreMetadataFieldOutcome::applied(
+            Path::new("applied.txt"),
+            "portable",
+            "modified",
+            current_platform(),
+        ));
+        outcomes.record(RestoreMetadataFieldOutcome::warning_with_reason(
+            Path::new("denied.txt"),
+            "portable",
+            "modified",
+            current_platform(),
+            RestoreMetadataOutcomeStatus::Denied,
+            "modified timestamp was denied during backup: permission denied".to_owned(),
+        ));
+        outcomes.record(RestoreMetadataFieldOutcome::warning_only(
+            Path::new("mode.txt"),
+            "unix",
+            "mode",
+            current_platform(),
+            RestoreMetadataOutcomeStatus::NotYetImplemented,
+            "unix mode special bits 0o4000 are not restored".to_owned(),
+        ));
+
+        assert_eq!(outcomes.metadata_planned(), 3);
+        assert_eq!(outcomes.metadata_applied(), 1);
+        assert_eq!(
+            outcomes.metadata_warnings(),
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("denied.txt"),
+                    namespace: "portable",
+                    field: "modified",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "modified timestamp was denied during backup: permission denied"
+                        .to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("mode.txt"),
+                    namespace: "unix",
+                    field: "mode",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "unix mode special bits 0o4000 are not restored".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn apply_restored_modified_timestamp_records_warning_when_not_captured() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("sample.txt");
         fs::write(&path, b"sample").expect("write sample");
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
 
-        let applied = apply_restored_modified_timestamp(
+        apply_restored_modified_timestamp(
             &path,
             Path::new("sample.txt"),
             current_platform(),
             &MetadataValue::Unsupported,
             RestoredMetadataTarget::RegularFile,
-            &mut warnings,
+            &mut outcomes,
         );
 
-        assert_eq!(applied, 0);
+        assert_eq!(outcomes.metadata_planned(), 1);
+        assert_eq!(outcomes.metadata_applied(), 0);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![RestoreMetadataWarning {
                 relative_path: PathBuf::from("sample.txt"),
                 namespace: "portable",
@@ -15104,17 +15327,17 @@ mod tests {
         let invalid_path = temp.path().join("invalid.txt");
         fs::write(&denied_path, b"denied").expect("write denied");
         fs::write(&invalid_path, b"invalid").expect("write invalid");
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
 
-        let denied_applied = apply_restored_modified_timestamp(
+        apply_restored_modified_timestamp(
             &denied_path,
             Path::new("denied.txt"),
             current_platform(),
             &MetadataValue::Denied("permission denied".to_owned()),
             RestoredMetadataTarget::RegularFile,
-            &mut warnings,
+            &mut outcomes,
         );
-        let invalid_applied = apply_restored_modified_timestamp(
+        apply_restored_modified_timestamp(
             &invalid_path,
             Path::new("invalid.txt"),
             current_platform(),
@@ -15123,13 +15346,13 @@ mod tests {
                 nanoseconds: 1_000_000_000,
             }),
             RestoredMetadataTarget::RegularFile,
-            &mut warnings,
+            &mut outcomes,
         );
 
-        assert_eq!(denied_applied, 0);
-        assert_eq!(invalid_applied, 0);
+        assert_eq!(outcomes.metadata_planned(), 2);
+        assert_eq!(outcomes.metadata_applied(), 0);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("denied.txt"),
@@ -15155,13 +15378,13 @@ mod tests {
 
     #[test]
     fn plan_restored_modified_timestamp_reports_denied_and_invalid_values() {
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
 
         plan_restored_modified_timestamp(
             Path::new("denied.txt"),
             current_platform(),
             &MetadataValue::Denied("permission denied".to_owned()),
-            &mut warnings,
+            &mut outcomes,
         );
         plan_restored_modified_timestamp(
             Path::new("invalid.txt"),
@@ -15170,11 +15393,13 @@ mod tests {
                 seconds: 0,
                 nanoseconds: 1_000_000_000,
             }),
-            &mut warnings,
+            &mut outcomes,
         );
 
+        assert_eq!(outcomes.metadata_planned(), 2);
+        assert_eq!(outcomes.metadata_applied(), 0);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("denied.txt"),
@@ -15200,7 +15425,7 @@ mod tests {
 
     #[test]
     fn plan_unrestored_created_timestamp_reports_not_restored_and_capture_gaps() {
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
 
         plan_unrestored_created_timestamp(
             Path::new("captured.txt"),
@@ -15209,23 +15434,25 @@ mod tests {
                 seconds: 1,
                 nanoseconds: 0,
             }),
-            &mut warnings,
+            &mut outcomes,
         );
         plan_unrestored_created_timestamp(
             Path::new("unsupported.txt"),
             current_platform(),
             &MetadataValue::Unsupported,
-            &mut warnings,
+            &mut outcomes,
         );
         plan_unrestored_created_timestamp(
             Path::new("denied.txt"),
             current_platform(),
             &MetadataValue::Denied("permission denied".to_owned()),
-            &mut warnings,
+            &mut outcomes,
         );
 
+        assert_eq!(outcomes.metadata_planned(), 3);
+        assert_eq!(outcomes.metadata_applied(), 0);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("captured.txt"),
@@ -15266,25 +15493,25 @@ mod tests {
         let directory = temp.path().join("sample-dir");
         fs::write(&file, b"sample").expect("write sample");
         fs::create_dir(&directory).expect("create sample dir");
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
 
-        let file_applied = apply_restored_unix_mode(
+        apply_restored_unix_mode(
             &file,
             Path::new("sample.txt"),
             current_platform(),
             Some(0o104755),
-            &mut warnings,
+            &mut outcomes,
         );
-        let directory_applied = apply_restored_unix_mode(
+        apply_restored_unix_mode(
             &directory,
             Path::new("sample-dir"),
             current_platform(),
             Some(0o041750),
-            &mut warnings,
+            &mut outcomes,
         );
 
-        assert_eq!(file_applied, 1);
-        assert_eq!(directory_applied, 1);
+        assert_eq!(outcomes.metadata_planned(), 2);
+        assert_eq!(outcomes.metadata_applied(), 2);
         assert_eq!(
             fs::metadata(&file).expect("metadata").permissions().mode() & RESTORABLE_UNIX_MODE_BITS,
             0o755
@@ -15298,7 +15525,7 @@ mod tests {
             0o750
         );
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("sample.txt"),
@@ -15327,18 +15554,19 @@ mod tests {
         let path = temp.path().join("sample.txt");
         fs::write(&path, b"sample").expect("write sample");
         let owner = read_restored_unix_owner(&path).expect("read owner");
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
 
-        let applied = verify_restored_unix_owner(
+        verify_restored_unix_owner(
             &path,
             Path::new("sample.txt"),
             current_platform(),
             Some(owner),
-            &mut warnings,
+            &mut outcomes,
         );
 
-        assert_eq!(applied, 2);
-        assert_eq!(warnings, Vec::new());
+        assert_eq!(outcomes.metadata_planned(), 2);
+        assert_eq!(outcomes.metadata_applied(), 2);
+        assert_eq!(outcomes.metadata_warnings(), Vec::new());
     }
 
     #[cfg(unix)]
@@ -15352,19 +15580,20 @@ mod tests {
             uid: actual.uid.wrapping_add(1),
             gid: actual.gid.wrapping_add(1),
         };
-        let mut warnings = Vec::new();
+        let mut outcomes = RestoreMetadataOutcomes::default();
 
-        let applied = verify_restored_unix_owner(
+        verify_restored_unix_owner(
             &path,
             Path::new("sample.txt"),
             current_platform(),
             Some(expected),
-            &mut warnings,
+            &mut outcomes,
         );
 
-        assert_eq!(applied, 0);
+        assert_eq!(outcomes.metadata_planned(), 2);
+        assert_eq!(outcomes.metadata_applied(), 0);
         assert_eq!(
-            warnings,
+            outcomes.metadata_warnings(),
             vec![
                 RestoreMetadataWarning {
                     relative_path: PathBuf::from("sample.txt"),
@@ -15539,6 +15768,84 @@ mod tests {
             fs::read_link(restore_root.join("links/target.link")).expect("restored symlink"),
             PathBuf::from("../target.txt")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_derives_content_metadata_warnings_from_outcomes() {
+        use fileferry_testkit::FakeObjectStore;
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let restore_root = destination.path().join("restored");
+        fs::write(source.path().join("target.txt"), b"target").expect("write target");
+        symlink("target.txt", source.path().join("target.link")).expect("create symlink");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let (snapshot_id, _) = replace_committed_manifest_for_tests(
+            &pipeline,
+            &store,
+            &master_key,
+            &result,
+            |manifest| {
+                let symlink = manifest
+                    .body
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.relative_path == Path::new("target.link"))
+                    .expect("symlink manifest entry");
+                symlink.metadata.symlink_target = MetadataValue::Unsupported;
+            },
+        )
+        .await;
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id,
+                    paths: vec![PathBuf::from("target.link")],
+                    destination: restore_root.clone(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert_eq!(restored.selected_entries, 1);
+        assert_eq!(restored.symlinks.len(), 0);
+        assert_eq!(restored.metadata_planned, 0);
+        assert_eq!(restored.metadata_applied, 0);
+        assert_eq!(
+            restored.metadata_warnings,
+            vec![RestoreMetadataWarning {
+                relative_path: PathBuf::from("target.link"),
+                namespace: "portable",
+                field: "symlink_target",
+                source_platform: current_platform(),
+                destination_platform: current_platform(),
+                reason: "symlink target was not captured".to_owned(),
+            }]
+        );
+        assert!(!restore_root.join("target.link").exists());
     }
 
     #[tokio::test]
@@ -16123,6 +16430,7 @@ mod tests {
             ],
             symlinks: Vec::new(),
             metadata_warnings: Vec::new(),
+            metadata_outcomes: RestoreMetadataOutcomes::default(),
         };
 
         let error = validate_restore_destination_case_collisions(

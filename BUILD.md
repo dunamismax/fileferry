@@ -154,10 +154,10 @@ Purpose: make the already-implemented metadata subset difficult to regress.
 Purpose: make future metadata fields additive instead of one-off counter and
 warning logic.
 
-- [ ] Introduce typed restore metadata outcomes that distinguish planned,
+- [x] Introduce typed restore metadata outcomes that distinguish planned,
       applied, skipped-as-unsupported, denied, unrepresentable, failed, and
       not-yet-implemented fields.
-- [ ] Derive `metadata_planned`, `metadata_applied`, and
+- [x] Derive `metadata_planned`, `metadata_applied`, and
       `metadata_warnings` from those outcomes instead of hand-maintained field
       counts.
 - [ ] Move platform-specific representation/apply probes toward
