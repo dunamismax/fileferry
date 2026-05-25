@@ -172,7 +172,7 @@ warning logic.
 
 Purpose: finish portable timestamp behavior before deeper platform extensions.
 
-- [ ] Decide and document which timestamp fields are restore targets:
+- [x] Decide and document which timestamp fields are restore targets:
       modified, accessed if added, and creation/birth where representable.
 - [ ] If creation/birth timestamp restore is pursued, verify current primary
       platform APIs first and document representability limits for Linux,
@@ -267,7 +267,7 @@ Purpose: make the public story match the tested behavior.
   claimed restored.
 - Current normal metadata capture does not restore xattr values, ACL contents,
   file flags, resource forks, Windows attributes, sparse extent maps, symlink
-  metadata, or creation/birth timestamps.
+  metadata, accessed timestamps, or creation/birth timestamps.
 - Unix UID/GID ownership is verified, not changed.
 - Unix special mode bits are warned, not restored.
 - `ferry key rotate` currently rotates unlock access by adding a new slot and

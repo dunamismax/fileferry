@@ -377,7 +377,11 @@ RestoreMetadataWarning
   path: snapshot-relative string
   namespace: metadata namespace, for example "portable", "unix", or the
              source platform namespace for platform-extension status warnings
-  field: string
+  field: string; current portable timestamp fields are "modified" for
+         regular-file and directory modified-time restore warnings, and
+         "created" for warning-only creation/birth timestamps when they were
+         selected from captured metadata. Accessed timestamps are not captured
+         or reported by this version.
   source_platform: "windows" | "macos" | "linux" | "unix" | "unknown"
   destination_platform: same values as source_platform
   reason: string

@@ -82,6 +82,20 @@ pub enum MetadataRestoreTarget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortableTimestampField {
+    Modified,
+    Accessed,
+    Created,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortableTimestampRestoreSupport {
+    RestoredForRegularFileAndDirectory,
+    NotCaptured,
+    WarningOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnixOwner {
     pub uid: u32,
     pub gid: u32,
@@ -224,6 +238,18 @@ pub const fn current_platform() -> PlatformKind {
         PlatformKind::Unix
     } else {
         PlatformKind::Unknown
+    }
+}
+
+pub const fn portable_timestamp_restore_support(
+    field: PortableTimestampField,
+) -> PortableTimestampRestoreSupport {
+    match field {
+        PortableTimestampField::Modified => {
+            PortableTimestampRestoreSupport::RestoredForRegularFileAndDirectory
+        }
+        PortableTimestampField::Accessed => PortableTimestampRestoreSupport::NotCaptured,
+        PortableTimestampField::Created => PortableTimestampRestoreSupport::WarningOnly,
     }
 }
 
@@ -573,6 +599,22 @@ mod tests {
         };
 
         assert_eq!(current_platform(), expected);
+    }
+
+    #[test]
+    fn portable_timestamp_restore_support_matches_current_target_decision() {
+        assert_eq!(
+            portable_timestamp_restore_support(PortableTimestampField::Modified),
+            PortableTimestampRestoreSupport::RestoredForRegularFileAndDirectory
+        );
+        assert_eq!(
+            portable_timestamp_restore_support(PortableTimestampField::Accessed),
+            PortableTimestampRestoreSupport::NotCaptured
+        );
+        assert_eq!(
+            portable_timestamp_restore_support(PortableTimestampField::Created),
+            PortableTimestampRestoreSupport::WarningOnly
+        );
     }
 
     #[cfg(unix)]

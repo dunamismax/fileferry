@@ -14,9 +14,10 @@ use fileferry_crypto::{
 use fileferry_platform::{
     CaseBehavior, EntryKind, EntryMetadata, MetadataExtensions, MetadataFieldSummary,
     MetadataRestoreError, MetadataRestoreTarget, MetadataValue, PlatformError, PlatformKind,
-    Timestamp, apply_modified_timestamp, apply_unix_mode, capture_metadata, current_platform,
-    path_facts, probe_case_behavior, read_unix_owner, supports_unix_mode_restore,
-    supports_unix_owner_observation, system_time_from_timestamp,
+    PortableTimestampField, PortableTimestampRestoreSupport, Timestamp, apply_modified_timestamp,
+    apply_unix_mode, capture_metadata, current_platform, path_facts,
+    portable_timestamp_restore_support, probe_case_behavior, read_unix_owner,
+    supports_unix_mode_restore, supports_unix_owner_observation, system_time_from_timestamp,
 };
 use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, StorageError};
 use secrecy::SecretString;
@@ -9092,6 +9093,11 @@ fn plan_unrestored_created_timestamp(
     created: &MetadataValue<Timestamp>,
     outcomes: &mut RestoreMetadataOutcomes,
 ) {
+    debug_assert_eq!(
+        portable_timestamp_restore_support(PortableTimestampField::Created),
+        PortableTimestampRestoreSupport::WarningOnly
+    );
+
     let (status, reason) = match created {
         MetadataValue::Captured(_) => (
             RestoreMetadataOutcomeStatus::NotYetImplemented,
@@ -15414,6 +15420,11 @@ mod tests {
 
     #[test]
     fn plan_unrestored_created_timestamp_reports_not_restored_and_capture_gaps() {
+        assert_eq!(
+            portable_timestamp_restore_support(PortableTimestampField::Created),
+            PortableTimestampRestoreSupport::WarningOnly
+        );
+
         let mut outcomes = RestoreMetadataOutcomes::default();
 
         plan_unrestored_created_timestamp(

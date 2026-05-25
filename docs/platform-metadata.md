@@ -52,6 +52,18 @@ events. A strict mode may promote those warnings to failure.
 Restore applies content first, then portable metadata, then platform-specific
 metadata that the destination can represent.
 
+The current portable timestamp restore target is deliberately narrow:
+
+- Modified timestamps are restore targets for regular files and directories.
+- Accessed timestamps are not captured in the current manifest schema and are
+  not restore targets in this version.
+- Creation/birth timestamps may be captured when the source platform exposes
+  them, but they are warning-only in this version and are not restore targets
+  until platform APIs and filesystem representability limits are verified for
+  Linux, macOS, and Windows.
+- Symlink timestamps are warning-only until a no-follow timestamp application
+  path is implemented and tested for each claimed destination platform.
+
 Current implementation status: initialized local and S3-compatible repository
 restores apply captured modified timestamps for restored regular files and
 directories after content writes and verification. On Unix destinations,
@@ -70,12 +82,13 @@ timestamp fields selected for restore, regular-file and directory
 creation/birth timestamp fields selected for warning, captured Unix permission
 fields selected for restore, captured Unix ownership fields selected for
 restore, and selected symlink timestamp plus captured Unix symlink metadata
-fields. It also reports selected reportable xattr status fields when xattrs
-were observed or xattr capture was denied, and selected ACL status fields when
-ACLs were observed or ACL capture was denied in constructed or future
-manifests, plus selected file flag status fields when file flags were observed
-or file flag capture was denied in constructed or future manifests, plus
-selected resource fork status fields when resource forks were observed or
+fields. Accessed timestamps are not counted because this version does not
+capture them. Dry-run also reports selected reportable xattr status fields
+when xattrs were observed or xattr capture was denied, and selected ACL status
+fields when ACLs were observed or ACL capture was denied in constructed or
+future manifests, plus selected file flag status fields when file flags were
+observed or file flag capture was denied in constructed or future manifests,
+plus selected resource fork status fields when resource forks were observed or
 resource fork capture was denied in constructed or future manifests, plus
 selected Windows attribute status fields when Windows attributes were observed
 or Windows attribute capture was denied in constructed or future manifests,
@@ -92,11 +105,12 @@ decode failures.
 
 Captured entry metadata records the source platform for new manifests; older
 v0 manifests that lack this field are read as `unknown`. Current restores do
-not restore symlink timestamps, symlink Unix mode/ownership, creation/birth
-time for regular files or directories, Unix ownership by changing destination
-owners, Unix special mode bits, ACLs, xattr values, resource forks, Windows
-attributes, file flags, sparse extents, or other platform-specific metadata
-yet. Selected regular-file and directory creation/birth timestamps are
+not restore accessed timestamps, symlink timestamps, symlink Unix
+mode/ownership, creation/birth time for regular files or directories, Unix
+ownership by changing destination owners, Unix special mode bits, ACLs, xattr
+values, resource forks, Windows attributes, file flags, sparse extents, or
+other platform-specific metadata yet. Selected regular-file and directory
+creation/birth timestamps are
 reported as structured `portable`/`created` metadata warnings because this
 version does not restore them. New manifests also record reportable xattr
 presence/count status where the destination build and filesystem expose xattr
