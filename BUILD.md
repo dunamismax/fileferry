@@ -3,10 +3,10 @@
 Active build tracker for FileFerry and its `ferry` command.
 
 `README.md` describes the public product. `AGENTS.md` holds durable repo
-operating rules. This file stays short so agents can find the next useful
-build task without loading project history.
+operating rules. This file stays short enough for agents to load quickly and is
+currently focused on the next multi-pass effort: metadata restore.
 
-Last condensed: 2026-05-23.
+Last rewritten: 2026-05-25.
 
 ---
 
@@ -22,154 +22,254 @@ Implemented and tested in current main:
 - `ferry init`, `backup`, `restore`, `snapshots`, `ls`, `find`, `diff`,
   `repo`, `doctor`, `check`, `forget`, `prune`, `policy`, `completion`, and
   `version`.
-- Key add, marker-based key remove, limited unlock rotation, full repository
-  rekey, encrypted recovery export, and recovery import as a new external key
-  slot. Bootstrap-slot removal outside full rekey is not implemented.
+- Key add, marker-based key remove, unlock rotation, full repository rekey,
+  encrypted recovery export, and recovery import as a new external key slot.
 - Encrypted local and S3-compatible repositories through the shared object
   storage pipeline.
 - Encrypted, compressed, deduplicated snapshot creation.
 - Snapshot selection by latest, id, and tag.
 - Path-scoped restore with destination safety checks, overwrite policy,
-  dry-run reporting, byte verification, Unix symlinks, regular-file and
-  directory modified timestamps, regular-file and directory Unix mode bits
+  dry-run reporting, byte verification, Unix symlink creation, regular-file
+  and directory modified timestamps, regular-file and directory Unix mode bits
   where representable, and Unix ownership verification without `chown`.
 - Full repository check plus deterministic count/percentage data subsets.
-- Marker-only `forget`, including explicit encrypted stored-policy application
-  by policy id, and recoverable two-phase `prune`.
+- Marker-only `forget`, explicit encrypted stored-policy application by policy
+  id, and recoverable two-phase `prune`.
 - Encrypted command leases for current mutation paths.
 - CLI exit-code families, JSON envelopes, JSONL event ordering, and
-  stdout/stderr separation documented and regression-tested for the
-  implemented command surface.
+  stdout/stderr separation documented and regression-tested for the implemented
+  command surface.
 - Secret-leakage canaries for current human, JSON, JSONL, config parse, S3
   repository URL, S3 endpoint, key-management, recovery export/import, and
   opt-in live-S3 integration output paths.
 - S3-compatible hardening evidence for capability probe, retry policy, prefix
   listing surprises, missing objects, permission denial, prune resume, and
-  missing-candidate handling, plus a reusable gated command-surface/rekey
-  provider drill for live S3-compatible repositories. Current provider
-  evidence covers Backblaze B2 over HTTPS with conditional create disabled and
-  local MinIO over explicit loopback HTTP with conditional create enabled.
-- Local restore drills and live Backblaze B2 S3-compatible drills under an
-  isolated private development prefix, plus local MinIO S3-compatible
-  command-surface/rekey evidence under an isolated throwaway bucket prefix.
-  This is provider evidence, not a broad S3-provider support claim.
-- Platform metadata scaffolding and per-target tests for the documented
-  current metadata scope in `fileferry-platform`.
+  missing-candidate handling, plus gated live provider drills.
+- Platform metadata scaffolding and per-target tests for the documented current
+  metadata scope in `fileferry-platform`.
 - `xtask release-package`, `archive-smoke`, and
   `verify-release-artifacts` for target archives, checksums, Sigstore checksum
   bundles, CycloneDX SBOMs, release manifests, cargo-auditable metadata,
   archive-smoke JSON evidence, and installer scripts.
-- CI and the manual release-artifacts workflow cover the intended
-  `1.0.0` release target matrix:
+- CI and release-artifact evidence for the intended `1.0.0` target matrix:
   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
   `x86_64-apple-darwin`, `aarch64-apple-darwin`, and
   `x86_64-pc-windows-msvc`.
-- `fileferry-web` serves the public `fileferry.app` homepage with Axum,
-  server-rendered Leptos views, static CSS, and `/healthz`.
 
 V1 scope is complete. Platform wording must stay limited to observed CI,
 tests, artifacts, and smoke evidence.
 
 ---
 
-## Active Milestones
+## Active Objective - Metadata Restore
 
-### Milestone H - Format Fixtures And Compatibility Freeze
+Goal: make metadata restore complete, honest, and test-backed over multiple
+coding passes.
 
-Status: complete at the current v0 level. Format v0's compatibility contract
-is frozen for the object families and fields listed in
-`docs/repository-format.md`. Future fields, new object families, and migration
-behavior require an explicit new format version or documented feature gate with
-fixtures.
+Current restore behavior is the starting line, not the finish line:
 
-### Milestone I - 1.0.0 Publication
+- Regular-file and directory modified times are applied after content writes.
+- Regular-file and directory Unix permission bits are applied where
+  representable, currently limited to `0o777` bits on Unix destinations.
+- Regular-file and directory Unix ownership is observed after restore and
+  reported as applied only when UID/GID already match; FileFerry does not call
+  `chown`.
+- Symlink targets are restored on Unix, but symlink timestamps and symlink
+  Unix mode/ownership are warnings.
+- Creation/birth timestamps, xattr values, ACL contents, file flags, resource
+  forks, Windows attributes, sparse extent maps, special files, alternate data
+  streams, and other platform extensions are not restored yet.
 
-Status: v1 release scope is complete. Publication requires the exact tagged
-commit to have:
+Rules for every metadata pass:
 
-- Passing CI on the intended hosted target matrix.
-- Signed release artifacts from that same commit.
-- Local `xtask verify-release-artifacts --expect-signature` verification for
-  every intended target artifact directory.
-- A GitHub release named `FileFerry 1.0.0`.
-- Release notes that clearly identify the build as the official v1.0.0
-  release.
-
-Non-goals:
-
-- Claiming unsupported platform behavior.
-- Adding GUI, TUI, daemon, server, scheduler, SaaS, mobile, FUSE, or
-  repository-compatibility behavior.
+- Do not claim support until capture, restore, warning behavior, machine
+  output, docs, and tests all agree.
+- Preserve destination safety preflight before writes.
+- Apply content before metadata, and apply directory metadata after child
+  writes when ordering matters.
+- Report every selected but unapplied metadata field as a structured
+  `RestoreMetadataWarning` with entry id, namespace, field, source platform,
+  destination platform, and reason.
+- Return partial-success exit code `10` when file content restores correctly
+  but one or more selected metadata fields cannot be applied.
+- Keep sensitive metadata encrypted in repository objects. Do not introduce
+  plaintext paths, names, ownership, attributes, xattrs, ACLs, or backup shape.
+- Format v0 schemas are frozen for fixture-covered fields. Capturing new
+  metadata values beyond current summary/status fields requires an explicit
+  schema/format decision, compatibility plan, documentation, and fixtures.
+- Prefer `fileferry-platform` for platform-specific metadata capture,
+  representation checks, and application primitives. Core should orchestrate
+  restore outcomes; CLI should present them.
 
 ---
 
-## V1 Scope Checklist
+## Metadata Restore Phases
 
-Core product:
+Agents should complete these phases in order unless Stephen explicitly changes
+the priority. It is fine for one coding pass to complete only part of a phase.
+Check a box only after code, docs, and tests for that item are updated.
 
-- [x] Rust workspace with target crate boundaries.
-- [x] Encrypted local and S3-compatible repository initialization.
-- [x] Encrypted, compressed, deduplicated backup snapshots.
-- [x] Restore by latest, snapshot id, tag, and path.
-- [x] `snapshots`, `ls`, `find`, `diff`, `check`, `forget`, and recoverable
-      two-phase `prune`.
-- [x] Key add/remove/rotate/rekey/export-recovery/import-recovery paths.
-- [x] Stable config profiles and environment variables.
-- [x] Shell completion generation.
-- [x] Format v0 freeze decision completed.
-- [x] Exit codes, JSON, and JSONL contracts documented and tested for the
-      implemented command surface.
-- [x] Local restore drills and S3-compatible restore drills completed for the
-      release.
+### Phase 0 - Baseline Inventory And Contract
 
-Security and format:
+- [x] Read `AGENTS.md`, `README.md`, current `BUILD.md`, `docs/`, and
+      task-relevant restore/platform code before planning new metadata work.
+- [x] Confirm current restore applies regular-file modified timestamps.
+- [x] Confirm current restore applies directory modified timestamps.
+- [x] Confirm current restore applies regular-file Unix `0o777` mode bits on
+      Unix destinations.
+- [x] Confirm current restore applies directory Unix `0o777` mode bits on Unix
+      destinations.
+- [x] Confirm current restore reports creation/birth timestamps as structured
+      warnings.
+- [x] Confirm current restore reports symlink timestamps and symlink Unix
+      mode/ownership as structured warnings.
+- [x] Confirm current restore reports platform-extension status fields such as
+      xattrs as warnings when selected and observed or denied.
+- [x] Confirm JSON, JSONL, and human restore output preserve stdout/stderr
+      rules and partial-success exit code `10`.
 
-- [x] Client-side encryption for repository data and sensitive metadata.
-- [x] Authenticated encrypted objects.
-- [x] Wrong-password, wrong-key, tamper, corruption, replay, and malformed
-      metadata coverage for current object paths.
-- [x] Plaintext bootstrap fields documented.
-- [x] Key hierarchy, KDF parameters, AEAD choice, and recovery export behavior
-      documented.
-- [x] Secret-leakage audit completed for v1 output and tests.
-- [x] Format fixtures declared complete for the documented v0 surface.
+### Phase 1 - Current-Scope Hardening
 
-Platform and release:
+Purpose: make the already-implemented metadata subset difficult to regress.
 
-- [x] Platform metadata target documented.
-- [x] Current host-observed metadata behavior and restore-warning contract
-      tested.
-- [x] Per-target platform metadata tests exist for the documented current
-      metadata scope on Linux, macOS, and Windows through the hosted CI matrix.
-- [x] Release archives, checksums, signatures, SBOMs, manifests,
-      cargo-auditable metadata, installer scripts, and archive-smoke evidence
-      exist for the intended target matrix when generated by the manual
-      release-artifacts workflow.
-- [x] Unix shell and PowerShell install paths are tested.
+- [ ] Add or tighten focused core tests for file and directory modified-time
+      application, including failure/warning behavior when timestamps are
+      denied, unsupported, or outside the destination system-time range.
+- [ ] Add or tighten CLI tests that prove file and directory modified times
+      survive backup and restore through the `ferry` binary.
+- [ ] Add or tighten Unix tests for regular-file and directory mode restore,
+      including masking to `0o777` and warning for special bits.
+- [ ] Add or tighten tests proving directory metadata is applied after child
+      writes so restored directory mtimes are not clobbered by restore-created
+      children.
+- [ ] Add or tighten dry-run tests so `metadata_planned`,
+      `metadata_applied`, and warnings match non-dry-run semantics without
+      writing destination entries.
+- [ ] Recheck `README.md`, `docs/platform-metadata.md`, and
+      `docs/cli-contract.md` after test hardening so public wording matches
+      observed behavior exactly.
 
-Additional command surface:
+### Phase 2 - Metadata Outcome Architecture
 
-- [x] `ferry find`.
-- [x] `ferry diff`.
-- [x] `ferry repo` safe status and opt-in metadata/state verification.
-- [x] `ferry policy`.
-- [x] `ferry doctor`.
-- [x] Recovery import.
-- [x] Full repository rekey.
-- [x] Broader storage providers.
+Purpose: make future metadata fields additive instead of one-off counter and
+warning logic.
 
-Out of scope for v1: GUI, TUI, daemon, server, scheduler, SaaS, mobile app,
-FUSE mount, and compatibility with existing backup repository formats.
+- [ ] Introduce typed restore metadata outcomes that distinguish planned,
+      applied, skipped-as-unsupported, denied, unrepresentable, failed, and
+      not-yet-implemented fields.
+- [ ] Derive `metadata_planned`, `metadata_applied`, and
+      `metadata_warnings` from those outcomes instead of hand-maintained field
+      counts.
+- [ ] Move platform-specific representation/apply probes toward
+      `fileferry-platform` where practical, keeping CLI presentation out of
+      library crates.
+- [ ] Preserve the existing JSON/JSONL `RestoreMetadataWarning` shape unless a
+      deliberate CLI contract revision is made.
+- [ ] Add regression tests proving a new metadata field cannot be selected and
+      silently ignored.
+
+### Phase 3 - Portable Timestamp Completion
+
+Purpose: finish portable timestamp behavior before deeper platform extensions.
+
+- [ ] Decide and document which timestamp fields are restore targets:
+      modified, accessed if added, and creation/birth where representable.
+- [ ] If creation/birth timestamp restore is pursued, verify current primary
+      platform APIs first and document representability limits for Linux,
+      macOS, and Windows.
+- [ ] Implement creation/birth timestamp application only where the destination
+      platform and filesystem can actually represent it.
+- [ ] Keep creation/birth timestamp warnings where capture or destination
+      representation is unsupported.
+- [ ] Add platform-gated tests for successful timestamp restore and warning
+      paths on each supported target.
+- [ ] Update `docs/platform-metadata.md`, `docs/cli-contract.md`, and known
+      limitations after behavior is proven.
+
+### Phase 4 - Unix Metadata Expansion
+
+Purpose: deepen Unix restore without unsafe default ownership behavior.
+
+- [ ] Decide whether Unix ownership changes are ever automatic, opt-in, or
+      warning-only. Document the decision before implementation.
+- [ ] If ownership restore is implemented, add a non-interactive opt-in and
+      tests for permission denied, unprivileged operation, mismatched ids, and
+      partial-success reporting.
+- [ ] Decide whether special Unix mode bits are restore targets. Keep warnings
+      for unsupported or unsafe bits.
+- [ ] Add symlink metadata support only through APIs that do not follow the
+      symlink target. If unavailable, keep structured warnings.
+- [ ] Add Linux/macOS tests for regular files, directories, symlinks, and
+      unsupported filesystem behavior.
+- [ ] Keep Windows behavior explicit: Unix metadata is unrepresentable unless
+      a documented Windows mapping is implemented and tested.
+
+### Phase 5 - Platform Extension Values And Format Planning
+
+Purpose: move beyond status/count scaffolding only after the format decision is
+explicit.
+
+- [ ] Write a design note or docs update for storing metadata extension values
+      without leaking sensitive details in plaintext.
+- [ ] Decide whether new metadata value storage requires a new repository
+      format version, feature flag, or manifest schema. Add fixtures before
+      declaring compatibility.
+- [ ] Implement xattr name/value capture and restore for supported Unix
+      platforms, with filters for known non-restorable implementation details.
+- [ ] Implement ACL capture and restore only after choosing platform-specific
+      schemas and failure behavior.
+- [ ] Implement macOS file flags and resource fork capture/restore where
+      APIs and tests prove behavior.
+- [ ] Implement Windows attribute and owner metadata capture/restore where
+      APIs and tests prove behavior.
+- [ ] Implement sparse-file extent capture/restore only after deciding whether
+      sparse layout is a metadata field, content-storage concern, or both.
+- [ ] Keep unsupported, denied, or not-yet-implemented extension values as
+      structured warnings until value-level restore is proven.
+
+### Phase 6 - Cross-Platform Evidence
+
+Purpose: turn implementation into supportable behavior.
+
+- [ ] Add Linux CI coverage for every metadata field claimed on Linux.
+- [ ] Add macOS CI coverage for every metadata field claimed on macOS.
+- [ ] Add Windows CI coverage for every metadata field claimed on Windows.
+- [ ] Add local restore drills that compare source and restored metadata for
+      the implemented field set.
+- [ ] Add S3-compatible restore drills only when metadata behavior differs
+      from local restore or when storage behavior could affect restore order.
+- [ ] Update `docs/operations.md` with dated evidence for each completed
+      metadata drill.
+
+### Phase 7 - Documentation And Release Readiness
+
+Purpose: make the public story match the tested behavior.
+
+- [ ] Update `README.md` known limits after each metadata field graduates from
+      warning-only to restored.
+- [ ] Update `docs/platform-metadata.md` with exact capture/restore behavior,
+      representability limits, and warning reasons.
+- [ ] Update `docs/cli-contract.md` if metadata output fields, warning
+      fields, or exit-code behavior change.
+- [ ] Update `docs/repository-format.md` and fixtures for any new
+      compatibility-facing metadata fields.
+- [ ] Update release notes before publishing a release that changes metadata
+      behavior.
+- [ ] Run the normal workspace gate before marking metadata restore complete:
+      `just fmt`, `just check`, `just test`, and `just build`.
 
 ---
 
 ## Known Limits Not To Overclaim
 
-- Restore applies only the implemented metadata subset. Other captured or
-  future metadata must be reported as warnings, not silently claimed restored.
+- Restore currently applies only the implemented metadata subset. Other
+  captured or future metadata must be reported as warnings, not silently
+  claimed restored.
 - Current normal metadata capture does not restore xattr values, ACL contents,
   file flags, resource forks, Windows attributes, sparse extent maps, symlink
   metadata, or creation/birth timestamps.
+- Unix UID/GID ownership is verified, not changed.
+- Unix special mode bits are warned, not restored.
 - `ferry key rotate` currently rotates unlock access by adding a new slot and
   marker-removing selected externally added slots. `ferry key rekey` is the
   separate full repository master-key rewrite path.
@@ -190,11 +290,7 @@ FUSE mount, and compatibility with existing backup repository formats.
 - Command leases cover current mutation paths. They are not a full stale-lease
   repair system or broad concurrent-backup proof.
 - S3-compatible behavior must be described only to the level backed by current
-  tests and, for provider claims, current live evidence. Current cloud-provider
-  evidence is Backblaze B2 only; local MinIO evidence proves a loopback
-  S3-compatible runtime path with conditional create enabled. A gated provider
-  drill is harness coverage, not provider evidence until it has been run
-  against that exact provider configuration.
+  tests and, for provider claims, current live evidence.
 
 ---
 
