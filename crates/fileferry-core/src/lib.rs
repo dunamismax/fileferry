@@ -10685,6 +10685,26 @@ mod tests {
         entries * 5
     }
 
+    fn metadata_warning_facts(
+        warnings: &[RestoreMetadataWarning],
+    ) -> Vec<(String, &'static str, &'static str, String, String, String)> {
+        let mut facts = warnings
+            .iter()
+            .map(|warning| {
+                (
+                    warning.relative_path.display().to_string(),
+                    warning.namespace,
+                    warning.field,
+                    format!("{:?}", warning.source_platform),
+                    format!("{:?}", warning.destination_platform),
+                    warning.reason.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        facts.sort();
+        facts
+    }
+
     #[cfg(unix)]
     fn test_xattr_name() -> &'static str {
         if cfg!(target_os = "macos") {
@@ -14555,6 +14575,81 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_applies_directory_metadata_after_child_writes() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let docs = source.path().join("docs");
+        fs::create_dir(&docs).expect("create docs");
+        fs::write(docs.join("child.txt"), b"child").expect("write child");
+
+        let expected = Timestamp {
+            seconds: 1_600_000_000,
+            nanoseconds: 0,
+        };
+        let expected_time = system_time_from_timestamp(expected).expect("expected system time");
+        let directory_mtime_configured = match set_restored_modified_timestamp(
+            &docs,
+            RestoredMetadataTarget::Directory,
+            expected_time,
+        ) {
+            Ok(()) => true,
+            Err(source) if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied => {
+                false
+            }
+            Err(source) => panic!("set source directory mtime: {source}"),
+        };
+        if !directory_mtime_configured {
+            return;
+        }
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: vec![PathBuf::from("docs")],
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert_eq!(
+            capture_metadata(destination.path().join("docs"))
+                .expect("restored directory metadata")
+                .modified,
+            MetadataValue::Captured(expected),
+            "directory mtime must be applied after child file creation"
+        );
+        assert_eq!(
+            fs::read(destination.path().join("docs/child.txt")).expect("restored child"),
+            b"child"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn restore_snapshot_to_destination_applies_unix_permission_bits() {
@@ -15003,6 +15098,62 @@ mod tests {
     }
 
     #[test]
+    fn apply_restored_modified_timestamp_records_denied_and_out_of_range_warnings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let denied_path = temp.path().join("denied.txt");
+        let invalid_path = temp.path().join("invalid.txt");
+        fs::write(&denied_path, b"denied").expect("write denied");
+        fs::write(&invalid_path, b"invalid").expect("write invalid");
+        let mut warnings = Vec::new();
+
+        let denied_applied = apply_restored_modified_timestamp(
+            &denied_path,
+            Path::new("denied.txt"),
+            current_platform(),
+            &MetadataValue::Denied("permission denied".to_owned()),
+            RestoredMetadataTarget::RegularFile,
+            &mut warnings,
+        );
+        let invalid_applied = apply_restored_modified_timestamp(
+            &invalid_path,
+            Path::new("invalid.txt"),
+            current_platform(),
+            &MetadataValue::Captured(Timestamp {
+                seconds: 0,
+                nanoseconds: 1_000_000_000,
+            }),
+            RestoredMetadataTarget::RegularFile,
+            &mut warnings,
+        );
+
+        assert_eq!(denied_applied, 0);
+        assert_eq!(invalid_applied, 0);
+        assert_eq!(
+            warnings,
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("denied.txt"),
+                    namespace: "portable",
+                    field: "modified",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "modified timestamp was denied during backup: permission denied"
+                        .to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("invalid.txt"),
+                    namespace: "portable",
+                    field: "modified",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "modified timestamp is outside the supported system time range"
+                        .to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn plan_restored_modified_timestamp_reports_denied_and_invalid_values() {
         let mut warnings = Vec::new();
 
@@ -15111,33 +15262,61 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("sample.txt");
-        fs::write(&path, b"sample").expect("write sample");
+        let file = temp.path().join("sample.txt");
+        let directory = temp.path().join("sample-dir");
+        fs::write(&file, b"sample").expect("write sample");
+        fs::create_dir(&directory).expect("create sample dir");
         let mut warnings = Vec::new();
 
-        let applied = apply_restored_unix_mode(
-            &path,
+        let file_applied = apply_restored_unix_mode(
+            &file,
             Path::new("sample.txt"),
             current_platform(),
             Some(0o104755),
             &mut warnings,
         );
+        let directory_applied = apply_restored_unix_mode(
+            &directory,
+            Path::new("sample-dir"),
+            current_platform(),
+            Some(0o041750),
+            &mut warnings,
+        );
 
-        assert_eq!(applied, 1);
+        assert_eq!(file_applied, 1);
+        assert_eq!(directory_applied, 1);
         assert_eq!(
-            fs::metadata(&path).expect("metadata").permissions().mode() & RESTORABLE_UNIX_MODE_BITS,
+            fs::metadata(&file).expect("metadata").permissions().mode() & RESTORABLE_UNIX_MODE_BITS,
             0o755
         );
         assert_eq!(
+            fs::metadata(&directory)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & RESTORABLE_UNIX_MODE_BITS,
+            0o750
+        );
+        assert_eq!(
             warnings,
-            vec![RestoreMetadataWarning {
-                relative_path: PathBuf::from("sample.txt"),
-                namespace: "unix",
-                field: "mode",
-                source_platform: current_platform(),
-                destination_platform: current_platform(),
-                reason: "unix mode special bits 0o4000 are not restored".to_owned(),
-            }]
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("sample.txt"),
+                    namespace: "unix",
+                    field: "mode",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "unix mode special bits 0o4000 are not restored".to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("sample-dir"),
+                    namespace: "unix",
+                    field: "mode",
+                    source_platform: current_platform(),
+                    destination_platform: current_platform(),
+                    reason: "unix mode special bits 0o1000 are not restored".to_owned(),
+                },
+            ]
         );
     }
 
@@ -15423,6 +15602,128 @@ mod tests {
         );
         assert_eq!(restored.files[0].bytes, 6);
         assert!(!destination.path().join("sample.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_dry_run_matches_metadata_warning_semantics() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::create_dir(source.path().join("docs")).expect("create docs");
+        fs::write(source.path().join("docs/sample.txt"), b"sample").expect("write sample");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let (snapshot_id, _) = replace_committed_manifest_for_tests(
+            &pipeline,
+            &store,
+            &master_key,
+            &result,
+            |manifest| {
+                for entry in &mut manifest.body.entries {
+                    if entry.relative_path == Path::new("docs") {
+                        entry.metadata.modified = MetadataValue::Captured(Timestamp {
+                            seconds: 0,
+                            nanoseconds: 1_000_000_000,
+                        });
+                    }
+                    if entry.relative_path == Path::new("docs/sample.txt") {
+                        entry.metadata.modified =
+                            MetadataValue::Denied("permission denied".to_owned());
+                        entry.metadata.created = MetadataValue::Unsupported;
+                    }
+                    #[cfg(unix)]
+                    if entry.relative_path == Path::new("docs") {
+                        if let Some(unix) = &mut entry.metadata.unix {
+                            unix.mode |= 0o1000;
+                        }
+                    }
+                    #[cfg(unix)]
+                    if entry.relative_path == Path::new("docs/sample.txt") {
+                        if let Some(unix) = &mut entry.metadata.unix {
+                            unix.mode |= 0o4000;
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        let dry_run = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: snapshot_id.clone(),
+                    paths: vec![PathBuf::from("docs")],
+                    destination: destination.path().join("dry-run"),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: true,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("dry-run restore");
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id,
+                    paths: vec![PathBuf::from("docs")],
+                    destination: destination.path().join("restored"),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert!(!destination.path().join("dry-run").exists());
+        assert_eq!(dry_run.metadata_planned, restored.metadata_planned);
+        assert_eq!(dry_run.metadata_applied, 0);
+        assert_eq!(
+            metadata_warning_facts(&dry_run.metadata_warnings),
+            metadata_warning_facts(&restored.metadata_warnings)
+        );
+        assert!(dry_run.metadata_warnings.iter().any(|warning| {
+            warning.relative_path == Path::new("docs/sample.txt")
+                && warning.namespace == "portable"
+                && warning.field == "modified"
+                && warning
+                    .reason
+                    .contains("modified timestamp was denied during backup")
+        }));
+        assert!(dry_run.metadata_warnings.iter().any(|warning| {
+            warning.relative_path == Path::new("docs")
+                && warning.namespace == "portable"
+                && warning.field == "modified"
+                && warning
+                    .reason
+                    .contains("outside the supported system time range")
+        }));
+        #[cfg(unix)]
+        assert!(dry_run.metadata_warnings.iter().any(|warning| {
+            warning.relative_path == Path::new("docs/sample.txt")
+                && warning.namespace == "unix"
+                && warning.field == "mode"
+                && warning.reason.contains("special bits 0o4000")
+        }));
     }
 
     #[cfg(unix)]

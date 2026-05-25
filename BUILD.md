@@ -132,20 +132,20 @@ Check a box only after code, docs, and tests for that item are updated.
 
 Purpose: make the already-implemented metadata subset difficult to regress.
 
-- [ ] Add or tighten focused core tests for file and directory modified-time
+- [x] Add or tighten focused core tests for file and directory modified-time
       application, including failure/warning behavior when timestamps are
       denied, unsupported, or outside the destination system-time range.
 - [ ] Add or tighten CLI tests that prove file and directory modified times
       survive backup and restore through the `ferry` binary.
-- [ ] Add or tighten Unix tests for regular-file and directory mode restore,
+- [x] Add or tighten Unix tests for regular-file and directory mode restore,
       including masking to `0o777` and warning for special bits.
-- [ ] Add or tighten tests proving directory metadata is applied after child
+- [x] Add or tighten tests proving directory metadata is applied after child
       writes so restored directory mtimes are not clobbered by restore-created
       children.
-- [ ] Add or tighten dry-run tests so `metadata_planned`,
+- [x] Add or tighten dry-run tests so `metadata_planned`,
       `metadata_applied`, and warnings match non-dry-run semantics without
       writing destination entries.
-- [ ] Recheck `README.md`, `docs/platform-metadata.md`, and
+- [x] Recheck `README.md`, `docs/platform-metadata.md`, and
       `docs/cli-contract.md` after test hardening so public wording matches
       observed behavior exactly.
 

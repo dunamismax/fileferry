@@ -182,6 +182,14 @@ fn set_modified_time(path: &Path, modified: SystemTime) {
 }
 
 #[cfg(unix)]
+fn set_directory_modified_time(path: &Path, modified: SystemTime) {
+    let directory = fs::File::open(path).expect("open directory for timestamp update");
+    directory
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .expect("set directory modified time");
+}
+
+#[cfg(unix)]
 fn test_xattr_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "com.fileferry.test"
@@ -4125,6 +4133,10 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
     fs::create_dir(&source).expect("create source");
     fs::create_dir_all(source.join("empty/nested")).expect("create empty tree");
     fs::write(source.join("target.txt"), b"target").expect("write target");
+    let empty_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+    set_directory_modified_time(&source.join("empty"), empty_modified);
+    fs::set_permissions(source.join("empty"), fs::Permissions::from_mode(0o750))
+        .expect("set source directory mode");
     fs::set_permissions(source.join("target.txt"), fs::Permissions::from_mode(0o640))
         .expect("set source file mode");
     symlink("target.txt", source.join("target.link")).expect("create symlink");
@@ -4204,6 +4216,21 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
             .mode()
             & 0o777,
         0o640
+    );
+    assert_eq!(
+        fs::metadata(destination.join("empty"))
+            .expect("restored empty directory metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o750
+    );
+    assert_eq!(
+        fs::metadata(destination.join("empty"))
+            .expect("restored empty directory metadata")
+            .modified()
+            .expect("restored empty directory modified time"),
+        empty_modified
     );
 
     let blocked_destination = temp.path().join("blocked");
