@@ -101,6 +101,23 @@ The prune test creates a unique `cli-prune-...` repository prefix under
 plan/completion state exists, and deletes only objects under that unique
 repository prefix.
 
+The CLI S3 command-surface integration test uses the same variables, plus its
+own opt-in gate:
+
+```sh
+export FILEFERRY_S3_COMMAND_SURFACE_INTEGRATION=1
+export FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1
+cargo test -p fileferry-cli s3_command_surface_live_integration_when_env_is_enabled
+```
+
+The command-surface test creates a unique `cli-command-surface-...` repository
+prefix under `FILEFERRY_S3_TEST_PREFIX`, runs `ferry init`, two `backup`
+commands, `find`, `diff`, `repo --verify`, `doctor --jsonl`, `policy set`,
+`policy show`, and `key rekey --jsonl`, verifies old unlock material no longer
+opens the repository after rekey, verifies the new passphrase can read
+snapshots and encrypted policy config, and deletes only objects under that
+unique repository prefix.
+
 ## Backblaze S3 Notes
 
 Backblaze documents S3-compatible endpoints as:

@@ -5727,6 +5727,283 @@ fn s3_data_path_live_integration_when_env_is_enabled() {
 }
 
 #[test]
+fn s3_command_surface_live_integration_when_env_is_enabled() {
+    if std::env::var("FILEFERRY_S3_COMMAND_SURFACE_INTEGRATION")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+
+    let bucket = required_env("FILEFERRY_S3_BUCKET");
+    let endpoint = required_env("FILEFERRY_S3_ENDPOINT");
+    let region = required_env("FILEFERRY_S3_REGION");
+    let access_key_id = required_env("FILEFERRY_S3_ACCESS_KEY_ID");
+    let secret_access_key = required_env("FILEFERRY_S3_SECRET_ACCESS_KEY");
+    let test_prefix = required_env("FILEFERRY_S3_TEST_PREFIX");
+    let repo_prefix = format!("{test_prefix}/cli-command-surface-{}", unique_test_id());
+    let repo_url = format!("s3://{bucket}/{repo_prefix}");
+    let passphrase = "s3-command-surface-old-passphrase";
+    let new_passphrase = "s3-command-surface-new-passphrase";
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("same.txt"), b"s3 same").expect("write same");
+    fs::write(source.join("changed.txt"), b"s3 old").expect("write old changed");
+
+    let sensitive_values = [
+        bucket.as_str(),
+        repo_prefix.as_str(),
+        access_key_id.as_str(),
+        secret_access_key.as_str(),
+        passphrase,
+        new_passphrase,
+    ];
+    let s3_context = S3LiveCommandContext {
+        endpoint: &endpoint,
+        region: &region,
+        access_key_id: &access_key_id,
+        secret_access_key: &secret_access_key,
+        passphrase,
+        sensitive_values: &sensitive_values,
+    };
+
+    run_s3_provider_json_command(&s3_context, ["--repo", &repo_url, "--json", "init"], 0);
+    let first_backup_output = run_s3_provider_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "backup",
+            "--tag",
+            "alpha",
+            source.to_str().expect("source path"),
+        ],
+        0,
+    );
+    let first_backup: Value =
+        serde_json::from_slice(&first_backup_output).expect("first backup json");
+    let first_snapshot_id = first_backup["data"]["snapshot_id"]
+        .as_str()
+        .expect("first snapshot id")
+        .to_owned();
+
+    fs::write(source.join("changed.txt"), b"s3 new").expect("write new changed");
+    fs::write(source.join("added.txt"), b"s3 added").expect("write added");
+    let second_backup_output = run_s3_provider_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "backup",
+            "--tag",
+            "beta",
+            source.to_str().expect("source path"),
+        ],
+        0,
+    );
+    let second_backup: Value =
+        serde_json::from_slice(&second_backup_output).expect("second backup json");
+    let second_snapshot_id = second_backup["data"]["snapshot_id"]
+        .as_str()
+        .expect("second snapshot id")
+        .to_owned();
+
+    let find_output = run_s3_provider_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "find",
+            "--all",
+            "--name",
+            "added.txt",
+        ],
+        0,
+    );
+    let find: Value = serde_json::from_slice(&find_output).expect("find json");
+    assert_eq!(find["command"], "find");
+    assert_eq!(find["data"]["snapshots_searched"], 2);
+    assert_eq!(find["data"]["matches_count"], 1);
+    assert_eq!(
+        find["data"]["matches"][0]["snapshot_id"],
+        second_snapshot_id
+    );
+    assert_eq!(find["data"]["matches"][0]["path"], "added.txt");
+
+    let diff_output = run_s3_provider_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "diff",
+            "--from-snapshot",
+            &first_snapshot_id,
+            "--to-snapshot",
+            &second_snapshot_id,
+        ],
+        0,
+    );
+    let diff: Value = serde_json::from_slice(&diff_output).expect("diff json");
+    assert_eq!(diff["command"], "diff");
+    assert_eq!(diff["data"]["from_snapshot_id"], first_snapshot_id);
+    assert_eq!(diff["data"]["to_snapshot_id"], second_snapshot_id);
+    assert_eq!(diff["data"]["added_count"], 1);
+    assert_eq!(diff["data"]["changed_count"], 1);
+    assert!(
+        diff["data"]["entries"]
+            .as_array()
+            .expect("diff entries")
+            .iter()
+            .any(|entry| entry["path"] == "same.txt" && entry["status"] == "unchanged")
+    );
+
+    let repo_output = run_s3_provider_json_command(
+        &s3_context,
+        ["--repo", &repo_url, "--json", "repo", "--verify"],
+        0,
+    );
+    let repo: Value = serde_json::from_slice(&repo_output).expect("repo json");
+    assert_eq!(repo["command"], "repo");
+    assert_eq!(repo["data"]["backend"], "s3_compatible");
+    assert_eq!(repo["data"]["initialized"], true);
+    assert_eq!(repo["data"]["storage"]["repository_requirements_met"], true);
+    assert_eq!(repo["data"]["verification"]["unlocked"], true);
+    assert_eq!(repo["data"]["verification"]["chunk_objects_checked"], 0);
+
+    let doctor_output =
+        run_s3_provider_jsonl_command(&s3_context, ["--repo", &repo_url, "--jsonl", "doctor"], 0);
+    let doctor_events = parse_jsonl_events(&doctor_output);
+    assert_eq!(doctor_events[0]["event"], "command_started");
+    let doctor_completed = doctor_events.last().expect("doctor completed event");
+    assert_eq!(doctor_completed["command"], "doctor");
+    assert_eq!(doctor_completed["event"], "command_completed");
+    assert_eq!(doctor_completed["data"]["backend"], "s3_compatible");
+    assert_eq!(doctor_completed["data"]["health"]["status"], "healthy");
+    assert_eq!(
+        doctor_completed["data"]["verification"]["chunk_objects_checked"],
+        0
+    );
+    assert_eq!(doctor_completed["data"]["repair"]["attempted"], false);
+
+    let policy_set_output = run_s3_provider_json_command(
+        &s3_context,
+        [
+            "--repo",
+            &repo_url,
+            "--json",
+            "policy",
+            "set",
+            "--keep-last",
+            "1",
+        ],
+        0,
+    );
+    let policy_set: Value = serde_json::from_slice(&policy_set_output).expect("policy set json");
+    let policy_id = policy_set["data"]["policy_id"]
+        .as_str()
+        .expect("policy id")
+        .to_owned();
+    assert_eq!(policy_set["command"], "policy set");
+    assert_eq!(policy_set["data"]["encrypted_at_rest"], true);
+    assert_eq!(policy_set["data"]["applied_to_forget"], false);
+
+    let policy_show_output = run_s3_provider_json_command(
+        &s3_context,
+        ["--repo", &repo_url, "--json", "policy", "show"],
+        0,
+    );
+    let policy_show: Value = serde_json::from_slice(&policy_show_output).expect("policy show json");
+    assert_eq!(policy_show["command"], "policy show");
+    assert_eq!(policy_show["data"]["policy_count"], 1);
+    assert_eq!(policy_show["data"]["policies"][0]["policy_id"], policy_id);
+
+    let rekey_output =
+        s3_provider_fileferry(&endpoint, &region, &access_key_id, &secret_access_key)
+            .env("FILEFERRY_PASSWORD", passphrase)
+            .env("FILEFERRY_NEW_PASSWORD", new_passphrase)
+            .args(["--repo", &repo_url, "--jsonl", "key", "rekey"])
+            .output()
+            .expect("run key rekey");
+    let rekey_output = assert_redacted_s3_output(rekey_output, 0, &sensitive_values);
+    let rekey_events = parse_jsonl_events(&rekey_output);
+    assert_eq!(rekey_events[0]["command"], "key rekey");
+    assert!(
+        rekey_events.iter().any(
+            |event| event["event"] == "progress" && event["data"]["phase"] == "rewrite_objects"
+        )
+    );
+    let rekey_completed = rekey_events.last().expect("rekey completed event");
+    assert_eq!(rekey_completed["event"], "command_completed");
+    assert_eq!(rekey_completed["data"]["snapshots_rewritten"], 2);
+    assert_eq!(rekey_completed["data"]["policies_rewritten"], 1);
+    assert_eq!(rekey_completed["data"]["old_unlocks_retained"], false);
+    assert_eq!(
+        rekey_completed["data"]["reencrypted_repository_objects"],
+        true
+    );
+
+    let old_unlock_output =
+        run_s3_provider_json_command(&s3_context, ["--repo", &repo_url, "--json", "snapshots"], 4);
+    let old_unlock: Value = serde_json::from_slice(&old_unlock_output).expect("old unlock json");
+    assert_eq!(old_unlock["data"]["code"], "repository_unlock_failed");
+
+    let new_context = S3LiveCommandContext {
+        passphrase: new_passphrase,
+        ..s3_context
+    };
+    let post_rekey_snapshots = run_s3_provider_json_command(
+        &new_context,
+        ["--repo", &repo_url, "--json", "snapshots"],
+        0,
+    );
+    let post_rekey_snapshots: Value =
+        serde_json::from_slice(&post_rekey_snapshots).expect("post rekey snapshots json");
+    assert_eq!(
+        post_rekey_snapshots["data"]["snapshots"]
+            .as_array()
+            .expect("snapshots")
+            .len(),
+        2
+    );
+
+    let post_rekey_policy = run_s3_provider_json_command(
+        &new_context,
+        ["--repo", &repo_url, "--json", "policy", "show"],
+        0,
+    );
+    let post_rekey_policy: Value =
+        serde_json::from_slice(&post_rekey_policy).expect("post rekey policy json");
+    assert_eq!(
+        post_rekey_policy["data"]["policies"][0]["policy_id"],
+        policy_id
+    );
+
+    let cleanup_store = s3_cleanup_store(
+        &bucket,
+        &region,
+        &endpoint,
+        &access_key_id,
+        &secret_access_key,
+        &repo_prefix,
+    );
+    let runtime = tokio::runtime::Runtime::new().expect("s3 command surface cleanup runtime");
+    let keys = runtime
+        .block_on(cleanup_store.list_prefix(&ObjectKeyPrefix::root()))
+        .expect("list s3 command surface cleanup keys");
+    for key in keys {
+        runtime
+            .block_on(cleanup_store.delete(&key))
+            .expect("delete s3 command surface cleanup key");
+    }
+}
+
+#[test]
 fn s3_prune_live_integration_when_env_is_enabled() {
     if std::env::var("FILEFERRY_S3_PRUNE_INTEGRATION")
         .ok()
@@ -6198,6 +6475,24 @@ fn s3_fileferry(
     command
 }
 
+fn s3_provider_fileferry(
+    endpoint: &str,
+    region: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+) -> Command {
+    let mut command = fileferry();
+    command
+        .env("FILEFERRY_S3_ENDPOINT", endpoint)
+        .env("FILEFERRY_S3_REGION", region)
+        .env("FILEFERRY_S3_ACCESS_KEY_ID", access_key_id)
+        .env("FILEFERRY_S3_SECRET_ACCESS_KEY", secret_access_key);
+    if let Ok(value) = std::env::var("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE") {
+        command.env("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE", value);
+    }
+    command
+}
+
 #[derive(Clone, Copy)]
 struct S3LiveCommandContext<'a> {
     endpoint: &'a str,
@@ -6226,6 +6521,32 @@ fn run_s3_json_command<const N: usize>(
     assert_redacted_s3_output(output, expected_code, context.sensitive_values)
 }
 
+fn run_s3_provider_json_command<const N: usize>(
+    context: &S3LiveCommandContext<'_>,
+    args: [&str; N],
+    expected_code: i32,
+) -> Vec<u8> {
+    let output = s3_provider_fileferry(
+        context.endpoint,
+        context.region,
+        context.access_key_id,
+        context.secret_access_key,
+    )
+    .env("FILEFERRY_PASSWORD", context.passphrase)
+    .args(args)
+    .output()
+    .expect("run ferry");
+    assert_redacted_s3_output(output, expected_code, context.sensitive_values)
+}
+
+fn run_s3_provider_jsonl_command<const N: usize>(
+    context: &S3LiveCommandContext<'_>,
+    args: [&str; N],
+    expected_code: i32,
+) -> Vec<u8> {
+    run_s3_provider_json_command(context, args, expected_code)
+}
+
 fn assert_redacted_s3_output(
     output: Output,
     expected_code: i32,
@@ -6245,8 +6566,29 @@ fn assert_redacted_s3_output(
         output.stderr.is_empty(),
         "expected empty stderr\nstdout={redacted_stdout}\nstderr={redacted_stderr}"
     );
+    for value in sensitive_values {
+        if value.is_empty() {
+            continue;
+        }
+        assert!(
+            !stdout.contains(value),
+            "stdout leaked sensitive S3 test value\nstdout={redacted_stdout}"
+        );
+        assert!(
+            !stderr.contains(value),
+            "stderr leaked sensitive S3 test value\nstderr={redacted_stderr}"
+        );
+    }
 
     output.stdout
+}
+
+fn parse_jsonl_events(output: &[u8]) -> Vec<Value> {
+    std::str::from_utf8(output)
+        .expect("jsonl utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl event"))
+        .collect()
 }
 
 fn redact_for_s3_test_failure(text: &str, sensitive_values: &[&str]) -> String {

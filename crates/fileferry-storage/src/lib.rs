@@ -1321,8 +1321,14 @@ fn push_object_path(root: &Path, path: &Path, output: &mut Vec<ObjectKey>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::stream::BoxStream;
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as BackendResult,
+        path::Path as BackendPath,
+    };
     use std::{
-        io,
+        fmt, io,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering as AtomicOrdering},
@@ -1961,6 +1967,38 @@ mod tests {
         assert!(!store.exists(&first).await.expect("exists after delete"));
     }
 
+    #[tokio::test]
+    async fn s3_put_if_absent_uses_single_request_put_not_multipart() {
+        for conditional_create in [true, false] {
+            let multipart_calls = Arc::new(AtomicUsize::new(0));
+            let backend = MultipartCountingBackend {
+                inner: object_store::memory::InMemory::new(),
+                multipart_calls: Arc::clone(&multipart_calls),
+            };
+            let store = S3Store {
+                inner: Arc::new(backend),
+                root_prefix: ObjectKeyPrefix::new("fileferry/dev").expect("prefix"),
+                conditional_create,
+            };
+            let object = key("objects/chunk/aa/blob");
+            let bytes = vec![7; 6 * 1024 * 1024];
+
+            assert_eq!(
+                store
+                    .put_if_absent(&object, &bytes)
+                    .await
+                    .expect("put object"),
+                PutStatus::Created
+            );
+            assert_eq!(
+                multipart_calls.load(AtomicOrdering::SeqCst),
+                0,
+                "conditional_create={conditional_create} must not start multipart upload"
+            );
+            assert_eq!(store.get(&object).await.expect("read object"), bytes);
+        }
+    }
+
     fn s3_integration_config() -> Option<S3StoreConfig> {
         if std::env::var("FILEFERRY_S3_INTEGRATION").ok().as_deref() != Some("1") {
             return None;
@@ -1995,6 +2033,80 @@ mod tests {
             .expect("time")
             .as_nanos();
         format!("{}-{nanos}", std::process::id())
+    }
+
+    #[derive(Debug)]
+    struct MultipartCountingBackend {
+        inner: object_store::memory::InMemory,
+        multipart_calls: Arc<AtomicUsize>,
+    }
+
+    impl fmt::Display for MultipartCountingBackend {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("MultipartCountingBackend")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStoreBackend for MultipartCountingBackend {
+        async fn put_opts(
+            &self,
+            location: &BackendPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> BackendResult<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &BackendPath,
+            _opts: PutMultipartOptions,
+        ) -> BackendResult<Box<dyn MultipartUpload>> {
+            self.multipart_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Err(ObjectStoreError::NotImplemented {
+                operation: "put_multipart_opts".to_owned(),
+                implementer: self.to_string(),
+            })
+        }
+
+        async fn get_opts(
+            &self,
+            location: &BackendPath,
+            options: GetOptions,
+        ) -> BackendResult<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, BackendResult<BackendPath>>,
+        ) -> BoxStream<'static, BackendResult<BackendPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&BackendPath>,
+        ) -> BoxStream<'static, BackendResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&BackendPath>,
+        ) -> BackendResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &BackendPath,
+            to: &BackendPath,
+            options: CopyOptions,
+        ) -> BackendResult<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
     }
 
     #[derive(Debug)]

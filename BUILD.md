@@ -46,7 +46,8 @@ Implemented and tested in current main:
   opt-in live-S3 integration output paths.
 - S3-compatible hardening evidence for capability probe, retry policy, prefix
   listing surprises, missing objects, permission denial, prune resume, and
-  missing-candidate handling.
+  missing-candidate handling, plus a reusable gated command-surface/rekey
+  provider drill for live S3-compatible repositories.
 - Local restore drills and live Backblaze B2 S3-compatible drills under an
   isolated private development prefix. This is provider evidence, not a broad
   S3-provider support claim.
@@ -188,7 +189,9 @@ FUSE mount, and compatibility with existing backup repository formats.
 - Command leases cover current mutation paths. They are not a full stale-lease
   repair system or broad concurrent-backup proof.
 - S3-compatible behavior must be described only to the level backed by current
-  tests and, for provider claims, current live evidence.
+  tests and, for provider claims, current live evidence. A gated provider drill
+  is harness coverage, not provider evidence until it has been run against that
+  exact provider configuration.
 
 ---
 

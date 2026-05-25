@@ -880,6 +880,7 @@ dependencies = [
 name = "fileferry-storage"
 version = "1.0.0-rc.1"
 dependencies = [
+ "async-trait",
  "futures-util",
  "object_store",
  "secrecy",

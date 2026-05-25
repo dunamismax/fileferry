@@ -15,5 +15,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait = "0.1.89"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

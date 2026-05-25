@@ -163,6 +163,10 @@ Current storage-layer S3 evidence includes:
 - Prefix-mapping tests that ignore exact root markers and sibling prefixes
   outside the configured repository root.
 - A fail-closed test for invalid object keys returned from backend listing.
+- A regression test proving FileFerry's current S3 `put_if_absent` path uses
+  single-request `object_store::ObjectStore::put_opts` writes and does not call
+  `put_multipart_opts`, including for a payload larger than the S3 minimum part
+  size.
 
 The implementation has a gated live integration test. It runs only when
 `FILEFERRY_S3_INTEGRATION=1` and all required S3 environment variables are set:
@@ -241,10 +245,19 @@ imported recovery key slot can unlock the repository, and then deletes objects
 under only that unique repository prefix. The recovery export is written to a
 local temporary file; it is not stored in S3.
 
-`ferry key rekey` uses the same local/S3-compatible object-store abstraction
-and command backend selection as other initialized repository commands. The
-current focused rekey coverage is local and fake-store based; the opt-in live
-Backblaze B2 drill has not yet been expanded to run a destructive full rekey.
+The command-surface test runs only when
+`FILEFERRY_S3_COMMAND_SURFACE_INTEGRATION=1` and the same S3 environment
+variables plus `FILEFERRY_S3_TEST_PREFIX` are set. It appends a unique
+`cli-command-surface-...` suffix, initializes that repository prefix, runs two
+backups, `ferry find`, `ferry diff`, `ferry repo --verify`,
+`ferry doctor --jsonl`, `ferry policy set`, `ferry policy show`, and a
+destructive full `ferry key rekey --jsonl`, verifies the old passphrase no
+longer unlocks the repository, verifies the new passphrase can still read
+snapshots and the encrypted policy config, and then deletes objects under only
+that unique repository prefix. Unlike the Backblaze-specific live tests above,
+this drill does not force `FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1`; set that
+environment variable only when the provider being tested requires the weaker
+head/read-before-write fallback.
 
 The S3 prune test runs only when `FILEFERRY_S3_PRUNE_INTEGRATION=1` and the
 same S3 environment variables plus `FILEFERRY_S3_TEST_PREFIX` are set. It
@@ -257,10 +270,16 @@ The Backblaze B2 live drill on 2026-05-22 passed these S3-compatible storage
 and CLI gates under an isolated private development prefix. That is current
 Backblaze provider evidence only; it is not a broad S3 provider support claim.
 
-S3 prune deletes existing repository objects and writes small encrypted
-prune-state objects through `put_if_absent`; it does not initiate multipart
-uploads. Multipart or partial-upload cleanup remains part of the broader S3
-backup/upload hardening path, not prune itself.
+All current FileFerry S3 writes go through `S3Store::put_if_absent`, which
+passes a complete in-memory payload to `object_store::ObjectStore::put_opts`
+with either create-only or overwrite mode. The current adapter does not call
+`put_multipart_opts`, `put_multipart`, create-multipart, upload-part,
+complete-multipart, or abort-multipart APIs. Therefore current FileFerry
+backups, prune state, policy writes, and rekey rewrites do not initiate S3
+multipart uploads through the FileFerry storage adapter. If a future streaming
+or multipart write path is added, it must add explicit abort-on-error behavior,
+resume or abandonment rules for provider-side incomplete multipart uploads,
+and provider drill coverage before support is claimed.
 
 ## Not Implemented Yet
 
@@ -274,8 +293,9 @@ S3-compatible encrypted repositories through the same core repository pipeline
 as the local backend.
 Common retry, timeout, backoff, and concurrency behavior exists in the policy
 wrapper, and a basic destructive capability probe now exists for exact store
-configurations. Before broader S3 provider support is claimed, FileFerry still
-needs live evidence for providers beyond the current Backblaze B2 path,
-live-S3 `ferry find`, `ferry diff`, `ferry repo`, `ferry doctor`, and
-`ferry policy` drill coverage, partial upload behavior, and multipart cleanup
-guidance.
+configurations. A reusable command-surface/rekey provider drill now exists for
+live S3-compatible repositories, but support claims still require actually
+running it against the provider and recording that evidence. Before broader S3
+provider support is claimed, FileFerry still needs live evidence for providers
+beyond the current Backblaze B2 path and live command-surface/rekey evidence
+for each provider configuration being claimed.
