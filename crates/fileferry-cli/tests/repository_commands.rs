@@ -4,7 +4,7 @@ use fileferry_core::{
     open_repository,
 };
 use fileferry_storage::{
-    LocalStore, ObjectKey, ObjectKeyPrefix, ObjectStore, S3Store, S3StoreConfig,
+    LocalStore, ObjectKey, ObjectKeyPrefix, ObjectStore, S3EndpointSecurity, S3Store, S3StoreConfig,
 };
 use predicates::prelude::PredicateBooleanExt;
 use secrecy::SecretString;
@@ -31,6 +31,7 @@ fn fileferry() -> Command {
         "FILEFERRY_S3_ACCESS_KEY_ID",
         "FILEFERRY_S3_SECRET_ACCESS_KEY",
         "FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE",
+        "FILEFERRY_S3_ALLOW_INSECURE_HTTP",
         "FILEFERRY_LOG",
     ] {
         command.env_remove(variable);
@@ -5532,13 +5533,14 @@ fn init_s3_live_integration_when_env_is_enabled() {
     assert!(!text.contains(&access_key_id));
     assert!(!text.contains(&secret_access_key));
 
-    let cleanup_config = S3StoreConfig::new(
+    let cleanup_config = S3StoreConfig::new_with_endpoint_security(
         bucket,
         region,
         endpoint,
         access_key_id,
         secret_access_key,
         ObjectKeyPrefix::new(repo_prefix).expect("test prefix"),
+        s3_endpoint_security_from_env(),
     )
     .expect("cleanup s3 config")
     .with_conditional_create(false);
@@ -5979,9 +5981,14 @@ fn s3_command_surface_live_integration_when_env_is_enabled() {
     );
     let post_rekey_policy: Value =
         serde_json::from_slice(&post_rekey_policy).expect("post rekey policy json");
-    assert_eq!(
+    assert_eq!(post_rekey_policy["data"]["policy_count"], 1);
+    assert_ne!(
         post_rekey_policy["data"]["policies"][0]["policy_id"],
         policy_id
+    );
+    assert_eq!(
+        post_rekey_policy["data"]["policies"][0]["retention"]["keep_last"],
+        1
     );
 
     let cleanup_store = s3_cleanup_store(
@@ -6459,6 +6466,17 @@ fn unique_test_id() -> String {
     format!("{}-{nanos}", std::process::id())
 }
 
+fn s3_endpoint_security_from_env() -> S3EndpointSecurity {
+    if std::env::var("FILEFERRY_S3_ALLOW_INSECURE_HTTP")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+    {
+        S3EndpointSecurity::AllowInsecureLocalHttp
+    } else {
+        S3EndpointSecurity::HttpsOnly
+    }
+}
+
 fn s3_fileferry(
     endpoint: &str,
     region: &str,
@@ -6472,6 +6490,9 @@ fn s3_fileferry(
         .env("FILEFERRY_S3_ACCESS_KEY_ID", access_key_id)
         .env("FILEFERRY_S3_SECRET_ACCESS_KEY", secret_access_key)
         .env("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE", "1");
+    if let Ok(value) = std::env::var("FILEFERRY_S3_ALLOW_INSECURE_HTTP") {
+        command.env("FILEFERRY_S3_ALLOW_INSECURE_HTTP", value);
+    }
     command
 }
 
@@ -6489,6 +6510,9 @@ fn s3_provider_fileferry(
         .env("FILEFERRY_S3_SECRET_ACCESS_KEY", secret_access_key);
     if let Ok(value) = std::env::var("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE") {
         command.env("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE", value);
+    }
+    if let Ok(value) = std::env::var("FILEFERRY_S3_ALLOW_INSECURE_HTTP") {
+        command.env("FILEFERRY_S3_ALLOW_INSECURE_HTTP", value);
     }
     command
 }
@@ -6609,13 +6633,14 @@ fn s3_cleanup_store(
     secret_access_key: &str,
     repo_prefix: &str,
 ) -> S3Store {
-    let cleanup_config = S3StoreConfig::new(
+    let cleanup_config = S3StoreConfig::new_with_endpoint_security(
         bucket.to_owned(),
         region.to_owned(),
         endpoint.to_owned(),
         access_key_id.to_owned(),
         secret_access_key.to_owned(),
         ObjectKeyPrefix::new(repo_prefix.to_owned()).expect("s3 cleanup prefix"),
+        s3_endpoint_security_from_env(),
     )
     .expect("s3 cleanup config")
     .with_conditional_create(false);

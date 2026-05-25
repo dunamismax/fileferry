@@ -144,7 +144,10 @@ secrets, or local `.env` files.
 
 Current S3 capability assumptions:
 
-- HTTPS endpoint required.
+- HTTPS endpoint required by default. `http://localhost`, `http://127.*`, and
+  `http://[::1]` endpoints are accepted only when
+  `FILEFERRY_S3_ALLOW_INSECURE_HTTP=1` is set explicitly for local
+  development runtimes.
 - Path-style requests are used.
 - Conditional create is provider-dependent and reported in capabilities.
 - Deletes are treated as idempotent.
@@ -152,7 +155,7 @@ Current S3 capability assumptions:
 - Object tags are disabled because some S3-compatible providers reject tagging
   headers.
 
-Current storage-layer S3 evidence includes:
+Current storage-layer and command-surface S3 evidence includes:
 
 - A reusable repository capability probe that rejects missing idempotent-delete
   or prefix-listing capabilities before writing, then verifies write, immediate
@@ -167,6 +170,8 @@ Current storage-layer S3 evidence includes:
   single-request `object_store::ObjectStore::put_opts` writes and does not call
   `put_multipart_opts`, including for a payload larger than the S3 minimum part
   size.
+- A local MinIO command-surface drill that exercised the stronger
+  conditional-create path over an explicitly enabled loopback HTTP endpoint.
 
 The implementation has a gated live integration test. It runs only when
 `FILEFERRY_S3_INTEGRATION=1` and all required S3 environment variables are set:
@@ -185,6 +190,10 @@ cargo test -p fileferry-storage s3_store_round_trip_when_integration_env_is_enab
 
 That gated test runs the capability probe before the round trip and uses a
 unique suffix under `FILEFERRY_S3_TEST_PREFIX`.
+Set `FILEFERRY_S3_ALLOW_INSECURE_HTTP=1` only for loopback local development
+runtimes, such as a local MinIO container. Set
+`FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1` only for providers that require
+the weaker fallback path.
 
 For Backblaze B2, the S3 endpoint has the form
 `https://s3.<region>.backblazeb2.com`, and the region is the second component
@@ -214,6 +223,20 @@ environment variables and must not be embedded in repository URLs. Query
 strings and fragments are rejected. Human, JSON, JSONL, and error output
 redacts S3 repository URLs as `s3://<redacted>` and does not emit S3
 credentials.
+
+Local S3-compatible development runtimes may use loopback HTTP endpoints only
+with explicit opt-in:
+
+```sh
+FILEFERRY_S3_ENDPOINT='http://127.0.0.1:9000' \
+FILEFERRY_S3_ALLOW_INSECURE_HTTP=1 \
+FILEFERRY_S3_REGION='us-east-1' \
+FILEFERRY_S3_ACCESS_KEY_ID='<local-access-key>' \
+FILEFERRY_S3_SECRET_ACCESS_KEY='<local-secret-key>' \
+ferry --repo 's3://fileferry-dev/fileferry/minio/example-repo' init
+```
+
+The opt-in does not allow remote `http://` endpoints.
 
 Set `FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1` for the current Backblaze B2
 development path because Backblaze rejects the create-only `PutObject` header
@@ -267,8 +290,12 @@ runs backup, forget, prune dry-run, prune sweep, and snapshots through the
 objects under only that unique repository prefix.
 
 The Backblaze B2 live drill on 2026-05-22 passed these S3-compatible storage
-and CLI gates under an isolated private development prefix. That is current
-Backblaze provider evidence only; it is not a broad S3 provider support claim.
+and CLI gates under an isolated private development prefix. The local MinIO
+drill on 2026-05-25 passed the storage round trip and command-surface/rekey
+drill under an isolated throwaway bucket prefix with conditional create
+enabled. Backblaze is current cloud-provider evidence only, and MinIO is local
+S3-compatible runtime evidence only; neither is a broad S3 provider support
+claim.
 
 All current FileFerry S3 writes go through `S3Store::put_if_absent`, which
 passes a complete in-memory payload to `object_store::ObjectStore::put_opts`

@@ -179,7 +179,21 @@ an isolated private development prefix with
 capability probe, storage round-trip, CLI init, backup, snapshots, ls, restore,
 check, missing referenced manifest failure, forget,
 key add/remove/rotate/export-recovery, prune dry-run, prune sweep, durable
-prune state, snapshots, and unique-prefix cleanup. This does not claim
-automatic repair, cleanup of stale temporary files, provider-specific S3
-lifecycle management, platform-wide permission behavior, release support on
-every target, or support for every S3-compatible provider.
+prune state, snapshots, and unique-prefix cleanup.
+
+Local MinIO S3-compatible runtime evidence was observed on 2026-05-25 under an
+isolated throwaway bucket prefix in a local Docker container. The drill used
+`FILEFERRY_S3_ALLOW_INSECURE_HTTP=1` with `http://127.0.0.1:39000`, left
+`FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE` unset, and passed
+`cargo test -p fileferry-storage s3_store_round_trip_when_integration_env_is_enabled`
+plus
+`cargo test -p fileferry-cli s3_command_surface_live_integration_when_env_is_enabled`.
+The passing CLI gate covered init, two backups, find, diff, repo verification,
+doctor JSONL diagnostics, encrypted policy set/show, full repository rekey,
+old-passphrase rejection, new-passphrase snapshot reads, post-rekey policy
+readback, and unique-prefix cleanup.
+
+This does not claim automatic repair, cleanup of stale temporary files,
+provider-specific S3 lifecycle management, platform-wide permission behavior,
+release support on every target, cloud-provider support beyond Backblaze B2,
+or support for every S3-compatible provider.

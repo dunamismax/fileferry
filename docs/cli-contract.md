@@ -66,6 +66,7 @@ FILEFERRY_S3_REGION
 FILEFERRY_S3_ACCESS_KEY_ID
 FILEFERRY_S3_SECRET_ACCESS_KEY
 FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE
+FILEFERRY_S3_ALLOW_INSECURE_HTTP
 FILEFERRY_LOG
 ```
 
@@ -803,11 +804,14 @@ has the form `s3://bucket[/prefix]`. The bucket and prefix come from the
 repository URL; credentials must not be embedded in the URL. S3 init requires
 `FILEFERRY_S3_ENDPOINT`, `FILEFERRY_S3_REGION`,
 `FILEFERRY_S3_ACCESS_KEY_ID`, and `FILEFERRY_S3_SECRET_ACCESS_KEY` in the
-environment. S3 endpoints must be HTTPS URLs. Prefix segments currently use
-FileFerry object-key characters: ASCII letters, digits, `.`, `_`, `-`, and
-`=`, separated by `/`. Set `FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1` only
-for providers, such as the current Backblaze B2 development path, that reject
-create-only `PutObject` requests.
+environment. S3 endpoints must be HTTPS URLs by default. Local development
+runtimes may use `http://localhost`, `http://127.*`, or `http://[::1]` only
+when `FILEFERRY_S3_ALLOW_INSECURE_HTTP=1` is set explicitly. Prefix segments
+currently use FileFerry object-key characters: ASCII letters, digits, `.`, `_`,
+`-`, and `=`, separated by `/`. Set
+`FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE=1` only for providers, such as the
+current Backblaze B2 development path, that reject create-only `PutObject`
+requests.
 S3 endpoint values with embedded credentials, query strings, or fragments are
 rejected before the object-store client is built.
 

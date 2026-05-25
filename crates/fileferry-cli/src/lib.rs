@@ -21,7 +21,8 @@ use fileferry_policy::{
 };
 use fileferry_storage::{
     DeleteCapability, ListingCapability, LocalStore, ObjectKeyPrefix, ObjectStore,
-    PolicyObjectStore, S3Store, S3StoreConfig, StorageCapabilities, StorageError, StoragePolicy,
+    PolicyObjectStore, S3EndpointSecurity, S3Store, S3StoreConfig, StorageCapabilities,
+    StorageError, StoragePolicy,
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -3772,6 +3773,7 @@ struct S3RepositoryEnvironment {
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
     disable_conditional_create: bool,
+    allow_insecure_http: bool,
 }
 
 impl std::fmt::Debug for S3RepositoryEnvironment {
@@ -3792,6 +3794,7 @@ impl std::fmt::Debug for S3RepositoryEnvironment {
                 "disable_conditional_create",
                 &self.disable_conditional_create,
             )
+            .field("allow_insecure_http", &self.allow_insecure_http)
             .finish()
     }
 }
@@ -3804,6 +3807,9 @@ impl S3RepositoryEnvironment {
             access_key_id: env::var("FILEFERRY_S3_ACCESS_KEY_ID").ok(),
             secret_access_key: env::var("FILEFERRY_S3_SECRET_ACCESS_KEY").ok(),
             disable_conditional_create: env::var("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE")
+                .ok()
+                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on")),
+            allow_insecure_http: env::var("FILEFERRY_S3_ALLOW_INSECURE_HTTP")
                 .ok()
                 .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on")),
         }
@@ -3826,13 +3832,20 @@ fn s3_repository_config(
         "FILEFERRY_S3_SECRET_ACCESS_KEY",
     )?;
 
-    S3StoreConfig::new(
+    let endpoint_security = if environment.allow_insecure_http {
+        S3EndpointSecurity::AllowInsecureLocalHttp
+    } else {
+        S3EndpointSecurity::HttpsOnly
+    };
+
+    S3StoreConfig::new_with_endpoint_security(
         parsed.bucket,
         region,
         endpoint,
         SecretString::from(access_key_id.to_owned()),
         SecretString::from(secret_access_key.to_owned()),
         parsed.root_prefix,
+        endpoint_security,
     )
     .map(|config| config.with_conditional_create(!environment.disable_conditional_create))
     .map_err(|error| match error {
@@ -6043,6 +6056,7 @@ url = "https://user:secret@example.com/repo?token=sensitive
             access_key_id: Some("application-key-id".to_owned()),
             secret_access_key: Some("application-key".to_owned()),
             disable_conditional_create: true,
+            allow_insecure_http: false,
         };
 
         let config = s3_repository_config("s3://dunamismax-b2/fileferry/dev", &environment)
@@ -6067,6 +6081,29 @@ url = "https://user:secret@example.com/repo?token=sensitive
                 name: "FILEFERRY_S3_ENDPOINT"
             }
         ));
+    }
+
+    #[test]
+    fn s3_repository_config_requires_explicit_local_http_opt_in() {
+        let mut environment = S3RepositoryEnvironment {
+            endpoint: Some("http://127.0.0.1:9000".to_owned()),
+            region: Some("us-east-1".to_owned()),
+            access_key_id: Some("minioadmin".to_owned()),
+            secret_access_key: Some("minioadmin".to_owned()),
+            disable_conditional_create: false,
+            allow_insecure_http: false,
+        };
+
+        let error = s3_repository_config("s3://fileferry-dev/minio", &environment)
+            .expect_err("local http without opt in");
+        assert!(matches!(error, RepositoryError::InvalidS3Config { .. }));
+        assert!(error.to_string().contains("https://"));
+
+        environment.allow_insecure_http = true;
+        let config = s3_repository_config("s3://fileferry-dev/minio", &environment)
+            .expect("local http with opt in");
+        assert_eq!(config.endpoint(), "http://127.0.0.1:9000");
+        assert_eq!(config.root_prefix().as_str(), "minio");
     }
 
     #[test]

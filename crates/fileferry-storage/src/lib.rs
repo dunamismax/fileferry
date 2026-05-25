@@ -4,6 +4,7 @@ use std::{
     fmt,
     future::Future,
     io,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -799,6 +800,13 @@ pub struct S3StoreConfig {
     secret_access_key: SecretString,
     root_prefix: ObjectKeyPrefix,
     conditional_create: bool,
+    allow_insecure_http: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum S3EndpointSecurity {
+    HttpsOnly,
+    AllowInsecureLocalHttp,
 }
 
 impl fmt::Debug for S3StoreConfig {
@@ -812,6 +820,7 @@ impl fmt::Debug for S3StoreConfig {
             .field("secret_access_key", &"[redacted]")
             .field("root_prefix", &self.root_prefix)
             .field("conditional_create", &self.conditional_create)
+            .field("allow_insecure_http", &self.allow_insecure_http)
             .finish()
     }
 }
@@ -825,13 +834,34 @@ impl S3StoreConfig {
         secret_access_key: impl Into<SecretString>,
         root_prefix: ObjectKeyPrefix,
     ) -> StorageResult<Self> {
+        Self::new_with_endpoint_security(
+            bucket,
+            region,
+            endpoint,
+            access_key_id,
+            secret_access_key,
+            root_prefix,
+            S3EndpointSecurity::HttpsOnly,
+        )
+    }
+
+    pub fn new_with_endpoint_security(
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        endpoint: impl Into<String>,
+        access_key_id: impl Into<SecretString>,
+        secret_access_key: impl Into<SecretString>,
+        root_prefix: ObjectKeyPrefix,
+        endpoint_security: S3EndpointSecurity,
+    ) -> StorageResult<Self> {
         let bucket = bucket.into();
         let region = region.into();
         let endpoint = endpoint.into();
 
         validate_s3_config_value("bucket", &bucket)?;
         validate_s3_config_value("region", &region)?;
-        validate_s3_endpoint(&endpoint)?;
+        validate_s3_endpoint(&endpoint, endpoint_security)?;
+        let allow_insecure_http = endpoint.starts_with("http://");
 
         Ok(Self {
             bucket,
@@ -841,6 +871,7 @@ impl S3StoreConfig {
             secret_access_key: secret_access_key.into(),
             root_prefix,
             conditional_create: true,
+            allow_insecure_http,
         })
     }
 
@@ -893,6 +924,7 @@ impl S3Store {
             .with_virtual_hosted_style_request(false)
             .with_conditional_put(S3ConditionalPut::ETagMatch)
             .with_disable_tagging(true)
+            .with_allow_http(config.allow_insecure_http)
             .build()
             .map_err(|source| StorageError::BackendConfig {
                 backend: BackendKind::S3Compatible,
@@ -1058,19 +1090,31 @@ fn validate_s3_config_value(name: &'static str, value: &str) -> StorageResult<()
     Ok(())
 }
 
-fn validate_s3_endpoint(endpoint: &str) -> StorageResult<()> {
+fn validate_s3_endpoint(
+    endpoint: &str,
+    endpoint_security: S3EndpointSecurity,
+) -> StorageResult<()> {
     validate_s3_config_value("endpoint", endpoint)?;
-    if !endpoint.starts_with("https://") {
+    let (scheme, endpoint_rest) = if let Some(rest) = endpoint.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = endpoint.strip_prefix("http://") {
+        ("http", rest)
+    } else {
         return Err(StorageError::BackendConfig {
             backend: BackendKind::S3Compatible,
             reason: "endpoint must be an https:// URL".to_owned(),
         });
-    }
-    let endpoint_rest = &endpoint["https://".len()..];
+    };
     let authority_end = endpoint_rest
         .find(['/', '?', '#'])
         .unwrap_or(endpoint_rest.len());
     let authority = &endpoint_rest[..authority_end];
+    if authority.is_empty() {
+        return Err(StorageError::BackendConfig {
+            backend: BackendKind::S3Compatible,
+            reason: "endpoint authority must not be empty".to_owned(),
+        });
+    }
     if authority.contains('@') {
         return Err(StorageError::BackendConfig {
             backend: BackendKind::S3Compatible,
@@ -1083,8 +1127,47 @@ fn validate_s3_endpoint(endpoint: &str) -> StorageResult<()> {
             reason: "endpoint must not contain query strings or fragments".to_owned(),
         });
     }
+    if scheme == "http" {
+        if endpoint_security != S3EndpointSecurity::AllowInsecureLocalHttp {
+            return Err(StorageError::BackendConfig {
+                backend: BackendKind::S3Compatible,
+                reason:
+                    "endpoint must be an https:// URL unless local insecure HTTP is explicitly enabled"
+                        .to_owned(),
+            });
+        }
+        if !is_local_http_authority(authority) {
+            return Err(StorageError::BackendConfig {
+                backend: BackendKind::S3Compatible,
+                reason: "insecure http:// S3 endpoints are allowed only for localhost or loopback addresses"
+                    .to_owned(),
+            });
+        }
+    }
 
     Ok(())
+}
+
+fn is_local_http_authority(authority: &str) -> bool {
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, remainder)) = rest.split_once(']') else {
+            return false;
+        };
+        if !remainder.is_empty() && !remainder.starts_with(':') {
+            return false;
+        }
+        host
+    } else {
+        authority
+            .split_once(':')
+            .map_or(authority, |(host, _)| host)
+    };
+
+    host == "localhost"
+        || host == "::1"
+        || host
+            .parse::<Ipv4Addr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn redact_url_for_display(value: &str) -> String {
@@ -1435,6 +1518,53 @@ mod tests {
         .expect_err("http endpoint");
 
         assert!(matches!(error, StorageError::BackendConfig { .. }));
+    }
+
+    #[test]
+    fn s3_config_allows_insecure_http_only_for_explicit_local_endpoints() {
+        let config = S3StoreConfig::new_with_endpoint_security(
+            "dev-bucket",
+            "us-east-1",
+            "http://127.0.0.1:9000",
+            "key-id",
+            "secret",
+            ObjectKeyPrefix::new("fileferry/minio").expect("prefix"),
+            S3EndpointSecurity::AllowInsecureLocalHttp,
+        )
+        .expect("local http endpoint");
+
+        assert_eq!(config.endpoint(), "http://127.0.0.1:9000");
+
+        let remote_error = S3StoreConfig::new_with_endpoint_security(
+            "dev-bucket",
+            "us-east-1",
+            "http://s3.example.com",
+            "key-id",
+            "secret",
+            ObjectKeyPrefix::new("fileferry/minio").expect("prefix"),
+            S3EndpointSecurity::AllowInsecureLocalHttp,
+        )
+        .expect_err("remote http endpoint");
+
+        assert!(matches!(remote_error, StorageError::BackendConfig { .. }));
+        assert!(remote_error.to_string().contains("loopback"));
+
+        let loopback_lookalike_error = S3StoreConfig::new_with_endpoint_security(
+            "dev-bucket",
+            "us-east-1",
+            "http://127.example.com",
+            "key-id",
+            "secret",
+            ObjectKeyPrefix::new("fileferry/minio").expect("prefix"),
+            S3EndpointSecurity::AllowInsecureLocalHttp,
+        )
+        .expect_err("loopback-looking hostname");
+
+        assert!(matches!(
+            loopback_lookalike_error,
+            StorageError::BackendConfig { .. }
+        ));
+        assert!(loopback_lookalike_error.to_string().contains("loopback"));
     }
 
     #[test]
@@ -1917,7 +2047,7 @@ mod tests {
             .expect("s3 capability probe");
         assert_eq!(
             report.capabilities,
-            StorageCapabilities::s3_compatible(false)
+            StorageCapabilities::s3_compatible(store.conditional_create)
         );
         assert!(
             !store
@@ -2008,17 +2138,30 @@ mod tests {
         let unique_prefix = format!("{configured_prefix}/run-{}", unique_test_id());
         let root_prefix = ObjectKeyPrefix::new(unique_prefix).expect("valid s3 test prefix");
 
+        let endpoint_security = if std::env::var("FILEFERRY_S3_ALLOW_INSECURE_HTTP")
+            .ok()
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        {
+            S3EndpointSecurity::AllowInsecureLocalHttp
+        } else {
+            S3EndpointSecurity::HttpsOnly
+        };
+        let conditional_create = !std::env::var("FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE")
+            .ok()
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"));
+
         Some(
-            S3StoreConfig::new(
+            S3StoreConfig::new_with_endpoint_security(
                 required_env("FILEFERRY_S3_BUCKET"),
                 required_env("FILEFERRY_S3_REGION"),
                 required_env("FILEFERRY_S3_ENDPOINT"),
                 required_env("FILEFERRY_S3_ACCESS_KEY_ID"),
                 required_env("FILEFERRY_S3_SECRET_ACCESS_KEY"),
                 root_prefix,
+                endpoint_security,
             )
             .expect("s3 config")
-            .with_conditional_create(false),
+            .with_conditional_create(conditional_create),
         )
     }
 

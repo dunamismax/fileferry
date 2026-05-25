@@ -194,8 +194,9 @@ This is release-candidate security engineering, not an external audit claim.
 - `ferry policy` stores retention policy config in encrypted repository
   objects. Stored policies are applied to `forget` only when a policy id is
   supplied explicitly with `ferry forget --policy <POLICY_ID>`.
-- S3-compatible behavior is tested against the current abstraction and a
-  private Backblaze B2 development bucket. It is not a blanket claim for every
+- S3-compatible behavior is tested against the current abstraction, a private
+  Backblaze B2 development bucket, and a local MinIO runtime. Backblaze is the
+  only current cloud-provider evidence; this is not a blanket claim for every
   S3-compatible provider.
 
 ## Architecture

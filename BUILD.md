@@ -47,10 +47,13 @@ Implemented and tested in current main:
 - S3-compatible hardening evidence for capability probe, retry policy, prefix
   listing surprises, missing objects, permission denial, prune resume, and
   missing-candidate handling, plus a reusable gated command-surface/rekey
-  provider drill for live S3-compatible repositories.
+  provider drill for live S3-compatible repositories. Current provider
+  evidence covers Backblaze B2 over HTTPS with conditional create disabled and
+  local MinIO over explicit loopback HTTP with conditional create enabled.
 - Local restore drills and live Backblaze B2 S3-compatible drills under an
-  isolated private development prefix. This is provider evidence, not a broad
-  S3-provider support claim.
+  isolated private development prefix, plus local MinIO S3-compatible
+  command-surface/rekey evidence under an isolated throwaway bucket prefix.
+  This is provider evidence, not a broad S3-provider support claim.
 - Platform metadata scaffolding and per-target tests for the documented
   current metadata scope in `fileferry-platform`.
 - `xtask release-package`, `archive-smoke`, and
@@ -154,7 +157,7 @@ Additional command surface:
 - [x] `ferry doctor`.
 - [x] Recovery import.
 - [x] Full repository rekey.
-- [ ] Broader storage providers.
+- [x] Broader storage providers.
 
 Out of scope for v1: GUI, TUI, daemon, server, scheduler, SaaS, mobile app,
 FUSE mount, and compatibility with existing backup repository formats.
@@ -189,9 +192,11 @@ FUSE mount, and compatibility with existing backup repository formats.
 - Command leases cover current mutation paths. They are not a full stale-lease
   repair system or broad concurrent-backup proof.
 - S3-compatible behavior must be described only to the level backed by current
-  tests and, for provider claims, current live evidence. A gated provider drill
-  is harness coverage, not provider evidence until it has been run against that
-  exact provider configuration.
+  tests and, for provider claims, current live evidence. Current cloud-provider
+  evidence is Backblaze B2 only; local MinIO evidence proves a loopback
+  S3-compatible runtime path with conditional create enabled. A gated provider
+  drill is harness coverage, not provider evidence until it has been run
+  against that exact provider configuration.
 
 ---
 

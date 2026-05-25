@@ -18,6 +18,7 @@ fn fileferry() -> Command {
         "FILEFERRY_S3_ACCESS_KEY_ID",
         "FILEFERRY_S3_SECRET_ACCESS_KEY",
         "FILEFERRY_S3_DISABLE_CONDITIONAL_CREATE",
+        "FILEFERRY_S3_ALLOW_INSECURE_HTTP",
         "FILEFERRY_LOG",
     ] {
         command.env_remove(variable);
