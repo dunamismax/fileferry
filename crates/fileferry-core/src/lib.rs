@@ -15647,16 +15647,16 @@ mod tests {
                         entry.metadata.created = MetadataValue::Unsupported;
                     }
                     #[cfg(unix)]
-                    if entry.relative_path == Path::new("docs") {
-                        if let Some(unix) = &mut entry.metadata.unix {
-                            unix.mode |= 0o1000;
-                        }
+                    if entry.relative_path == Path::new("docs")
+                        && let Some(unix) = &mut entry.metadata.unix
+                    {
+                        unix.mode |= 0o1000;
                     }
                     #[cfg(unix)]
-                    if entry.relative_path == Path::new("docs/sample.txt") {
-                        if let Some(unix) = &mut entry.metadata.unix {
-                            unix.mode |= 0o4000;
-                        }
+                    if entry.relative_path == Path::new("docs/sample.txt")
+                        && let Some(unix) = &mut entry.metadata.unix
+                    {
+                        unix.mode |= 0o4000;
                     }
                 }
             },
