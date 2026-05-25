@@ -179,7 +179,7 @@ Purpose: finish portable timestamp behavior before deeper platform extensions.
       macOS, and Windows.
 - [ ] Implement creation/birth timestamp application only where the destination
       platform and filesystem can actually represent it.
-- [ ] Keep creation/birth timestamp warnings where capture or destination
+- [x] Keep creation/birth timestamp warnings where capture or destination
       representation is unsupported.
 - [ ] Add platform-gated tests for successful timestamp restore and warning
       paths on each supported target.

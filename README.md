@@ -162,7 +162,9 @@ claim.
   ownership without calling `chown`.
 - xattr values, ACL contents, file flags, resource forks, Windows attributes,
   sparse extent maps, symlink metadata, accessed timestamps, and
-  creation/birth timestamps are not restored by this version.
+  creation/birth timestamps are not restored by this version. Creation/birth
+  timestamps remain warning-only pending platform-specific restore primitives
+  and filesystem representability tests for Linux, macOS, and Windows.
 - `ferry key rotate` remains unlock rotation by adding/removing key slots.
   Use `ferry key rekey` when the intended operation is a new repository master
   key and object rewrite.

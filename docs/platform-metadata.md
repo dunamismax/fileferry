@@ -58,11 +58,47 @@ The current portable timestamp restore target is deliberately narrow:
 - Accessed timestamps are not captured in the current manifest schema and are
   not restore targets in this version.
 - Creation/birth timestamps may be captured when the source platform exposes
-  them, but they are warning-only in this version and are not restore targets
-  until platform APIs and filesystem representability limits are verified for
-  Linux, macOS, and Windows.
+  them, but they are warning-only in this version.
 - Symlink timestamps are warning-only until a no-follow timestamp application
   path is implemented and tested for each claimed destination platform.
+
+Creation/birth timestamp restore decision as of 2026-05-25:
+
+- Linux: `statx(2)` can expose `stx_btime` when the filesystem reports
+  `STATX_BTIME`, but the current Linux timestamp-setting interfaces
+  `utimensat(2)` and `futimens(2)` set only access time and modification time.
+  FileFerry therefore treats captured Linux creation/birth timestamps as
+  warning-only.
+- macOS: `setattrlist(2)` can set `ATTR_CMN_CRTIME`, and its option set
+  includes `FSOPT_NOFOLLOW`; Apple also documents volume-specific
+  `setattrlist` support and `ENOTSUP` for unsupported volumes. FileFerry has
+  not yet implemented or tested a regular-file and directory creation-time
+  restore primitive on top of that API, so macOS creation/birth timestamps stay
+  warning-only.
+- Windows: `SetFileTime` can set creation, access, and write time for a file
+  or directory handle opened with `FILE_WRITE_ATTRIBUTES`, but Microsoft
+  documents filesystem-specific timestamp support and resolution differences.
+  FileFerry has not yet implemented or tested a Windows creation-time restore
+  primitive, so Windows creation timestamps stay warning-only.
+- Rust stable `std::fs::FileTimes` exposes portable setters for accessed and
+  modified timestamps. Current Rust also exposes OS-specific `set_created`
+  extension traits on Apple and Windows, but not as a portable Linux/Windows/
+  macOS abstraction. FileFerry will not graduate creation/birth timestamp
+  restore until platform-specific primitives, representability handling,
+  machine output, docs, and platform-gated tests all agree.
+
+Primary references checked for this decision:
+
+- Linux `statx(2)`:
+  <https://man7.org/linux/man-pages/man2/statx.2.html>
+- Linux `utimensat(2)` / `futimens(2)`:
+  <https://man7.org/linux/man-pages/man2/utimensat.2.html>
+- Apple `setattrlist(2)`:
+  <https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/setattrlist.2.html>
+- Microsoft `SetFileTime`:
+  <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfiletime>
+- Rust `std::fs::FileTimes`:
+  <https://doc.rust-lang.org/std/fs/struct.FileTimes.html>
 
 Current implementation status: initialized local and S3-compatible repository
 restores apply captured modified timestamps for restored regular files and

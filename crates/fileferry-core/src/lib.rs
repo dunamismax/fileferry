@@ -15483,6 +15483,83 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_keeps_created_timestamp_warning_only() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::write(source.path().join("sample.txt"), b"sample").expect("write sample");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let created = Timestamp {
+            seconds: 1_700_000_123,
+            nanoseconds: 456,
+        };
+        let (snapshot_id, _) = replace_committed_manifest_for_tests(
+            &pipeline,
+            &store,
+            &master_key,
+            &result,
+            |manifest| {
+                let file = manifest
+                    .body
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.relative_path == Path::new("sample.txt"))
+                    .expect("sample manifest entry");
+                file.metadata.created = MetadataValue::Captured(created);
+            },
+        )
+        .await;
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id,
+                    paths: vec![PathBuf::from("sample.txt")],
+                    destination: destination.path().join("restored"),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert_eq!(restored.files.len(), 1);
+        assert_eq!(
+            restored.metadata_planned,
+            planned_metadata_field_count_for_file_and_directory_entries(1)
+        );
+        assert!(restored.metadata_warnings.iter().any(|warning| {
+            warning.relative_path == Path::new("sample.txt")
+                && warning.namespace == "portable"
+                && warning.field == "created"
+                && warning.reason == "created timestamp is not restored by this version"
+        }));
+        assert_eq!(
+            fs::read(destination.path().join("restored/sample.txt")).expect("restored sample"),
+            b"sample"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn apply_restored_unix_mode_masks_file_type_and_warns_for_special_bits() {

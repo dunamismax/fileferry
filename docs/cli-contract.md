@@ -883,7 +883,12 @@ ownership does not match, but it does not call `chown`. Symlink targets are
 restored, but symlink timestamps and captured Unix symlink mode/ownership are
 reported as not restored. Creation/birth time for regular files and
 directories is reported as a structured `portable`/`created` warning because
-this version does not restore it. Reportable xattr presence/count status is
+this version does not restore it. Linux currently has read-side birth-time
+evidence through `statx(2)` when the filesystem reports `STATX_BTIME`, but
+the normal Linux timestamp setters update only access and modification times;
+macOS and Windows have creation-time APIs with filesystem or volume caveats,
+but FileFerry has not yet implemented and tested those platform-specific
+restore primitives. Reportable xattr presence/count status is
 captured where xattr listing is exposed, but xattr names and values are not
 restored; the observed macOS `com.apple.provenance` implementation detail is
 not counted as reportable restore metadata. ACL status scaffolding is present
